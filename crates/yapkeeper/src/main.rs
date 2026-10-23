@@ -435,12 +435,13 @@ fn print_sessions(
     ExitCode::SUCCESS
 }
 
-/// Words rather than colour, so the state survives `NO_COLOR` and `grep`.
+/// Words rather than colour, so the state survives `NO_COLOR` and `grep`;
+/// the same words `is:` takes.
 fn state_label(availability: Availability) -> &'static str {
     match availability {
         Availability::Available => "",
-        Availability::Orphaned => "orphaned",
-        Availability::Unavailable => "unavailable",
+        Availability::Orphaned => State::Orphaned.name(),
+        Availability::Unavailable => State::Unavailable.name(),
     }
 }
 

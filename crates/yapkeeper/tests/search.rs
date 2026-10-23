@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use yapkeeper::{DataDir, Listed, Listing, Query, Roots, hide, rebuild, search, unhide};
+use yapkeeper::{
+    Availability, DataDir, Listed, Listing, Query, Roots, hide, rebuild, search, unhide,
+};
 
 /// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and data directory, each empty.
 struct Histories {
@@ -570,6 +572,32 @@ fn unhiding_brings_a_session_back() {
     assert!(!shown[0].hidden);
     assert_eq!(sorted(histories.found("")), [A, B]);
     assert!(histories.found("is:hidden").is_empty());
+}
+
+#[test]
+fn hide_and_unhide_give_back_the_location_a_listing_shows() {
+    let histories = Histories::new();
+    histories.claude(
+        A,
+        &[prompt_in("/tmp/yapkeeper-synthetic-scratch", "Try it out")],
+    );
+
+    let hidden = hide(&histories.roots(), &histories.data(), A).unwrap();
+    assert_eq!(ids_of(&hidden), [A]);
+    assert!(hidden[0].hidden);
+    assert!(hidden[0].location.temp);
+    assert_eq!(hidden[0].location.availability, Availability::Orphaned);
+    let listed = histories.search(Query::parse(
+        "is:hidden is:temp",
+        &histories.roots().providers(),
+    ));
+    assert_eq!(listed.sessions.len(), 1);
+    assert_eq!(hidden[0].location, listed.sessions[0].location);
+
+    let shown = unhide(&histories.roots(), &histories.data(), A).unwrap();
+    assert_eq!(ids_of(&shown), [A]);
+    assert!(!shown[0].hidden);
+    assert_eq!(shown[0].location, hidden[0].location);
 }
 
 #[test]

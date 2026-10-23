@@ -201,10 +201,11 @@ pub fn root_from_env(variable: &'static str, home_subdir: &str) -> Result<PathBu
     }
 }
 
-/// Neither a provider's root variable nor `HOME` names a directory to read.
+/// Neither a directory's own variable nor `HOME` names a directory.
 #[derive(Debug)]
 pub struct MissingHome {
-    /// The provider's own variable, such as `CLAUDE_CONFIG_DIR`.
+    /// The directory's own variable, such as `CLAUDE_CONFIG_DIR` or
+    /// `XDG_DATA_HOME`.
     pub variable: &'static str,
 }
 

@@ -1,7 +1,6 @@
 //! The index: Yapkeeper's rebuildable SQLite copy of every session and its
-//! searchable text, and finds the sessions whose text contains every word
-//! of a query and none of its excluded words. It
-//! owns the schema and the refresh rule (which history files are opened, and
+//! searchable text. It finds the sessions whose text contains every word of
+//! a query and none of its excluded words. It owns the schema and the refresh rule (which history files are opened, and
 //! from which byte), keeps each file's digest as text it never looks inside,
 //! and hides how text is found fast: full-text tables, the trigram limit and
 //! which rows count as tool-level.
@@ -24,7 +23,7 @@ use yapkeeper_model::{
 };
 
 use crate::query::{self, Query, Word};
-use crate::{Cause, DataError, DataFile, LeftOut, Listed, Listing, Location, SessionKey};
+use crate::{BUSY_TIMEOUT, Cause, DataError, DataFile, SessionKey};
 
 const SCHEMA_VERSION: i64 = 2;
 
@@ -109,22 +108,38 @@ const PHRASE: &str = r#"'"' || replace(?1, '"', '""') || '"'"#;
 const CONVERSATION: &str =
     "messages.role IN ('user', 'assistant') AND threads.thread = threads.session_id";
 
+/// What a refresh of the index found: its sessions that match a query's
+/// words, in no particular order, and what the refresh read.
+pub(crate) struct Refreshed {
+    pub(crate) sessions: Vec<Session>,
+    /// Every session in the index, whether or not the words kept it.
+    pub(crate) indexed: usize,
+    /// Malformed complete lines in every indexed file.
+    pub(crate) malformed_lines: usize,
+    /// Each adapter's history directory, in adapter order.
+    pub(crate) searched: Vec<PathBuf>,
+    /// History files opened during this call.
+    pub(crate) files_read: usize,
+    /// History bytes read during this call.
+    pub(crate) bytes_read: u64,
+}
+
 /// Brings the index at `path` up to date with every source of `adapters`,
 /// opening only files that changed since the last call, and returns its
-/// sessions that match `query`'s words, in no particular order, with their
-/// locations read from the disk now.
+/// sessions that match `query`'s words. Fails only when the index can't be
+/// created or written.
 pub(crate) fn refresh(
     adapters: &[&dyn Adapter],
     path: &Path,
     query: &Query,
-) -> Result<Listing, DataError> {
+) -> Result<Refreshed, DataError> {
     let indexed = open(path).and_then(|mut connection| {
-        // Immediate, so two listings at once take turns instead of both
+        // Immediate, so two refreshes at once take turns instead of both
         // reading the same files and one failing to write.
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let listing = refresh_in(&transaction, adapters, query)?;
+        let refreshed = refresh_in(&transaction, adapters, query)?;
         transaction.commit()?;
-        Ok(listing)
+        Ok(refreshed)
     });
     indexed.map_err(|source| DataError {
         path: path.to_path_buf(),
@@ -163,7 +178,7 @@ fn open(path: &Path) -> Result<Connection, Cause> {
         fs::create_dir_all(dir)?;
     }
     open_as_is(path).or_else(|error| {
-        // A busy index is one another listing is using, not a broken one.
+        // A busy index is one another refresh is using, not a broken one.
         if is_busy(error.as_ref()) {
             return Err(error);
         }
@@ -181,12 +196,12 @@ fn is_busy(error: &(dyn Error + 'static)) -> bool {
 
 fn open_as_is(path: &Path) -> Result<Connection, Cause> {
     let connection = Connection::open(path)?;
-    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     match version {
         SCHEMA_VERSION => {}
-        // A new database; `IF NOT EXISTS` lets two first listings race safely.
+        // A new database; `IF NOT EXISTS` lets two first refreshes race safely.
         0 => {
             connection.execute_batch(SCHEMA)?;
             connection.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -225,7 +240,7 @@ fn refresh_in(
     transaction: &Transaction,
     adapters: &[&dyn Adapter],
     query: &Query,
-) -> Result<Listing, Cause> {
+) -> Result<Refreshed, Cause> {
     let mut files_read = 0;
     let mut bytes_read = 0;
     let mut searched = Vec::new();
@@ -321,23 +336,13 @@ fn refresh_in(
     }
     let indexed = sessions.len();
     retain_matching(transaction, query, &mut sessions)?;
-    Ok(Listing {
-        sessions: sessions
-            .into_iter()
-            .map(|session| Listed {
-                location: Location::of(&session.working_dir, &session.recorded_git),
-                session,
-                // Hides live in the preferences, which the index never reads.
-                hidden: false,
-            })
-            .collect(),
+    Ok(Refreshed {
+        sessions,
         indexed,
         malformed_lines: malformed_lines as usize,
         searched,
         files_read,
         bytes_read,
-        // Only the query's selection knows what its defaults leave out.
-        left_out: LeftOut::default(),
     })
 }
 
@@ -700,12 +705,12 @@ mod tests {
         );
 
         stub.version.set(2);
-        let listing = refresh(&[&stub], &index, &Query::default()).unwrap();
-        assert_eq!(listing.files_read, 2);
-        let titles: Vec<&str> = listing
+        let refreshed = refresh(&[&stub], &index, &Query::default()).unwrap();
+        assert_eq!(refreshed.files_read, 2);
+        let titles: Vec<&str> = refreshed
             .sessions
             .iter()
-            .map(|listed| listed.session.title.as_str())
+            .map(|session| session.title.as_str())
             .collect();
         assert_eq!(
             titles,

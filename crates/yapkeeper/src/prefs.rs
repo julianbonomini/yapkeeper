@@ -5,12 +5,11 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, params};
 use yapkeeper_model::Session;
 
-use crate::{Cause, DataError, DataFile, SessionKey};
+use crate::{BUSY_TIMEOUT, Cause, DataError, DataFile, SessionKey};
 
 const SCHEMA_VERSION: i64 = 1;
 
@@ -55,7 +54,7 @@ fn read(path: &Path) -> Result<HashSet<SessionKey>, Cause> {
     }
     // Read-only, so listing never changes the file.
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
     check_version(&connection)?;
     let mut statement = connection.prepare("SELECT provider, id FROM hidden")?;
     let rows = statement.query_map([], |row| {
@@ -69,7 +68,7 @@ fn read(path: &Path) -> Result<HashSet<SessionKey>, Cause> {
 
 /// Records `choice` for each of `sessions`, creating the file at `path` when
 /// missing. Hiding a hidden session or unhiding a shown one changes nothing.
-pub(crate) fn record(path: &Path, sessions: &[&Session], choice: Choice) -> Result<(), DataError> {
+pub(crate) fn record(path: &Path, sessions: &[Session], choice: Choice) -> Result<(), DataError> {
     write(path, sessions, choice).map_err(|source| failure(path, source))
 }
 
@@ -81,12 +80,12 @@ fn failure(path: &Path, source: Cause) -> DataError {
     }
 }
 
-fn write(path: &Path, sessions: &[&Session], choice: Choice) -> Result<(), Cause> {
+fn write(path: &Path, sessions: &[Session], choice: Choice) -> Result<(), Cause> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
     let mut connection = Connection::open(path)?;
-    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
     if version(&connection)? == 0 {
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;

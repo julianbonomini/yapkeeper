@@ -18,6 +18,7 @@ use prefs::Choice;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use yapkeeper_claude::ClaudeCode;
 use yapkeeper_codex::Codex;
@@ -161,6 +162,10 @@ pub struct DataError {
     source: Cause,
 }
 
+/// How long the index or the preferences wait for another `yapkeeper`
+/// process that is writing them.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Why one of Yapkeeper's own files failed.
 type Cause = Box<dyn Error + Send + Sync>;
 
@@ -225,13 +230,26 @@ pub fn list(roots: &Roots, data: &DataDir) -> Result<Listing, DataError> {
 /// recent `last_active` first, ties by provider then id. The other fields
 /// are as `list` gives them. Fails only as `list` does.
 pub fn search(roots: &Roots, data: &DataDir, query: &Query) -> Result<Listing, DataError> {
-    let mut listing = refresh(roots, data, query)?;
+    let refreshed = refresh(roots, data, query)?;
     let hides = prefs::hides(&data.prefs())?;
-    for listed in &mut listing.sessions {
-        listed.hidden = hides.contains(&listed.session);
-    }
-    listing.left_out = query.select(&mut listing.sessions);
-    Ok(listing)
+    let mut sessions: Vec<Listed> = refreshed
+        .sessions
+        .into_iter()
+        .map(|session| {
+            let hidden = hides.contains(&session);
+            listed(session, hidden)
+        })
+        .collect();
+    let left_out = query.select(&mut sessions);
+    Ok(Listing {
+        sessions,
+        indexed: refreshed.indexed,
+        malformed_lines: refreshed.malformed_lines,
+        searched: refreshed.searched,
+        files_read: refreshed.files_read,
+        bytes_read: refreshed.bytes_read,
+        left_out,
+    })
 }
 
 /// Hides every session whose id is `id`, temp, orphaned or already hidden
@@ -257,23 +275,31 @@ fn set_hidden(
     choice: Choice,
 ) -> Result<Vec<Listed>, DataError> {
     // Straight from the index, so temp and hidden sessions are found too.
-    let listing = refresh(roots, data, &Query::default())?;
-    let mut sessions: Vec<Listed> = listing
+    let matched: Vec<Session> = refresh(roots, data, &Query::default())?
         .sessions
         .into_iter()
-        .filter(|listed| listed.session.id == id)
+        .filter(|session| session.id == id)
         .collect();
-    let matched: Vec<&Session> = sessions.iter().map(|listed| &listed.session).collect();
     prefs::record(&data.prefs(), &matched, choice)?;
-    for listed in &mut sessions {
-        listed.hidden = choice == Choice::Hide;
+    let hidden = choice == Choice::Hide;
+    Ok(matched
+        .into_iter()
+        .map(|session| listed(session, hidden))
+        .collect())
+}
+
+/// `session` with its location read from the disk now.
+fn listed(session: Session, hidden: bool) -> Listed {
+    Listed {
+        location: Location::of(&session.working_dir, &session.recorded_git),
+        session,
+        hidden,
     }
-    Ok(sessions)
 }
 
 /// The index brought up to date, and its sessions with `query`'s words,
-/// unfiltered, unordered and none hidden yet.
-fn refresh(roots: &Roots, data: &DataDir, query: &Query) -> Result<Listing, DataError> {
+/// unfiltered and unordered.
+fn refresh(roots: &Roots, data: &DataDir, query: &Query) -> Result<index::Refreshed, DataError> {
     let adapters = adapters(roots);
     let adapters: Vec<&dyn Adapter> = adapters.iter().map(Box::as_ref).collect();
     index::refresh(&adapters, &data.index(), query)

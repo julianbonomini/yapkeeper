@@ -41,7 +41,7 @@ A query token that isn't a search word: `@where`, `#provider` or `is:state`, opt
 Tool calls, tool output and subagent transcripts: text that belongs to a session but is not the person and the assistant talking. Searched only on request.
 
 **Adapter**:
-The provider-specific part of Yapkeeper that names the directory a provider's history is under, discovers the history files there, reads it without modifying it by turning each record into facts, and builds the resume command. The shared model combines facts into sessions; the index and interface see only sessions.
+The provider-specific part of Yapkeeper that names the directory a provider's history is under, discovers the history files there, reads it without modifying it by turning each record into facts, and builds the resume command. The shared model folds facts into sessions; the index stores those sessions with each file's messages, and the interface sees only sessions.
 
 **Index**:
 Yapkeeper's rebuildable copy of every session and its searchable text, in `index.sqlite`. Deleting it loses nothing; the next listing builds it again.

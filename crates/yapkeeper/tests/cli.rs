@@ -192,11 +192,25 @@ fn help_describes_the_list_command() {
         let stdout = stdout(&output);
         assert!(stdout.contains("list"), "{args:?}: {stdout}");
     }
+}
 
+#[test]
+fn no_arguments_without_a_terminal_print_help_and_say_the_palette_needs_one() {
+    let home = tempfile::tempdir().unwrap();
+    // `output()` gives the child a null stdin and a piped stdout.
     let output = yapkeeper(&[], home.path(), None);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(stdout(&output), "");
-    assert!(stderr(&output).contains("list"), "{}", stderr(&output));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("list"), "{stderr}");
+    assert_eq!(
+        stderr.lines().last(),
+        Some(
+            "yapkeeper: the palette needs a terminal; \
+             yapkeeper list and yapkeeper search work in scripts"
+        ),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -606,7 +620,7 @@ fn list_fails_naming_the_index_when_it_cannot_be_written() {
     let index = not_a_dir.join("yapkeeper/index.sqlite");
     assert!(
         stderr.starts_with(&format!(
-            "yapkeeper: can't write the index at {}: ",
+            "yapkeeper: can't use the index at {}: ",
             index.display()
         )),
         "{stderr}"

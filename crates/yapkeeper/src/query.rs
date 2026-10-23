@@ -10,6 +10,7 @@
 //! a second `!` is just text. Sigils and names ignore case; words keep smart
 //! case.
 
+use std::borrow::Borrow;
 use std::ops::Range;
 
 use crate::{Availability, LeftOut, Listed, Place};
@@ -183,7 +184,7 @@ impl Query {
     /// left out unless the query has a non-negated `is:temp`, and hidden
     /// ones unless it has `is:hidden`; returns which of the two defaults
     /// left out a session every filter admits.
-    pub(crate) fn select(&self, sessions: &mut Vec<Listed>) -> LeftOut {
+    pub(crate) fn select<L: Borrow<Listed>>(&self, sessions: &mut Vec<L>) -> LeftOut {
         let asked = |state| {
             self.conditions.iter().any(|condition| {
                 !condition.negated && condition.filter == Filter::State(Some(state))
@@ -192,6 +193,7 @@ impl Query {
         let (temp_asked, hidden_asked) = (asked(State::Temp), asked(State::Hidden));
         let mut left_out = LeftOut::default();
         sessions.retain(|listed| {
+            let listed = listed.borrow();
             let admitted = self
                 .conditions
                 .iter()
@@ -203,6 +205,7 @@ impl Query {
             admitted && !temp && !hidden
         });
         sessions.sort_by(|a, b| {
+            let (a, b) = (a.borrow(), b.borrow());
             State::Orphaned
                 .of(a)
                 .cmp(&State::Orphaned.of(b))

@@ -52,5 +52,8 @@ The user's own choices, such as hidden sessions, in `prefs.sqlite`, kept apart f
 **Title**:
 The name shown for a session: the one the user set, else the one the provider generated, else the first prompt the user typed. Injected context never counts as a prompt.
 
+**Palette**:
+The full-screen view `yapkeeper` opens on a terminal: a query line, the matching sessions, and key hints, searched live as the user types.
+
 **Preview**:
 The conversation text displayed for a selected session before resuming it.

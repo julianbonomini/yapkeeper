@@ -109,6 +109,8 @@ Terminals cannot report whether a Nerd Font is installed, so the icon set has to
 | `Esc` | Clear the query, then quit |
 | `Ctrl+C` | Quit |
 
+The selection stops at the first and last rows and returns to the first row whenever the query changes.
+
 Every printable key goes to the query, so all actions use `Enter`, arrows, `Tab`, or `Ctrl` keys. This is why hide has no undo key in the palette: the toast points to `is:hidden` instead.
 
 ## Resume dialog
@@ -119,7 +121,7 @@ For an orphaned session the dialog explains that the folder is gone and offers `
 
 ## Loading
 
-`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. Unlike the prototype below, it keeps tool output, capped like tool calls, so `--tools` can search it.
+`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. The palette loads the index once at launch, refreshing it first as `list` does, and searches that snapshot while the user types. It does not see changes made after launch. Unlike the prototype below, the index keeps tool output, capped like tool calls, so `--tools` can search it.
 
 The prototype reads every history file at launch, in parallel threads, without an index. On the real histories (866 files, 1.18 GB) it loaded 783 sessions in about 0.3 s with 55 MB peak memory on the user's Mac. It skips tool results, keeps tool calls as one-line summaries, caps messages at 4,000 characters, and drops injected context such as command caveats, `AGENTS.md` instructions, and environment blocks. Sessions with no user prompt (64) and Codex subagent sessions (19) are left out.
 
@@ -134,6 +136,7 @@ Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` wh
 
 | Command | stdout | stderr |
 |---|---|---|
+| `yapkeeper` | Nothing | On a terminal, opens the palette. Otherwise help, then `yapkeeper: the palette needs a terminal; yapkeeper list and yapkeeper search work in scripts`, exiting 2 |
 | `yapkeeper list [--ids]` | One line per session outside temp folders and not hidden, orphaned last, each group most recent first; `--ids` starts each line with the session's id | No sessions found, no sessions outside temp folders (with the `is:temp` hint) or every session hidden (with the `is:hidden` hint), malformed lines skipped |
 | `yapkeeper search [--ids] [--tools] <query>…` | Sessions matching every word and filter of the query language, one line each, as `list` | No sessions found, no sessions match (with a `--tools` hint when the query has words), no sessions outside temp folders (with the `is:temp` hint) or every session hidden (with the `is:hidden` hint), unknown provider or state names (with the valid names), malformed lines skipped |
 | `yapkeeper paths` | `index` and `preferences`, each followed by its path in a space-aligned column | Nothing |
@@ -141,7 +144,7 @@ Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` wh
 | `yapkeeper hide <id>` | Nothing | `yapkeeper: hid "<title>"; yapkeeper search is:hidden lists it`, or, exiting 1, no session has the id (with the `list --ids` hint) |
 | `yapkeeper unhide <id>` | Nothing | `yapkeeper: unhid "<title>"`, or the same error as `hide` |
 
-When the index can't be written or the preferences can't be read or written, any command that uses them exits 1. Its stderr ends with `Check its permissions, or set XDG_DATA_HOME.` Hiding a session that is already hidden, or unhiding one that is shown, succeeds and changes nothing.
+When the index can't be used or the preferences can't be read or written, any command that uses them exits 1, saying `can't use the index` or `can't use the preferences`. Its stderr ends with `Check its permissions, or set XDG_DATA_HOME.` Hiding a session that is already hidden, or unhiding one that is shown, succeeds and changes nothing.
 
 The help footer names each provider's history directory and the index and preferences paths, as this environment resolves them; when a history directory can't be resolved, it says why instead. `search --help` names every state the query language accepts, and every provider when the history directories resolve.
 

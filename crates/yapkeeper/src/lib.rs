@@ -4,17 +4,22 @@
 //! index of every session up to date, finds sessions by what was said and
 //! by the query language's filters, reads each session's location from
 //! the disk when it is listed, and keeps the user's hides apart from the
-//! index.
+//! index. A `Catalog` loads all of that once so it can be searched many
+//! times, as the `palette` does while the person types; `line` holds how a
+//! session reads as one line of terminal text, for the palette and the CLI.
 
 #![forbid(unsafe_code)]
 
 mod index;
+pub mod line;
 mod location;
+pub mod palette;
 mod prefs;
 mod query;
 
 use prefs::Choice;
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
@@ -147,6 +152,7 @@ pub struct LeftOut {
 }
 
 /// A session with its location and whether it is hidden, as of this listing.
+#[derive(Clone)]
 pub struct Listed {
     pub session: Session,
     pub location: Location,
@@ -171,7 +177,7 @@ type Cause = Box<dyn Error + Send + Sync>;
 
 /// A session as the index and the preferences name it: by provider as well
 /// as id, so two providers can never share one.
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct SessionKey {
     provider: String,
     id: String,
@@ -195,7 +201,7 @@ enum DataFile {
 impl fmt::Display for DataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let what = match self.file {
-            DataFile::Index => "write the index",
+            DataFile::Index => "use the index",
             DataFile::Preferences => "use the preferences",
         };
         write!(
@@ -230,26 +236,96 @@ pub fn list(roots: &Roots, data: &DataDir) -> Result<Listing, DataError> {
 /// recent `last_active` first, ties by provider then id. The other fields
 /// are as `list` gives them. Fails only as `list` does.
 pub fn search(roots: &Roots, data: &DataDir, query: &Query) -> Result<Listing, DataError> {
-    let refreshed = refresh(roots, data, query)?;
-    let hides = prefs::hides(&data.prefs())?;
-    let mut sessions: Vec<Listed> = refreshed
-        .sessions
-        .into_iter()
-        .map(|session| {
-            let hidden = hides.contains(&session);
-            listed(session, hidden)
-        })
-        .collect();
-    let left_out = query.select(&mut sessions);
+    listing(&Catalog::open(roots, data)?, query)
+}
+
+/// What `catalog.search` finds for `query`, with what opening it read.
+fn listing(catalog: &Catalog, query: &Query) -> Result<Listing, DataError> {
+    let found = catalog.search(query)?;
     Ok(Listing {
-        sessions,
-        indexed: refreshed.indexed,
-        malformed_lines: refreshed.malformed_lines,
-        searched: refreshed.searched,
-        files_read: refreshed.files_read,
-        bytes_read: refreshed.bytes_read,
-        left_out,
+        sessions: found.sessions.into_iter().cloned().collect(),
+        indexed: catalog.indexed(),
+        malformed_lines: catalog.malformed_lines,
+        searched: catalog.searched.clone(),
+        files_read: catalog.files_read,
+        bytes_read: catalog.bytes_read,
+        left_out: found.left_out,
     })
+}
+
+/// Every indexed session as of `Catalog::open`, with its location and
+/// whether it is hidden, ready to be searched many times without
+/// refreshing the index or rereading the disk.
+pub struct Catalog {
+    index: index::Index,
+    /// Every session in the index, in no particular order.
+    sessions: Vec<Listed>,
+    providers: Vec<&'static str>,
+    malformed_lines: usize,
+    searched: Vec<PathBuf>,
+    files_read: usize,
+    bytes_read: u64,
+}
+
+/// What one query found in a catalog.
+pub struct Found<'c> {
+    /// In `search`'s order.
+    pub sessions: Vec<&'c Listed>,
+    pub left_out: LeftOut,
+}
+
+impl Catalog {
+    /// Brings the index up to date as `list` does, then reads the hides and
+    /// every session's location from the disk once. Fails only as `list` does.
+    pub fn open(roots: &Roots, data: &DataDir) -> Result<Catalog, DataError> {
+        let refreshed = refresh(roots, data)?;
+        let hides = prefs::hides(&data.prefs())?;
+        let sessions = refreshed
+            .sessions
+            .into_iter()
+            .map(|session| {
+                let hidden = hides.contains(&session);
+                listed(session, hidden)
+            })
+            .collect();
+        Ok(Catalog {
+            index: refreshed.index,
+            sessions,
+            providers: roots.providers(),
+            malformed_lines: refreshed.malformed_lines,
+            searched: refreshed.searched,
+            files_read: refreshed.files_read,
+            bytes_read: refreshed.bytes_read,
+        })
+    }
+
+    /// `text` read as the query language, with this catalog's providers.
+    pub fn parse(&self, text: &str) -> Query {
+        Query::parse(text, &self.providers)
+    }
+
+    /// The sessions matching `query`, with the same rules and order as
+    /// `search`. Fails only when the index can no longer be read.
+    pub fn search(&self, query: &Query) -> Result<Found<'_>, DataError> {
+        let candidates = self
+            .sessions
+            .iter()
+            .map(|listed| SessionKey::of(&listed.session))
+            .collect();
+        let matched: HashSet<SessionKey> = self.index.matching(query, candidates)?;
+        let mut sessions: Vec<&Listed> = self
+            .sessions
+            .iter()
+            .filter(|listed| matched.contains(&SessionKey::of(&listed.session)))
+            .collect();
+        let left_out = query.select(&mut sessions);
+        Ok(Found { sessions, left_out })
+    }
+
+    /// Every session in the index, whether or not a query keeps it.
+    pub fn indexed(&self) -> usize {
+        self.sessions.len()
+    }
 }
 
 /// Hides every session whose id is `id`, temp, orphaned or already hidden
@@ -275,7 +351,7 @@ fn set_hidden(
     choice: Choice,
 ) -> Result<Vec<Listed>, DataError> {
     // Straight from the index, so temp and hidden sessions are found too.
-    let matched: Vec<Session> = refresh(roots, data, &Query::default())?
+    let matched: Vec<Session> = refresh(roots, data)?
         .sessions
         .into_iter()
         .filter(|session| session.id == id)
@@ -297,12 +373,12 @@ fn listed(session: Session, hidden: bool) -> Listed {
     }
 }
 
-/// The index brought up to date, and its sessions with `query`'s words,
-/// unfiltered and unordered.
-fn refresh(roots: &Roots, data: &DataDir, query: &Query) -> Result<index::Refreshed, DataError> {
+/// The index brought up to date, and every session in it, unfiltered and
+/// unordered.
+fn refresh(roots: &Roots, data: &DataDir) -> Result<index::Refreshed, DataError> {
     let adapters = adapters(roots);
     let adapters: Vec<&dyn Adapter> = adapters.iter().map(Box::as_ref).collect();
-    index::refresh(&adapters, &data.index(), query)
+    index::refresh(&adapters, &data.index())
 }
 
 /// Deletes the index and builds it again from every history file, then

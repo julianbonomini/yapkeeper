@@ -12,7 +12,7 @@ Done when you have read every hunk of the Goal's diff.
 
 Run the `vago-pr` skill and write the body to its template, for the whole Goal's diff. For **Evidence**, use the tests the Goal added or changed and the check output in the Runs; run nothing to produce new evidence.
 
-Then end the body with the `## Runs` section of `vago goal report {{goal_name}}`, from that heading to the end, unchanged. It holds what Steps with `goal_report` wrote, collapsed under each Ticket.
+Then end the body with the `## Runs` section of `vago goal report {{goal_name}}`, from that heading to the end, with the Cost column removed from every table. It holds what Steps with `goal_report` wrote, collapsed under each Ticket. The repository is public: leave out every cost, token count and price, and write nothing from private session histories.
 
 Write the body to a file outside the worktree.
 

@@ -78,6 +78,9 @@ printf '%s\n' "$kept" >"$goal_file"
 body="$(cd "$VAGO_PROJECT_ROOT" && vago goal report "$VAGO_GOAL")"
 printf '%s\n\n%s\n' "$kept" "$(printf '%s\n' "$body" | sed -n '/^## Runs$/,$p')" >"$goal_file"
 
+# goal.md keeps the costs; the PR, which is public, doesn't.
+body="$(printf '%s\n' "$body" | without_cost)"
+
 doing="looking up the PR of $goal"
 # Only "no pull requests found" means there is none to edit; any other
 # failure would open a second one.

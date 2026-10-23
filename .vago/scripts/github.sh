@@ -1,5 +1,20 @@
 # Sourced by the starter's scripts that call GitHub: defines `retrying`.
 
+# The repository is public, so what goes to GitHub leaves out what the Runs
+# cost: `without_cost` drops the last column of every Markdown table whose
+# header ends in Cost, reading stdin and writing stdout.
+without_cost() {
+	awk '
+		/^\|/ {
+			if (!table) { table = 1; cost = ($0 ~ /\| *Cost *\|$/) }
+			if (cost) sub(/[^|]*\|$/, "")
+			print
+			next
+		}
+		{ table = 0; print }
+	'
+}
+
 # GitHub's 5xx answers and dropped connections, as gh and git print them.
 transient='HTTP 5[0-9][0-9]|status code:? 5[0-9][0-9]|returned error: 5[0-9][0-9]|service unavailable|bad gateway|gateway time-?out|timed out|connection reset|connection refused|could not resolve host|hung up unexpectedly|tls handshake'
 

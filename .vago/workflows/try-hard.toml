@@ -32,7 +32,7 @@
 
 # Claude Code with Claude Opus 5.5 runs every agent step, including fresh reviews.
 # A step using another harness must override both harness/model and args.
-harness = "claude"
+harness = "claude-code"
 model = "claude-opus-5-5"
 idle_timeout = "10m"      # how long the Harness may print nothing before the Run fails
 

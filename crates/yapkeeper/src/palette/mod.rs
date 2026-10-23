@@ -3,13 +3,16 @@
 //! preview of the selected session and key hints, over a `Catalog` loaded
 //! once; or, in their place, the selected session's whole conversation.
 //! It owns every terminal decision (keys, layout, theme and the terminal's
-//! lifecycle) and never touches the index, the preferences or the disk.
+//! lifecycle) and reaches the index and the preferences only through the
+//! catalog.
 
 mod reading;
 mod terminal;
 mod view;
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -22,18 +25,21 @@ pub use terminal::{Restore, run};
 
 /// The command palette over a catalog: an empty query, every session it
 /// lists, the first one selected.
-pub struct Palette<'c> {
-    catalog: &'c Catalog,
+pub struct Palette {
+    catalog: Catalog,
     colour: Colour,
     /// Shown as `~` at the start of a folder's path.
     home: Option<PathBuf>,
     /// The `@` token `Ctrl+L` adds: where the palette was launched.
     launch_token: Option<String>,
     query: String,
+    /// Whether searches also read tool calls, tool output and subagent
+    /// transcripts.
+    tools: bool,
     /// `query` as the last search read it.
     parsed: Query,
     /// What the query found, in `search`'s order.
-    found: Vec<&'c Listed>,
+    found: Vec<Rc<Listed>>,
     left_out: LeftOut,
     selection: ListState,
     /// The ways to finish the filter at the end of `query`; while there are
@@ -50,6 +56,27 @@ pub struct Palette<'c> {
     /// to read; cleared by the next search that succeeds. After a failed
     /// search the rows are the last ones that didn't fail.
     error: Option<String>,
+    /// Shown in the footer in place of the key hints.
+    toast: Option<Toast>,
+}
+
+/// How long a confirmation stays in the footer.
+const TOAST_TIME: Duration = Duration::from_secs(3);
+
+/// A confirmation of the last action, shown until `until`.
+struct Toast {
+    said: Confirmation,
+    until: Instant,
+}
+
+/// What a toast confirms.
+enum Confirmation {
+    /// The session with this title is hidden.
+    Hid(String),
+    /// The session with this title is shown again.
+    Unhid(String),
+    /// Searches read tool calls too, or no longer do.
+    Tools(bool),
 }
 
 /// Whether the palette is still open after a key press.
@@ -77,17 +104,18 @@ impl Colour {
     }
 }
 
-impl<'c> Palette<'c> {
+impl Palette {
     /// The palette over `catalog`, drawn in `colour`, launched from
     /// `launch_dir`. A search error is shown in the footer rather than
     /// returned.
-    pub fn new(catalog: &'c Catalog, colour: Colour, launch_dir: &Path) -> Palette<'c> {
+    pub fn new(catalog: Catalog, colour: Colour, launch_dir: &Path) -> Palette {
         let mut palette = Palette {
             catalog,
             colour,
             home: line::home(),
             launch_token: location_token(launch_dir),
             query: String::new(),
+            tools: false,
             parsed: Query::default(),
             found: Vec::new(),
             left_out: LeftOut::default(),
@@ -97,14 +125,15 @@ impl<'c> Palette<'c> {
             conversation: Vec::new(),
             reading: None,
             error: None,
+            toast: None,
         };
-        palette.search();
+        palette.search(0);
         palette
     }
 
-    /// Applies one key press and says whether the palette is still open.
-    /// Key releases and repeats are ignored.
-    pub fn handle(&mut self, key: KeyEvent) -> Step {
+    /// Applies one key press, made at `now`, and says whether the palette
+    /// is still open. Key releases and repeats are ignored.
+    pub fn handle(&mut self, key: KeyEvent, now: Instant) -> Step {
         if key.kind != KeyEventKind::Press {
             return Step::Continue;
         }
@@ -121,6 +150,8 @@ impl<'c> Palette<'c> {
             KeyCode::Char('c') if ctrl => return Step::Quit,
             KeyCode::Char('u') if ctrl => self.set_query(String::new()),
             KeyCode::Char('l') if ctrl => self.insert_launch_location(),
+            KeyCode::Char('x') if ctrl => self.toggle_hidden(now),
+            KeyCode::Char('t') if ctrl => self.toggle_tools(now),
             KeyCode::Char('p') if ctrl => self.move_selection(Direction::Up),
             KeyCode::Char('n') if ctrl => self.move_selection(Direction::Down),
             KeyCode::Up => self.move_selection(Direction::Up),
@@ -149,15 +180,25 @@ impl<'c> Palette<'c> {
         Step::Continue
     }
 
-    /// Draws the palette, or the too-small message, into the whole frame.
-    pub fn render(&mut self, frame: &mut Frame) {
+    /// Draws the palette as it is at `now`, or the too-small message, into
+    /// the whole frame.
+    pub fn render(&mut self, frame: &mut Frame, now: Instant) {
+        if self.toast.as_ref().is_some_and(|toast| toast.until <= now) {
+            self.toast = None;
+        }
         view::render(self, frame);
+    }
+
+    /// When the frame changes with no key pressed: when the toast drawn
+    /// last gives way to the key hints. `None` while nothing will.
+    pub fn redraw_at(&self) -> Option<Instant> {
+        self.toast.as_ref().map(|toast| toast.until)
     }
 
     fn set_query(&mut self, query: String) {
         if query != self.query {
             self.query = query;
-            self.search();
+            self.search(0);
             self.completions = self.catalog.completions(&self.query);
             let first = (!self.completions.is_empty()).then_some(0);
             self.completion = ListState::default().with_selected(first);
@@ -191,6 +232,44 @@ impl<'c> Palette<'c> {
         self.set_query(query);
     }
 
+    /// Hides the selected session, or shows it again when it is hidden, and
+    /// confirms it. The selection stays on the same row, which now holds the
+    /// next session. Nothing while completions are open, or when no session
+    /// is selected; a failure to record it is shown in the footer.
+    fn toggle_hidden(&mut self, now: Instant) {
+        let Some(listed) = self.selected().filter(|_| self.completions.is_empty()) else {
+            return;
+        };
+        let hidden = !listed.hidden;
+        if let Err(error) = self.catalog.set_hidden(&listed.session, hidden) {
+            self.error = Some(error.to_string());
+            return;
+        }
+        let title = listed.session.title.clone();
+        let said = match hidden {
+            true => Confirmation::Hid(title),
+            false => Confirmation::Unhid(title),
+        };
+        self.confirm(said, now);
+        self.search(self.selection.selected().unwrap_or(0));
+    }
+
+    /// Searches tool calls too, or no longer does, from the first row, and
+    /// confirms it.
+    fn toggle_tools(&mut self, now: Instant) {
+        self.tools = !self.tools;
+        self.confirm(Confirmation::Tools(self.tools), now);
+        self.search(0);
+    }
+
+    /// Shows `said` in the footer from `now` for `TOAST_TIME`.
+    fn confirm(&mut self, said: Confirmation, now: Instant) {
+        self.toast = Some(Toast {
+            said,
+            until: now + TOAST_TIME,
+        });
+    }
+
     /// Opens the selected session's whole conversation; nothing while
     /// completions are open, or when no session is selected.
     fn open_reading(&mut self) {
@@ -199,9 +278,10 @@ impl<'c> Palette<'c> {
         }
     }
 
-    /// Searches the catalog for the query and selects the first row.
-    fn search(&mut self) {
-        self.parsed = self.catalog.parse(&self.query);
+    /// Searches the catalog for the query and selects `row`, or the last row
+    /// when there are fewer.
+    fn search(&mut self, row: usize) {
+        self.parsed = self.catalog.parse(&self.query).including_tools(self.tools);
         match self.catalog.search(&self.parsed) {
             Ok(found) => {
                 self.found = found.sessions;
@@ -210,9 +290,9 @@ impl<'c> Palette<'c> {
             }
             Err(error) => self.error = Some(error.to_string()),
         }
-        let first = (!self.found.is_empty()).then_some(0);
+        let row = self.found.len().checked_sub(1).map(|last| row.min(last));
         self.selection = ListState::default();
-        self.select(first);
+        self.select(row);
     }
 
     /// Moves the selection one row, among the completions while there are
@@ -245,8 +325,10 @@ impl<'c> Palette<'c> {
     }
 
     /// The session the selection bar is on.
-    fn selected(&self) -> Option<&'c Listed> {
-        self.selection.selected().map(|row| self.found[row])
+    fn selected(&self) -> Option<Rc<Listed>> {
+        self.selection
+            .selected()
+            .map(|row| Rc::clone(&self.found[row]))
     }
 }
 

@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::{Colour, Palette};
+use super::{Colour, Confirmation, Palette};
 use crate::line::{
     age, availability_label, directory, fit, fit_left, one_line, place, without_controls, wrap,
 };
@@ -155,12 +155,21 @@ fn too_small(frame: &mut Frame, area: Rect) {
 }
 
 /// The prompt, the query with the cursor after it, and the match count on
-/// the right.
+/// the right, followed by `+tools` in the accent while searches read tool
+/// calls.
 fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
-    let count = format!("{} / {}", palette.found.len(), palette.catalog.indexed());
+    let mut count = vec![Span::styled(
+        format!("{} / {}", palette.found.len(), palette.catalog.indexed()),
+        theme.dim,
+    )];
+    if palette.tools {
+        count.push(Span::styled(SEPARATOR, theme.dim));
+        count.push(Span::styled("+tools", theme.accent));
+    }
+    let count_cells: usize = count.iter().map(Span::width).sum();
     let width = usize::from(area.width);
     // One space keeps the query off the count.
-    let room = width.saturating_sub(PROMPT.width() + count.width() + 1);
+    let room = width.saturating_sub(PROMPT.width() + count_cells + 1);
     // The cursor sits after what was typed, or at the placeholder's start.
     let (typed, typed_cells) = match palette.query.is_empty() {
         true => (vec![Span::styled(fit(PLACEHOLDER, room), theme.dim)], 0),
@@ -168,11 +177,11 @@ fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     };
     let cursor_x = area.x + (PROMPT.width() + typed_cells) as u16;
     let typed_width: usize = typed.iter().map(Span::width).sum();
-    let gap = width.saturating_sub(PROMPT.width() + typed_width + count.width());
+    let gap = width.saturating_sub(PROMPT.width() + typed_width + count_cells);
     let mut spans = vec![Span::styled(PROMPT, theme.accent)];
     spans.extend(typed);
     spans.push(Span::raw(" ".repeat(gap)));
-    spans.push(Span::styled(count, theme.dim));
+    spans.extend(count);
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
     frame.set_cursor_position(Position::new(cursor_x, area.y));
@@ -368,6 +377,14 @@ fn rows(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
         if palette.left_out.hidden {
             lines.push(Line::styled(" is:hidden shows hidden ones", theme.dim));
         }
+        let has_words = palette
+            .parsed
+            .tokens()
+            .iter()
+            .any(|token| token.kind == TokenKind::Word);
+        if has_words && !palette.tools {
+            lines.push(Line::styled(" ^T searches tool calls too", theme.dim));
+        }
         frame.render_widget(Paragraph::new(lines), area);
         return;
     }
@@ -437,17 +454,27 @@ fn icon(listed: &Listed) -> &'static str {
     }
 }
 
-/// Key hints, dropped whole from the right when they don't fit, or the
-/// last search error in their place.
+/// Key hints, dropped whole from the right when they don't fit, or in
+/// their place the last search error, else the toast.
 fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
+    let cells = usize::from(area.width).saturating_sub(1);
     if let Some(error) = &palette.error {
-        let text = fit(&one_line(error), usize::from(area.width).saturating_sub(1));
+        let text = fit(&one_line(error), cells);
         frame.render_widget(Paragraph::new(format!(" {text}")).style(theme.label), area);
+        return;
+    }
+    if let Some(toast) = &palette.toast {
+        let text = confirmation(&toast.said, cells);
+        frame.render_widget(Paragraph::new(format!(" {text}")), area);
         return;
     }
     let esc = match palette.query.is_empty() {
         true => "quit",
         false => "clear",
+    };
+    let hide = match palette.selected() {
+        Some(listed) if listed.hidden => "unhide",
+        _ => "hide",
     };
     let hints = match (palette.reading.is_some(), palette.completions.is_empty()) {
         (true, _) => vec![
@@ -463,6 +490,8 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
             Some(("Esc", esc)),
             Some(("^U", "clear")),
             palette.launch_token.as_ref().map(|_| ("^L", "here")),
+            Some(("^X", hide)),
+            Some(("^T", "tools")),
             Some(("^C", "quit")),
         ],
         (false, false) => vec![
@@ -490,6 +519,22 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
         used += cells;
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// What a toast says, in at most `cells` cells. A session's title gives
+/// way first, so the pointer to `is:hidden` stays.
+fn confirmation(said: &Confirmation, cells: usize) -> String {
+    let quoted = |verb: &str, title: &str, after: &str| {
+        let title_cells = cells.saturating_sub(verb.width() + " “”".width() + after.width());
+        let title = fit(&one_line(title), title_cells);
+        fit(&format!("{verb} “{title}”{after}"), cells)
+    };
+    match said {
+        Confirmation::Hid(title) => quoted("Hid", title, " · is:hidden lists it"),
+        Confirmation::Unhid(title) => quoted("Unhid", title, ""),
+        Confirmation::Tools(true) => fit("Searching tool calls too", cells),
+        Confirmation::Tools(false) => fit("Searching messages only", cells),
+    }
 }
 
 /// How one session's text is drawn, `cells` wide, with what the query

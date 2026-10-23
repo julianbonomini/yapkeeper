@@ -7,6 +7,7 @@
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -150,7 +151,9 @@ fn write_records(path: &Path, records: &[Value]) {
 /// What `palette` draws into a `width`×`height` terminal.
 fn draw(palette: &mut Palette, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    terminal.draw(|frame| palette.render(frame)).unwrap();
+    terminal
+        .draw(|frame| palette.render(frame, Instant::now()))
+        .unwrap();
     terminal.backend().buffer().clone()
 }
 
@@ -185,11 +188,14 @@ fn frame(palette: &mut Palette, width: u16, height: u16) -> Vec<String> {
 }
 
 fn press(palette: &mut Palette, code: KeyCode) -> Step {
-    palette.handle(KeyEvent::new(code, KeyModifiers::NONE))
+    palette.handle(KeyEvent::new(code, KeyModifiers::NONE), Instant::now())
 }
 
 fn ctrl(palette: &mut Palette, c: char) -> Step {
-    palette.handle(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    palette.handle(
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL),
+        Instant::now(),
+    )
 }
 
 /// Types each character of `text` into the query.
@@ -234,8 +240,7 @@ fn ends_with_age(row: &str) -> bool {
 #[test]
 fn a_wide_terminal_shows_the_query_line_count_rows_and_footer() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     let frame = frame(&mut palette, 120, 40);
     assert!(
@@ -273,8 +278,7 @@ fn a_wide_terminal_shows_the_query_line_count_rows_and_footer() {
 #[test]
 fn a_standard_terminal_keeps_results_in_the_left_side() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     let buffer = draw(&mut palette, 80, 24);
     let frame = lines(&buffer);
@@ -297,8 +301,7 @@ fn a_standard_terminal_keeps_results_in_the_left_side() {
 #[test]
 fn a_narrow_terminal_gives_results_the_full_width() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     let frame = frame(&mut palette, 60, 20);
     let rows = rows_with(&frame, &TITLES);
@@ -314,8 +317,7 @@ fn a_narrow_terminal_gives_results_the_full_width() {
 #[test]
 fn typing_a_word_narrows_the_rows_and_the_count() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     keys(&mut palette, "release");
     let narrowed = frame(&mut palette, 120, 40);
@@ -340,16 +342,15 @@ fn typing_a_word_narrows_the_rows_and_the_count() {
 #[test]
 fn typing_a_filter_narrows_the_rows_and_the_count() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
 
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "#codex");
     let codex = frame(&mut palette, 120, 40);
     assert_eq!(rows_with(&codex, &TITLES).len(), 1, "{codex:#?}");
     assert_eq!(rows_with(&codex, &["Tidy"]).len(), 1);
     assert!(codex[1].trim_end_matches('│').trim_end().ends_with("1 / 3"));
 
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "retry #claude");
     let retry = frame(&mut palette, 120, 40);
     assert_eq!(rows_with(&retry, &TITLES).len(), 1, "{retry:#?}");
@@ -381,8 +382,7 @@ fn selected(buffer: &Buffer) -> Option<&'static str> {
 #[test]
 fn the_selection_stops_at_the_first_and_last_rows() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     // Most recent first, orphaned last.
     let [first, _, last] = ["Tidy", "Retry", "Release"];
 
@@ -411,8 +411,7 @@ fn the_selection_stops_at_the_first_and_last_rows() {
 #[test]
 fn changing_the_query_selects_the_first_row_again() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     press(&mut palette, KeyCode::Down);
     press(&mut palette, KeyCode::Down);
@@ -425,8 +424,7 @@ fn changing_the_query_selects_the_first_row_again() {
 #[test]
 fn esc_clears_the_query_then_quits_and_ctrl_c_quits() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     keys(&mut palette, "release");
     assert!(frame(&mut palette, 80, 24)[22].contains("Esc clear"));
@@ -436,7 +434,7 @@ fn esc_clears_the_query_then_quits_and_ctrl_c_quits() {
     assert!(cleared[22].contains("Esc quit"), "{cleared:#?}");
     assert_eq!(press(&mut palette, KeyCode::Esc), Step::Quit);
 
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "release");
     assert_eq!(ctrl(&mut palette, 'u'), Step::Continue);
     assert_eq!(rows_with(&frame(&mut palette, 80, 24), &TITLES).len(), 3);
@@ -447,8 +445,7 @@ fn esc_clears_the_query_then_quits_and_ctrl_c_quits() {
 #[test]
 fn sage_draws_the_selection_bar_grey_and_the_prompt_in_the_accent() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     let buffer = draw(&mut palette, 80, 24);
     assert_eq!(buffer[(2, 1)].symbol(), "›");
@@ -462,8 +459,7 @@ fn sage_draws_the_selection_bar_grey_and_the_prompt_in_the_accent() {
 #[test]
 fn mono_has_no_colour_and_a_reversed_selection() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Mono, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Mono, Path::new("/"));
 
     let buffer = draw(&mut palette, 80, 24);
     for cell in buffer.content() {
@@ -479,8 +475,7 @@ fn mono_has_no_colour_and_a_reversed_selection() {
 #[test]
 fn below_48_by_12_only_the_too_small_message_renders() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     for (width, height) in [(47, 12), (48, 11)] {
         let frame = frame(&mut palette, width, height);
@@ -498,8 +493,7 @@ fn below_48_by_12_only_the_too_small_message_renders() {
 #[test]
 fn rows_name_where_a_session_ran_and_say_when_it_cannot_resume() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     let frame = frame(&mut palette, 120, 40);
     let gone = rows_with(&frame, &["Release"]);
     assert!(gone[0].contains("orphaned"), "{}", gone[0]);
@@ -515,8 +509,7 @@ fn rows_name_where_a_session_ran_and_say_when_it_cannot_resume() {
     histories.claude(CLAUDE_GONE, locked.to_str().unwrap(), "Locked work");
     #[cfg(unix)]
     let lock = Locked::new(&locked);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "is:temp");
     let frame = self::frame(&mut palette, 120, 40);
     let worktree_row = rows_with(&frame, &["Worktree"]);
@@ -538,8 +531,7 @@ fn a_query_that_matches_only_temp_sessions_says_how_to_show_them() {
     let histories = Histories::new();
     histories.claude(CLAUDE_RETRY, "/usr", "Retry the billing job");
     histories.claude(CLAUDE_GONE, tmp.path().to_str().unwrap(), "Scratch zebra");
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     keys(&mut palette, "zebra");
     let frame = frame(&mut palette, 80, 24);
@@ -562,8 +554,7 @@ fn a_wide_title_is_cut_by_cells_and_keeps_ages_aligned() {
     let wide = "日本語のタイトルがとても長いセッションの説明です";
     histories.claude(CLAUDE_RETRY, "/usr", wide);
     histories.claude(CLAUDE_GONE, "/usr", "Retry the billing job");
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     let buffer = draw(&mut palette, 60, 20);
     let frame = lines(&buffer);
@@ -602,15 +593,18 @@ fn the_restore_guard_leaves_the_alternate_screen_and_shows_the_cursor() {
 #[test]
 fn the_cursor_moves_past_each_typed_space() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     keys(&mut palette, "retry");
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    terminal.draw(|frame| palette.render(frame)).unwrap();
+    terminal
+        .draw(|frame| palette.render(frame, Instant::now()))
+        .unwrap();
     let after_word = terminal.get_cursor_position().unwrap();
     keys(&mut palette, " ");
-    terminal.draw(|frame| palette.render(frame)).unwrap();
+    terminal
+        .draw(|frame| palette.render(frame, Instant::now()))
+        .unwrap();
     let after_space = terminal.get_cursor_position().unwrap();
     assert_eq!(after_space.x, after_word.x + 1);
     assert_eq!(after_space.y, 1);
@@ -619,8 +613,7 @@ fn the_cursor_moves_past_each_typed_space() {
 #[test]
 fn an_empty_index_says_no_sessions_were_found() {
     let histories = Histories::new();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     let frame = frame(&mut palette, 80, 24);
     assert_eq!(results(&frame[3]).trim(), "No sessions found.");
@@ -631,8 +624,7 @@ fn an_empty_index_says_no_sessions_were_found() {
 fn a_query_that_matches_only_hidden_sessions_says_how_to_show_them() {
     let histories = Histories::three();
     hide(&histories.roots(), &histories.data(), CLAUDE_GONE).unwrap();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     assert_eq!(rows_with(&frame(&mut palette, 80, 24), &TITLES).len(), 2);
     keys(&mut palette, "release");
@@ -714,8 +706,7 @@ fn line_with(preview: &[String], text: &str) -> usize {
 fn a_wide_terminal_previews_every_section_in_order() {
     let histories = Histories::new();
     full_session(&histories);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "flaky");
 
     let preview = preview(&draw(&mut palette, 120, 40));
@@ -755,8 +746,7 @@ fn a_wide_terminal_previews_every_section_in_order() {
 fn matching_words_are_highlighted_in_the_preview() {
     let histories = Histories::new();
     full_session(&histories);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "flaky");
 
     let buffer = draw(&mut palette, 120, 40);
@@ -775,7 +765,7 @@ fn matching_words_are_highlighted_in_the_preview() {
     assert!(!underlined(x - 1) && !underlined(x + 5), "{}", frame[y]);
     assert_eq!(buffer[(x, y as u16)].fg, Color::Indexed(108));
 
-    let mut palette = Palette::new(&catalog, Colour::Mono, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Mono, Path::new("/"));
     keys(&mut palette, "flaky");
     let buffer = draw(&mut palette, 120, 40);
     assert!(
@@ -790,8 +780,7 @@ fn matching_words_are_highlighted_in_the_preview() {
 #[test]
 fn a_preview_leaves_out_what_a_session_lacks_without_gaps() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "retry");
 
     let preview = preview(&draw(&mut palette, 120, 40));
@@ -822,8 +811,7 @@ fn wide_titles_and_long_paths_stay_inside_the_preview() {
     let wide = "日本語のタイトルがとても長いセッションの説明です。".repeat(3);
     let deep = format!("/synthetic/{}end-folder", "nested-folder/".repeat(12));
     histories.claude(CLAUDE_RETRY, &deep, &wide);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     let buffer = draw(&mut palette, 120, 40);
     let frame = lines(&buffer);
@@ -847,8 +835,7 @@ fn wide_titles_and_long_paths_stay_inside_the_preview() {
 fn below_80_columns_there_is_no_preview() {
     let histories = Histories::new();
     full_session(&histories);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
 
     assert!(preview_column(&draw(&mut palette, 80, 24)).is_some());
     let buffer = draw(&mut palette, 79, 24);
@@ -861,8 +848,7 @@ fn a_match_deep_in_a_long_message_shows_in_the_preview() {
     let histories = Histories::new();
     let long = format!("{} then the needle at last", "padding words ".repeat(60));
     histories.claude(CLAUDE_RETRY, "/usr", &long);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "needle");
 
     let buffer = draw(&mut palette, 120, 40);
@@ -913,8 +899,7 @@ fn pairs(expected: &[(&str, usize)]) -> Vec<(String, usize)> {
 #[test]
 fn the_query_line_accents_filter_tokens_and_leaves_words_plain() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     let query = "retry @usr !#codex not:temp is:pr !flaky #claude !orphaned tidy";
     keys(&mut palette, query);
 
@@ -937,7 +922,6 @@ fn the_query_line_accents_filter_tokens_and_leaves_words_plain() {
 #[test]
 fn each_filter_prefix_opens_its_completions_with_session_counts() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
     let cases: [(&str, &[(&str, usize)]); 4] = [
         ("#", &[("#claude", 2), ("#codex", 1)]),
         (
@@ -957,7 +941,7 @@ fn each_filter_prefix_opens_its_completions_with_session_counts() {
         ("not:o", &[("not:orphaned", 2)]),
     ];
     for (typed, expected) in cases {
-        let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+        let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
         keys(&mut palette, typed);
         let frame = frame(&mut palette, 120, 40);
         assert_eq!(completions(&frame), pairs(expected), "{typed}: {frame:#?}");
@@ -965,7 +949,7 @@ fn each_filter_prefix_opens_its_completions_with_session_counts() {
 
     // Most recent first, the missing folder left out; `@/usr` also finds
     // `/usr/bin`.
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "@");
     let frame = frame(&mut palette, 120, 40);
     let rows = location_rows(&frame);
@@ -983,8 +967,7 @@ fn each_filter_prefix_opens_its_completions_with_session_counts() {
 #[test]
 fn completions_name_every_provider_and_state_the_library_knows() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "!");
     let listed: Vec<String> = completions(&frame(&mut palette, 120, 40))
         .into_iter()
@@ -1003,8 +986,7 @@ fn completions_name_every_provider_and_state_the_library_knows() {
 #[test]
 fn typing_after_the_prefix_narrows_the_completions() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "!is:o");
     assert_eq!(
         completions(&frame(&mut palette, 120, 40)),
@@ -1013,7 +995,7 @@ fn typing_after_the_prefix_narrows_the_completions() {
     keys(&mut palette, "x");
     assert_eq!(completions(&frame(&mut palette, 120, 40)), []);
 
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "@bin");
     let rows = location_rows(&frame(&mut palette, 120, 40));
     let rows: Vec<(&str, usize)> = rows
@@ -1026,8 +1008,7 @@ fn typing_after_the_prefix_narrows_the_completions() {
 #[test]
 fn tab_or_enter_inserts_the_selected_completion() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "tidy #c");
     press(&mut palette, KeyCode::Down);
     press(&mut palette, KeyCode::Tab);
@@ -1037,7 +1018,7 @@ fn tab_or_enter_inserts_the_selected_completion() {
     assert_eq!(rows_with(&frame, &TITLES).len(), 1, "{frame:#?}");
     assert!(frame[1].trim_end_matches('│').trim_end().ends_with("1 / 3"));
 
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "NOT:");
     press(&mut palette, KeyCode::Down);
     press(&mut palette, KeyCode::Up);
@@ -1050,9 +1031,8 @@ fn tab_or_enter_inserts_the_selected_completion() {
 #[test]
 fn a_space_never_opens_completions() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
     for typed in ["is", "is ", "is pr", "#claude ", "! "] {
-        let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+        let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
         keys(&mut palette, typed);
         let frame = frame(&mut palette, 120, 40);
         assert_eq!(completions(&frame), [], "{typed}: {frame:#?}");
@@ -1062,7 +1042,6 @@ fn a_space_never_opens_completions() {
 #[test]
 fn ctrl_l_inserts_where_the_palette_was_launched() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
     let tmp = temp_dir();
     let (repo, worktree) = repo_with_worktree(tmp.path());
     let launched = [
@@ -1071,7 +1050,7 @@ fn ctrl_l_inserts_where_the_palette_was_launched() {
         (PathBuf::from("/usr/bin"), "retry @/usr/bin".to_string()),
     ];
     for (dir, expected) in launched {
-        let mut palette = Palette::new(&catalog, Colour::Sage, &dir);
+        let mut palette = Palette::new(histories.catalog(), Colour::Sage, &dir);
         if dir.starts_with("/usr") {
             keys(&mut palette, "retry ");
         }
@@ -1085,8 +1064,7 @@ fn ctrl_l_inserts_where_the_palette_was_launched() {
 #[test]
 fn a_filter_typed_out_in_full_shows_its_sessions() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "#CODEX");
     let frame = frame(&mut palette, 120, 40);
     assert_eq!(completions(&frame), [], "{frame:#?}");
@@ -1096,21 +1074,19 @@ fn a_filter_typed_out_in_full_shows_its_sessions() {
 #[test]
 fn a_launch_folder_that_is_gone_offers_no_ctrl_l() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new(""));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new(""));
     assert!(!frame(&mut palette, 120, 40)[38].contains("^L"));
     ctrl(&mut palette, 'l');
     assert!(query_text(&frame(&mut palette, 120, 40)).starts_with("search everything"));
 
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     assert!(frame(&mut palette, 120, 40)[38].contains("^L here"));
 }
 
 #[test]
 fn a_query_cut_from_the_left_keeps_its_filters_accented() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     let query = format!("{} #claude", "retry ".repeat(20));
     keys(&mut palette, &query);
 
@@ -1280,8 +1256,7 @@ fn assert_documented_order(rows: &[LocationLine]) {
 #[test]
 fn tab_opens_the_location_list_in_the_documented_order() {
     let (histories, _live) = locations_fixture();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     press(&mut palette, KeyCode::Tab);
     let frame = frame(&mut palette, 120, 40);
     assert_eq!(query_text(&frame), "@", "{frame:#?}");
@@ -1295,8 +1270,7 @@ fn tab_opens_the_location_list_in_the_documented_order() {
 #[test]
 fn a_missing_folder_shows_last_once_anything_is_typed() {
     let (histories, _live) = locations_fixture();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "@/");
     let mut rows = location_rows(&frame(&mut palette, 120, 40));
     let last = rows.pop();
@@ -1315,12 +1289,11 @@ fn a_missing_folder_shows_last_once_anything_is_typed() {
 #[test]
 fn typing_at_or_pressing_tab_opens_the_same_location_list() {
     let (histories, _live) = locations_fixture();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "@");
     assert_documented_order(&location_rows(&frame(&mut palette, 120, 40)));
 
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "retry");
     press(&mut palette, KeyCode::Tab);
     let frame = frame(&mut palette, 120, 40);
@@ -1329,8 +1302,7 @@ fn typing_at_or_pressing_tab_opens_the_same_location_list() {
 
     // With no locations to choose, a second `Tab` types no second `@`.
     let empty = Histories::new();
-    let catalog = empty.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(empty.catalog(), Colour::Sage, Path::new("/"));
     press(&mut palette, KeyCode::Tab);
     press(&mut palette, KeyCode::Tab);
     assert_eq!(query_text(&self::frame(&mut palette, 120, 40)), "@");
@@ -1339,8 +1311,7 @@ fn typing_at_or_pressing_tab_opens_the_same_location_list() {
 #[test]
 fn missing_folders_are_hidden_until_typed() {
     let (histories, _live) = locations_fixture();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "@");
     let rows = location_rows(&frame(&mut palette, 120, 40));
     assert!(
@@ -1363,8 +1334,7 @@ fn missing_folders_are_hidden_until_typed() {
 #[test]
 fn choosing_a_worktree_inserts_its_token_and_narrows_the_results() {
     let (histories, _live) = locations_fixture();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     press(&mut palette, KeyCode::Tab);
     press(&mut palette, KeyCode::Down);
     press(&mut palette, KeyCode::Down);
@@ -1389,8 +1359,7 @@ fn choosing_a_worktree_inserts_its_token_and_narrows_the_results() {
 #[test]
 fn choosing_a_project_or_a_folder_inserts_its_token() {
     let (histories, _live) = locations_fixture();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     press(&mut palette, KeyCode::Tab);
     press(&mut palette, KeyCode::Enter);
     assert_eq!(query_text(&frame(&mut palette, 120, 40)), "@lint-kit");
@@ -1407,8 +1376,7 @@ fn choosing_a_project_or_a_folder_inserts_its_token() {
 #[test]
 fn typing_after_at_matches_any_part_of_a_location_path() {
     let (histories, _live) = locations_fixture();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "@code");
     let rows = location_rows(&frame(&mut palette, 120, 40));
     let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
@@ -1419,8 +1387,7 @@ fn typing_after_at_matches_any_part_of_a_location_path() {
     );
 
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "@bin");
     assert_eq!(
         location_rows(&frame(&mut palette, 120, 40)),
@@ -1436,10 +1403,9 @@ fn typing_after_at_matches_any_part_of_a_location_path() {
 #[test]
 fn location_rows_keep_their_kind_words_and_counts_in_narrow_terminals() {
     let (histories, _live) = locations_fixture();
-    let catalog = histories.catalog();
     // At 50 columns `acme-api`'s path would have room for only its `…`.
     for (width, height) in [(80, 24), (60, 20), (50, 12), (48, 12)] {
-        let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+        let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
         keys(&mut palette, "@/");
         let buffer = draw(&mut palette, width, height);
         let frame = lines(&buffer);
@@ -1469,8 +1435,7 @@ fn location_rows_keep_their_kind_words_and_counts_in_narrow_terminals() {
 #[test]
 fn mono_reverses_only_the_selected_location_row() {
     let (histories, _live) = locations_fixture();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Mono, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Mono, Path::new("/"));
     press(&mut palette, KeyCode::Tab);
     press(&mut palette, KeyCode::Down);
     let buffer = draw(&mut palette, 80, 24);
@@ -1489,8 +1454,7 @@ fn mono_reverses_only_the_selected_location_row() {
 #[test]
 fn the_footer_names_tab_for_locations_until_the_list_is_open() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     let footer = frame(&mut palette, 120, 40)[38].clone();
     assert!(footer.contains("Tab locations"), "{footer}");
     press(&mut palette, KeyCode::Tab);
@@ -1534,8 +1498,7 @@ fn long_session(histories: &Histories) {
 #[test]
 fn right_opens_the_conversation_and_esc_or_left_returns_unchanged() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     // Every title has a "t", so all three rows stay.
     keys(&mut palette, "t");
     press(&mut palette, KeyCode::Down);
@@ -1559,8 +1522,7 @@ fn right_opens_the_conversation_and_esc_or_left_returns_unchanged() {
 #[test]
 fn printable_keys_and_enter_leave_the_query_alone_while_reading() {
     let histories = Histories::three();
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     let palette_frame = frame(&mut palette, 80, 24);
 
     press(&mut palette, KeyCode::Right);
@@ -1579,8 +1541,7 @@ fn printable_keys_and_enter_leave_the_query_alone_while_reading() {
 fn arrows_and_page_keys_scroll_the_conversation() {
     let histories = Histories::new();
     long_session(&histories);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     press(&mut palette, KeyCode::Right);
     let first_row = |palette: &mut Palette| conversation_body(&frame(palette, 80, 24))[0].clone();
 
@@ -1616,8 +1577,7 @@ fn arrows_and_page_keys_scroll_the_conversation() {
 fn a_page_down_moves_the_last_row_to_the_top() {
     let histories = Histories::new();
     long_session(&histories);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     press(&mut palette, KeyCode::Right);
 
     let before = conversation_body(&frame(&mut palette, 80, 24));
@@ -1638,8 +1598,7 @@ fn needles(body: &[String]) -> Vec<String> {
 fn n_and_shift_n_move_between_matches_and_wrap_around() {
     let histories = Histories::new();
     long_session(&histories);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "needle");
     press(&mut palette, KeyCode::Right);
 
@@ -1676,8 +1635,7 @@ fn n_and_shift_n_move_between_matches_and_wrap_around() {
 fn matches_are_highlighted_in_the_conversation() {
     let histories = Histories::new();
     long_session(&histories);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Mono, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Mono, Path::new("/"));
     keys(&mut palette, "needle");
     press(&mut palette, KeyCode::Right);
 
@@ -1701,8 +1659,7 @@ fn matches_are_highlighted_in_the_conversation() {
 fn a_tool_call_reads_as_one_line() {
     let histories = Histories::new();
     long_session(&histories);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     press(&mut palette, KeyCode::Right);
 
     let body = conversation_body(&frame(&mut palette, 80, 24));
@@ -1716,8 +1673,7 @@ fn at_60_columns_right_opens_the_conversation_inside_the_border() {
     let histories = Histories::new();
     let long = format!("{} then the needle at last", "padding words ".repeat(20));
     histories.claude(CLAUDE_RETRY, "/usr", &long);
-    let catalog = histories.catalog();
-    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
     keys(&mut palette, "needle");
     press(&mut palette, KeyCode::Right);
 
@@ -1729,4 +1685,109 @@ fn at_60_columns_right_opens_the_conversation_inside_the_border() {
     // The long prompt wraps, whole, rather than being cut.
     let body = conversation_body(&reading).join(" ");
     assert!(body.contains("then the needle at last"), "{reading:#?}");
+}
+
+#[test]
+fn ctrl_x_hides_the_selected_session_for_good_and_is_hidden_brings_it_back() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
+    assert_eq!(selected(&draw(&mut palette, 80, 24)), Some("Tidy"));
+    let hints = frame(&mut palette, 120, 24);
+    assert!(hints[22].contains("^X hide  ^T tools"), "{hints:#?}");
+
+    ctrl(&mut palette, 'x');
+    let hid = frame(&mut palette, 80, 24);
+    assert_eq!(rows_with(&hid, &TITLES).len(), 2, "{hid:#?}");
+    assert!(rows_with(&hid, &["Tidy"]).is_empty(), "{hid:#?}");
+    assert!(hid[22].contains("Hid “Tidy the lint config”"), "{hid:#?}");
+    assert!(hid[22].contains("is:hidden"), "{hid:#?}");
+
+    let mut relaunched = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
+    assert!(rows_with(&frame(&mut relaunched, 80, 24), &["Tidy"]).is_empty());
+    keys(&mut relaunched, "is:hidden ");
+    let hidden = frame(&mut relaunched, 120, 24);
+    assert!(hidden[22].contains("^X unhide  ^T tools"), "{hidden:#?}");
+    assert_eq!(rows_with(&hidden, &TITLES).len(), 1, "{hidden:#?}");
+    assert_eq!(rows_with(&hidden, &["Tidy"]).len(), 1, "{hidden:#?}");
+    ctrl(&mut relaunched, 'x');
+    let unhid = frame(&mut relaunched, 80, 24);
+    assert!(rows_with(&unhid, &TITLES).is_empty(), "{unhid:#?}");
+    assert!(
+        unhid[22].contains("Unhid “Tidy the lint config”"),
+        "{unhid:#?}"
+    );
+    ctrl(&mut relaunched, 'u');
+    assert_eq!(rows_with(&frame(&mut relaunched, 80, 24), &TITLES).len(), 3);
+
+    let mut again = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
+    assert_eq!(rows_with(&frame(&mut again, 80, 24), &TITLES).len(), 3);
+}
+
+#[test]
+fn the_toast_gives_way_to_the_key_hints_after_three_seconds() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
+    let footer = |palette: &mut Palette, at: Instant| {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| palette.render(frame, at)).unwrap();
+        lines(terminal.backend().buffer())[22].clone()
+    };
+    assert_eq!(palette.redraw_at(), None);
+
+    let pressed = Instant::now();
+    let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+    palette.handle(ctrl_x, pressed);
+    let gone = pressed + Duration::from_secs(3);
+    assert_eq!(palette.redraw_at(), Some(gone));
+    let shown = footer(&mut palette, gone - Duration::from_millis(1));
+    assert!(shown.contains("is:hidden"), "{shown}");
+
+    let hints = footer(&mut palette, gone);
+    assert!(hints.contains("Esc quit"), "{hints}");
+    assert_eq!(palette.redraw_at(), None);
+}
+
+#[test]
+fn ctrl_t_searches_tool_calls_too_and_says_so_on_the_query_line() {
+    let histories = Histories::three();
+    histories.claude_records(
+        CLAUDE_FULL,
+        "/usr",
+        &[
+            json!({ "type": "user", "message": { "content": "Run the suite" } }),
+            json!({ "type": "assistant", "message": { "content": [
+                { "type": "tool_use", "name": "Bash", "input": { "command": "cargo nextest run" } },
+            ] } }),
+        ],
+    );
+    let mut palette = Palette::new(histories.catalog(), Colour::Sage, Path::new("/"));
+    keys(&mut palette, "nextest");
+    let messages_only = frame(&mut palette, 80, 24);
+    assert_eq!(results(&messages_only[3]).trim(), "No sessions match.");
+    assert_eq!(
+        results(&messages_only[4]).trim(),
+        "^T searches tool calls too"
+    );
+    assert!(!messages_only[1].contains("+tools"), "{messages_only:#?}");
+
+    ctrl(&mut palette, 't');
+    let buffer = draw(&mut palette, 80, 24);
+    let with_tools = lines(&buffer);
+    assert!(
+        with_tools[1].ends_with("1 / 4 · +tools│"),
+        "{with_tools:#?}"
+    );
+    assert_eq!(rows_with(&with_tools, &["Run the suite"]).len(), 1);
+    let x = with_tools[1].chars().count() as u16 - 7;
+    assert_eq!(cells(&buffer, 1, x..x + 6), "+tools");
+    assert_eq!(buffer[(x, 1)].fg, Color::Indexed(108));
+    assert!(
+        with_tools[22].contains("Searching tool calls too"),
+        "{with_tools:#?}"
+    );
+
+    ctrl(&mut palette, 't');
+    let again = frame(&mut palette, 80, 24);
+    assert_eq!(results(&again[3]).trim(), "No sessions match.");
+    assert!(again[22].contains("Searching messages only"), "{again:#?}");
 }

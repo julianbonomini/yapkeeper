@@ -5,8 +5,9 @@
 //! by the query language's filters, reads each session's location from
 //! the disk when it is listed, and keeps the user's hides apart from the
 //! index. A `Catalog` loads all of that once so it can be searched many
-//! times, as the `palette` does while the person types; `line` holds how a
-//! session reads as one line of terminal text, for the palette and the CLI.
+//! times and record hides, as the `palette` does while the person types;
+//! `line` holds how a session reads as one line of terminal text, for the
+//! palette and the CLI.
 
 #![forbid(unsafe_code)]
 
@@ -23,6 +24,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use yapkeeper_claude::ClaudeCode;
@@ -245,7 +247,11 @@ pub fn search(roots: &Roots, data: &DataDir, query: &Query) -> Result<Listing, D
 fn listing(catalog: &Catalog, query: &Query) -> Result<Listing, DataError> {
     let found = catalog.search(query)?;
     Ok(Listing {
-        sessions: found.sessions.into_iter().cloned().collect(),
+        sessions: found
+            .sessions
+            .iter()
+            .map(|listed| Listed::clone(listed))
+            .collect(),
         indexed: catalog.indexed(),
         malformed_lines: catalog.malformed_lines,
         searched: catalog.searched.clone(),
@@ -257,11 +263,14 @@ fn listing(catalog: &Catalog, query: &Query) -> Result<Listing, DataError> {
 
 /// Every indexed session as of `Catalog::open`, with its location and
 /// whether it is hidden, ready to be searched many times without
-/// refreshing the index or rereading the disk.
+/// refreshing the index or rereading the disk, and to record hides.
 pub struct Catalog {
     index: index::Index,
-    /// Every session in the index, in no particular order.
-    sessions: Vec<Listed>,
+    /// Every session in the index, in no particular order; shared with what
+    /// each search finds, so a search holds no borrow of the catalog.
+    sessions: Vec<Rc<Listed>>,
+    /// Where `set_hidden` records its choices.
+    prefs: PathBuf,
     providers: Vec<&'static str>,
     malformed_lines: usize,
     searched: Vec<PathBuf>,
@@ -270,9 +279,9 @@ pub struct Catalog {
 }
 
 /// What one query found in a catalog.
-pub struct Found<'c> {
+pub struct Found {
     /// In `search`'s order.
-    pub sessions: Vec<&'c Listed>,
+    pub sessions: Vec<Rc<Listed>>,
     pub left_out: LeftOut,
 }
 
@@ -287,12 +296,13 @@ impl Catalog {
             .into_iter()
             .map(|session| {
                 let hidden = hides.contains(&session);
-                listed(session, hidden)
+                Rc::new(listed(session, hidden))
             })
             .collect();
         Ok(Catalog {
             index: refreshed.index,
             sessions,
+            prefs: data.prefs(),
             providers: roots.providers(),
             malformed_lines: refreshed.malformed_lines,
             searched: refreshed.searched,
@@ -308,17 +318,18 @@ impl Catalog {
 
     /// The sessions matching `query`, with the same rules and order as
     /// `search`. Fails only when the index can no longer be read.
-    pub fn search(&self, query: &Query) -> Result<Found<'_>, DataError> {
+    pub fn search(&self, query: &Query) -> Result<Found, DataError> {
         let candidates = self
             .sessions
             .iter()
             .map(|listed| SessionKey::of(&listed.session))
             .collect();
         let matched: HashSet<SessionKey> = self.index.matching(query, candidates)?;
-        let mut sessions: Vec<&Listed> = self
+        let mut sessions: Vec<Rc<Listed>> = self
             .sessions
             .iter()
             .filter(|listed| matched.contains(&SessionKey::of(&listed.session)))
+            .cloned()
             .collect();
         let left_out = query.select(&mut sessions);
         Ok(Found { sessions, left_out })
@@ -344,6 +355,27 @@ impl Catalog {
     /// the only way to finish it.
     pub fn completions(&self, text: &str) -> Vec<Completion> {
         query::completions(text, &self.providers, &self.sessions)
+    }
+
+    /// Hides `session`, so that only `is:hidden` finds it, or shows it
+    /// again, in this catalog and in `prefs.sqlite`, which is created when
+    /// missing. Fails, changing nothing, when the preferences can't be written.
+    pub fn set_hidden(&mut self, session: &Session, hidden: bool) -> Result<(), DataError> {
+        let choice = match hidden {
+            true => Choice::Hide,
+            false => Choice::Unhide,
+        };
+        prefs::record(&self.prefs, std::slice::from_ref(session), choice)?;
+        let key = SessionKey::of(session);
+        for listed in &mut self.sessions {
+            if SessionKey::of(&listed.session) == key {
+                *listed = Rc::new(Listed {
+                    hidden,
+                    ..Listed::clone(listed)
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Every session in the index, whether or not a query keeps it.

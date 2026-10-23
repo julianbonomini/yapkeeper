@@ -84,7 +84,7 @@ fn lines(palette: &Palette, theme: &Theme, cells: usize) -> Vec<Line<'static>> {
             .paragraph(&meta.join(" · "), "", META_LINES, theme.dim)
             .lines,
     );
-    let icon = icon(listed);
+    let icon = icon(&listed);
     let dir = directory(&session.working_dir, palette.home.as_deref());
     let dir = fit_left(&dir, cells.saturating_sub(icon.width() + 1));
     lines.push(Line::styled(format!("{icon} {dir}"), theme.dim));

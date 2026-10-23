@@ -5,6 +5,7 @@
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use super::{Ending, fits_a_token, listed_by, location_name};
@@ -81,7 +82,11 @@ impl Spot<'_> {
 /// recent first, ties by name. Rows, paths and `missing` come from the
 /// sessions a bare `@` lists; `typed` only picks which rows are kept, and
 /// while it is empty the missing ones are left out.
-pub(super) fn rows(typed: &str, providers: &[&'static str], sessions: &[Listed]) -> Vec<Ending> {
+pub(super) fn rows(
+    typed: &str,
+    providers: &[&'static str],
+    sessions: &[Rc<Listed>],
+) -> Vec<Ending> {
     let mut projects: Vec<Project> = Vec::new();
     let mut folders: Vec<Spot> = Vec::new();
     for listed in listed_by("@", providers, sessions) {

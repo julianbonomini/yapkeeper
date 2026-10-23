@@ -80,7 +80,7 @@ pub(super) fn render(
         None => String::new(),
     };
     let home = palette.home.as_deref();
-    let lines = heading_lines(listed, home, &found, theme, usize::from(heading.width));
+    let lines = heading_lines(&listed, home, &found, theme, usize::from(heading.width));
     frame.render_widget(Paragraph::new(lines), heading);
 }
 

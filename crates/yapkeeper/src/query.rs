@@ -17,6 +17,7 @@ mod locations;
 use std::borrow::Borrow;
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::{Availability, LeftOut, Listed, Location, Place, RecordedGit};
 
@@ -519,7 +520,7 @@ pub struct Completion {
 pub(crate) fn completions(
     text: &str,
     providers: &[&'static str],
-    sessions: &[Listed],
+    sessions: &[Rc<Listed>],
 ) -> Vec<Completion> {
     let Some(last) = pieces(text).pop().filter(|span| span.end == text.len()) else {
         return Vec::new();
@@ -577,9 +578,9 @@ struct Ending {
 fn listed_by<'s>(
     text: &str,
     providers: &[&'static str],
-    sessions: &'s [Listed],
+    sessions: &'s [Rc<Listed>],
 ) -> Vec<&'s Listed> {
-    let mut found: Vec<&Listed> = sessions.iter().collect();
+    let mut found: Vec<&Listed> = sessions.iter().map(Rc::as_ref).collect();
     Query::parse(text, providers).select(&mut found);
     found
 }

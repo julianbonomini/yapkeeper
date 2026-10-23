@@ -5,6 +5,7 @@
 use std::io::{self, Write, stdout};
 use std::panic;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -20,7 +21,7 @@ use super::{Palette, Step};
 /// Takes over the terminal (raw mode, alternate screen), runs `palette`
 /// until it quits, and restores the terminal on return, on error and on
 /// panic. Fails when the terminal can't be set up, drawn to or read from.
-pub fn run(mut palette: Palette<'_>) -> io::Result<()> {
+pub fn run(mut palette: Palette) -> io::Result<()> {
     enable_raw_mode()?;
     // Held before anything else changes, so every later failure restores.
     let _restore = Restore::new(stdout());
@@ -42,13 +43,19 @@ pub fn run(mut palette: Palette<'_>) -> io::Result<()> {
     result
 }
 
-fn event_loop(palette: &mut Palette<'_>) -> io::Result<()> {
+fn event_loop(palette: &mut Palette) -> io::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     loop {
-        terminal.draw(|frame| palette.render(frame))?;
+        terminal.draw(|frame| palette.render(frame, Instant::now()))?;
+        // With nothing pressed by then, redraw when the frame changes.
+        if let Some(at) = palette.redraw_at()
+            && !event::poll(at.saturating_duration_since(Instant::now()))?
+        {
+            continue;
+        }
         // A resize, or any other event, just redraws.
         if let Event::Key(key) = event::read()?
-            && palette.handle(key) == Step::Quit
+            && palette.handle(key, Instant::now()) == Step::Quit
         {
             return Ok(());
         }

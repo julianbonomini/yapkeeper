@@ -16,8 +16,10 @@ use ratatui::widgets::{Block, BorderType, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::{Colour, Palette};
-use crate::line::{age, availability_label, fit, fit_left, one_line, place};
-use crate::{Availability, Listed, Place, TokenKind};
+use crate::line::{
+    age, availability_label, directory, fit, fit_left, one_line, place, without_controls,
+};
+use crate::{Availability, Listed, LocationRow, LocationRowKind, Place, TokenKind};
 
 /// The smallest terminal the palette draws in; below it only says so.
 const MIN_WIDTH: u16 = 48;
@@ -29,6 +31,12 @@ const SPLIT_WIDTH: u16 = 80;
 
 const PROMPT: &str = " › ";
 const PLACEHOLDER: &str = "search everything · @where #provider is:state";
+
+/// How far a worktree's row sits in from its project's.
+const WORKTREE_INDENT: usize = 3;
+
+/// Between the parts of a location-list row's detail.
+const SEPARATOR: &str = " · ";
 
 /// Wide enough for every age up to `99w`, so ages line up.
 const AGE_CELLS: usize = 3;
@@ -206,15 +214,20 @@ fn typed_query<'a>(palette: &Palette, theme: &Theme, cells: usize) -> (Vec<Span<
     (spans, used)
 }
 
-/// One line per way to finish the filter being typed: the token as it
-/// would read, in the accent, and how many sessions it lists.
+/// One line per way to finish the filter being typed: a location-list row
+/// after `@`, otherwise the token as it would read, in the accent, and how
+/// many sessions it lists.
 fn completions(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let width = usize::from(area.width);
+    let home = palette.home.as_deref();
     let items: Vec<ListItem> = palette
         .completions
         .iter()
         .map(|completion| {
             let count = completion.count.to_string();
+            if let Some(row) = &completion.location {
+                return ListItem::new(location_row(row, &count, home, theme, width));
+            }
             // A space before the token and at least one before the count,
             // which ends in the last cell, as ages do.
             let token = fit(&completion.token, width.saturating_sub(2 + count.width()));
@@ -229,6 +242,109 @@ fn completions(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Re
         .collect();
     let list = List::new(items).highlight_style(theme.selection);
     frame.render_stateful_widget(list, area, &mut palette.completion);
+}
+
+/// What a location-list row says after its kind words, and how it gives way.
+enum Tail<'r> {
+    /// A checkout's path, with a leading home shown as `~`; it keeps its end.
+    Path(&'r Path),
+    /// Plain words; they keep their start.
+    Words(&'static str),
+}
+
+/// ` icon label  kind · tail  count`, `width` cells wide, a worktree
+/// indented under its project: the label keeps its column, the kind words
+/// are never cut, what follows them gives way, and the count ends in the
+/// last cell.
+fn location_row<'a>(
+    row: &LocationRow,
+    count: &str,
+    home: Option<&Path>,
+    theme: &Theme,
+    width: usize,
+) -> Line<'a> {
+    let indent = match row.kind {
+        LocationRowKind::Worktree { .. } => WORKTREE_INDENT,
+        _ => 0,
+    };
+    let label_cells = (width * 3 / 10).clamp(14, 30);
+    let label = match &row.kind {
+        LocationRowKind::Project { project: name, .. }
+        | LocationRowKind::Worktree { worktree: name, .. } => {
+            fit(&without_controls(name), label_cells - indent)
+        }
+        LocationRowKind::Folder { path } => fit_left(&directory(path, home), label_cells - indent),
+    };
+    let (kind, tail) = match &row.kind {
+        LocationRowKind::Project {
+            worktrees,
+            checkout,
+            ..
+        } => {
+            let kind = match (row.missing, worktrees) {
+                (true, _) => "missing".to_string(),
+                (false, 0) => "git repo".to_string(),
+                (false, 1) => format!("git repo{SEPARATOR}1 worktree"),
+                (false, n) => format!("git repo{SEPARATOR}{n} worktrees"),
+            };
+            (kind, checkout.as_deref().map(Tail::Path))
+        }
+        LocationRowKind::Worktree { checkout, .. } => {
+            let kind = if row.missing { "missing" } else { "worktree" };
+            (kind.to_string(), Some(Tail::Path(checkout)))
+        }
+        LocationRowKind::Folder { .. } if row.missing => (
+            "missing".to_string(),
+            Some(Tail::Words("folder no longer exists")),
+        ),
+        LocationRowKind::Folder { .. } => ("folder".to_string(), None),
+    };
+    // A space before the icon and one after it, then the label's column,
+    // two spaces before the detail and at least two before the count, so the
+    // columns read apart.
+    let detail_at = 1 + 2 + label_cells + 2;
+    let detail_cells = width.saturating_sub(detail_at + 2 + count.width());
+    let kind = fit(&kind, detail_cells);
+    let tail_cells = detail_cells.saturating_sub(kind.width() + SEPARATOR.width());
+    // Room for only the `…` a cut leaves says nothing, so the tail goes.
+    let tail = match tail {
+        _ if tail_cells < 2 => String::new(),
+        Some(Tail::Path(path)) => fit_left(&directory(path, home), tail_cells),
+        Some(Tail::Words(words)) => fit(words, tail_cells),
+        None => String::new(),
+    };
+    let kind_style = match row.missing {
+        true => theme.label,
+        false => theme.dim,
+    };
+    let label_gap = label_cells - indent - label.width() + 2;
+    let mut detail = kind.width();
+    let mut spans = vec![
+        Span::raw(" ".repeat(1 + indent)),
+        Span::styled(format!("{} ", location_icon(row)), theme.dim),
+        Span::raw(label),
+        Span::raw(" ".repeat(label_gap)),
+        Span::styled(kind, kind_style),
+    ];
+    if !tail.is_empty() {
+        detail += SEPARATOR.width() + tail.width();
+        spans.push(Span::styled(format!("{SEPARATOR}{tail}"), theme.dim));
+    }
+    let gap = width.saturating_sub(detail_at + detail + count.width());
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::styled(count.to_string(), theme.dim));
+    Line::from(spans)
+}
+
+/// The icon for the kind of place a location-list row stands for, or for a
+/// missing one.
+fn location_icon(row: &LocationRow) -> &'static str {
+    match (&row.kind, row.missing) {
+        (_, true) => MISSING_ICON,
+        (LocationRowKind::Project { .. }, false) => REPO_ICON,
+        (LocationRowKind::Worktree { .. }, false) => WORKTREE_ICON,
+        (LocationRowKind::Folder { .. }, false) => FOLDER_ICON,
+    }
 }
 
 /// One line per session, or what to try when there are none.
@@ -327,14 +443,15 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
         false => "clear",
     };
     let hints = match palette.completions.is_empty() {
-        true => [
+        true => vec![
             Some(("↑↓", "move")),
+            Some(("Tab", "locations")),
             Some(("Esc", esc)),
             Some(("^U", "clear")),
             palette.launch_token.as_ref().map(|_| ("^L", "here")),
             Some(("^C", "quit")),
         ],
-        false => [
+        false => vec![
             Some(("↑↓", "choose")),
             Some(("Tab", "insert")),
             Some(("Esc", esc)),

@@ -16,6 +16,9 @@ The filesystem directory recorded for a session. It may be a Git worktree or an 
 **Location**:
 Where a session ran, derived from its working directory: a Git repo's main checkout, one of its linked worktrees, or a plain folder. A project groups a repo's main checkout and its worktrees.
 
+**Location list**:
+The list `Tab` or `@` opens: one row per project, with its worktrees under it, then one per plain folder, each with how many sessions its `@` token lists. Choosing a row inserts that token.
+
 **Orphaned session**:
 A session whose recorded working directory no longer exists. A directory that cannot be inspected makes it an unavailable session instead.
 

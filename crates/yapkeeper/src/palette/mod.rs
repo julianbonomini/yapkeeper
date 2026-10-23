@@ -112,8 +112,10 @@ impl<'c> Palette<'c> {
             KeyCode::Down => self.move_selection(Direction::Down),
             KeyCode::Tab | KeyCode::Enter => {
                 let chosen = self.completion.selected().map(|row| &self.completions[row]);
-                if let Some(chosen) = chosen {
-                    self.set_query(chosen.query.clone());
+                match chosen {
+                    Some(chosen) => self.set_query(chosen.query.clone()),
+                    None if key.code == KeyCode::Tab => self.open_locations(),
+                    None => {}
                 }
             }
             KeyCode::Esc if self.query.is_empty() => return Step::Quit,
@@ -155,6 +157,20 @@ impl<'c> Palette<'c> {
         let query = match self.query.trim_end() {
             "" => format!("{token} "),
             typed => format!("{typed} {token} "),
+        };
+        self.set_query(query);
+    }
+
+    /// Starts an `@` token at the end of the query, which opens the location
+    /// list; nothing when the query already ends in a bare `@`, so a second
+    /// `Tab` over an empty list types no second one.
+    fn open_locations(&mut self) {
+        if self.query.split_whitespace().next_back() == Some("@") {
+            return;
+        }
+        let query = match self.query.is_empty() || self.query.ends_with(char::is_whitespace) {
+            true => format!("{}@", self.query),
+            false => format!("{} @", self.query),
         };
         self.set_query(query);
     }

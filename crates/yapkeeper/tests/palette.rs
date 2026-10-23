@@ -21,7 +21,7 @@ use yapkeeper::{Catalog, DataDir, Roots, State, hide};
 
 #[cfg(unix)]
 use support::Locked;
-use support::{repo_with_worktree, temp_dir};
+use support::{live_dir, repo_with_worktree, repo_with_worktrees, temp_dir};
 
 mod support;
 
@@ -938,7 +938,7 @@ fn the_query_line_accents_filter_tokens_and_leaves_words_plain() {
 fn each_filter_prefix_opens_its_completions_with_session_counts() {
     let histories = Histories::three();
     let catalog = histories.catalog();
-    let cases: [(&str, &[(&str, usize)]); 5] = [
+    let cases: [(&str, &[(&str, usize)]); 4] = [
         ("#", &[("#claude", 2), ("#codex", 1)]),
         (
             "is:",
@@ -955,11 +955,6 @@ fn each_filter_prefix_opens_its_completions_with_session_counts() {
         ),
         ("!c", &[("!claude", 1), ("!codex", 2)]),
         ("not:o", &[("not:orphaned", 2)]),
-        // Most recent first, orphaned last; `@/usr` also finds `/usr/bin`.
-        (
-            "@",
-            &[("@/usr/bin", 1), ("@/usr", 2), ("@/synthetic/gone", 1)],
-        ),
     ];
     for (typed, expected) in cases {
         let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
@@ -967,6 +962,22 @@ fn each_filter_prefix_opens_its_completions_with_session_counts() {
         let frame = frame(&mut palette, 120, 40);
         assert_eq!(completions(&frame), pairs(expected), "{typed}: {frame:#?}");
     }
+
+    // Most recent first, the missing folder left out; `@/usr` also finds
+    // `/usr/bin`.
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    keys(&mut palette, "@");
+    let frame = frame(&mut palette, 120, 40);
+    let rows = location_rows(&frame);
+    let rows: Vec<(&str, usize)> = rows
+        .iter()
+        .map(|row| (row.label.as_str(), row.count))
+        .collect();
+    assert_eq!(rows, [("/usr/bin", 1), ("/usr", 2)], "{frame:#?}");
+    assert!(
+        !frame.iter().any(|line| line.contains("gone")),
+        "{frame:#?}"
+    );
 }
 
 #[test]
@@ -1004,10 +1015,12 @@ fn typing_after_the_prefix_narrows_the_completions() {
 
     let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
     keys(&mut palette, "@bin");
-    assert_eq!(
-        completions(&frame(&mut palette, 120, 40)),
-        pairs(&[("@/usr/bin", 1)])
-    );
+    let rows = location_rows(&frame(&mut palette, 120, 40));
+    let rows: Vec<(&str, usize)> = rows
+        .iter()
+        .map(|row| (row.label.as_str(), row.count))
+        .collect();
+    assert_eq!(rows, [("/usr/bin", 1)]);
 }
 
 #[test]
@@ -1110,4 +1123,378 @@ fn a_query_cut_from_the_left_keeps_its_filters_accented() {
         assert_eq!(buffer[(at, 1)].fg, Color::Indexed(108), "{frame:#?}");
     }
     assert_eq!(buffer[(x - 2, 1)].fg, Color::Reset, "{frame:#?}");
+}
+
+/// One row of the location list as drawn.
+#[derive(Debug, PartialEq, Eq)]
+struct LocationLine {
+    /// Drawn under its project's row.
+    indented: bool,
+    label: String,
+    detail: String,
+    count: usize,
+}
+
+/// The location list's rows, in order: each body line between the borders
+/// that reads as an icon, a label, a detail and a count, apart by runs of
+/// two or more spaces.
+fn location_rows(frame: &[String]) -> Vec<LocationLine> {
+    frame[3..frame.len() - 2]
+        .iter()
+        .filter_map(|line| {
+            let inner = line.strip_prefix('│')?.strip_suffix('│')?;
+            let indented = inner.starts_with("    ");
+            let mut chars = inner.trim_start().chars();
+            chars.next()?;
+            let rest = chars.as_str().trim();
+            let parts: Vec<&str> = rest
+                .split("  ")
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .collect();
+            let [label, detail, count] = parts.as_slice() else {
+                return None;
+            };
+            Some(LocationLine {
+                indented,
+                label: label.to_string(),
+                detail: detail.to_string(),
+                count: count.parse().ok()?,
+            })
+        })
+        .collect()
+}
+
+/// Fixture F: `acme-api` with worktrees `billing-retry` and `docs-site`, and
+/// `lint-kit` with a main checkout only, under `<live dir>/code`, one session
+/// in each checkout and worktree, one in `/usr` and one in `/synthetic/gone`.
+/// `lint-kit` is the most recent repo, and `/usr` is newer than either.
+fn locations_fixture() -> (Histories, TempDir) {
+    let live = live_dir();
+    let code = live.path().join("code");
+    let (acme, acme_worktrees) =
+        repo_with_worktrees(&code, "acme-api", &["billing-retry", "docs-site"]);
+    let (lint, _) = repo_with_worktrees(&code, "lint-kit", &[]);
+    let histories = Histories::new();
+    let sessions = [
+        ("501", "/synthetic/gone".into(), "Gone notes", "2026-10-10"),
+        ("502", acme, "Acme main work", "2026-10-11"),
+        (
+            "503",
+            acme_worktrees[1].clone(),
+            "Docs site copy",
+            "2026-10-12",
+        ),
+        (
+            "504",
+            acme_worktrees[0].clone(),
+            "Billing retry fix",
+            "2026-10-13",
+        ),
+        ("505", lint, "Lint kit rules", "2026-10-15"),
+        (
+            "506",
+            PathBuf::from("/usr"),
+            "Usr folder chores",
+            "2026-10-18",
+        ),
+    ];
+    for (id, cwd, title, day) in sessions {
+        histories.claude_records(
+            &format!("aaaaaaaa-0000-4000-8000-000000000{id}"),
+            &cwd.to_string_lossy(),
+            &[json!({
+                "type": "user",
+                "message": { "content": title },
+                "timestamp": format!("{day}T10:00:00Z"),
+            })],
+        );
+    }
+    (histories, live)
+}
+
+/// What a test expects of one location row: its detail starts with `kind`
+/// and ends with `path`, the path's last folders, which hold no home folder.
+struct Expected {
+    indented: bool,
+    label: &'static str,
+    kind: &'static str,
+    path: &'static str,
+    count: usize,
+}
+
+/// Checks fixture F's rows with nothing typed after `@`, in the documented
+/// order.
+fn assert_documented_order(rows: &[LocationLine]) {
+    let expected = [
+        Expected {
+            indented: false,
+            label: "lint-kit",
+            kind: "git repo · ",
+            path: "/code/lint-kit",
+            count: 1,
+        },
+        Expected {
+            indented: false,
+            label: "acme-api",
+            kind: "git repo · 2 worktrees · ",
+            path: "/code/acme-api",
+            count: 3,
+        },
+        Expected {
+            indented: true,
+            label: "billing-retry",
+            kind: "worktree · ",
+            path: "/acme-api.wt/billing-retry",
+            count: 1,
+        },
+        Expected {
+            indented: true,
+            label: "docs-site",
+            kind: "worktree · ",
+            path: "/acme-api.wt/docs-site",
+            count: 1,
+        },
+        Expected {
+            indented: false,
+            label: "/usr",
+            kind: "folder",
+            path: "folder",
+            count: 1,
+        },
+    ];
+    assert_eq!(rows.len(), expected.len(), "{rows:#?}");
+    for (row, want) in rows.iter().zip(expected) {
+        assert_eq!(
+            (row.indented, row.label.as_str(), row.count),
+            (want.indented, want.label, want.count),
+            "{rows:#?}"
+        );
+        assert!(
+            row.detail.starts_with(want.kind) && row.detail.ends_with(want.path),
+            "{row:?}"
+        );
+    }
+}
+
+#[test]
+fn tab_opens_the_location_list_in_the_documented_order() {
+    let (histories, _live) = locations_fixture();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    press(&mut palette, KeyCode::Tab);
+    let frame = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "@", "{frame:#?}");
+    assert_documented_order(&location_rows(&frame));
+    assert!(
+        !frame.iter().any(|line| line.contains("gone")),
+        "{frame:#?}"
+    );
+}
+
+#[test]
+fn a_missing_folder_shows_last_once_anything_is_typed() {
+    let (histories, _live) = locations_fixture();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    keys(&mut palette, "@/");
+    let mut rows = location_rows(&frame(&mut palette, 120, 40));
+    let last = rows.pop();
+    assert_documented_order(&rows);
+    assert_eq!(
+        last,
+        Some(LocationLine {
+            indented: false,
+            label: "/synthetic/gone".to_string(),
+            detail: "missing · folder no longer exists".to_string(),
+            count: 1,
+        })
+    );
+}
+
+#[test]
+fn typing_at_or_pressing_tab_opens_the_same_location_list() {
+    let (histories, _live) = locations_fixture();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    keys(&mut palette, "@");
+    assert_documented_order(&location_rows(&frame(&mut palette, 120, 40)));
+
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    keys(&mut palette, "retry");
+    press(&mut palette, KeyCode::Tab);
+    let frame = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "retry @", "{frame:#?}");
+    assert_documented_order(&location_rows(&frame));
+
+    // With no locations to choose, a second `Tab` types no second `@`.
+    let empty = Histories::new();
+    let catalog = empty.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    press(&mut palette, KeyCode::Tab);
+    press(&mut palette, KeyCode::Tab);
+    assert_eq!(query_text(&self::frame(&mut palette, 120, 40)), "@");
+}
+
+#[test]
+fn missing_folders_are_hidden_until_typed() {
+    let (histories, _live) = locations_fixture();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    keys(&mut palette, "@");
+    let rows = location_rows(&frame(&mut palette, 120, 40));
+    assert!(
+        !rows.iter().any(|row| row.label.contains("gone")),
+        "{rows:#?}"
+    );
+
+    keys(&mut palette, "gone");
+    assert_eq!(
+        location_rows(&frame(&mut palette, 120, 40)),
+        [LocationLine {
+            indented: false,
+            label: "/synthetic/gone".to_string(),
+            detail: "missing · folder no longer exists".to_string(),
+            count: 1,
+        }]
+    );
+}
+
+#[test]
+fn choosing_a_worktree_inserts_its_token_and_narrows_the_results() {
+    let (histories, _live) = locations_fixture();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    press(&mut palette, KeyCode::Tab);
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Enter);
+    let frame = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "@acme-api:billing-retry", "{frame:#?}");
+    assert_eq!(location_rows(&frame), [], "{frame:#?}");
+    let titles = [
+        "Gone notes",
+        "Acme main work",
+        "Docs site copy",
+        "Billing retry fix",
+        "Lint kit rules",
+        "Usr folder chores",
+    ];
+    let shown: Vec<&String> = rows_with(&frame, &titles);
+    assert_eq!(shown.len(), 1, "{frame:#?}");
+    assert!(shown[0].starts_with("│ Billing retry fix"), "{frame:#?}");
+    assert!(frame[1].trim_end_matches('│').trim_end().ends_with("1 / 6"));
+}
+
+#[test]
+fn choosing_a_project_or_a_folder_inserts_its_token() {
+    let (histories, _live) = locations_fixture();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    press(&mut palette, KeyCode::Tab);
+    press(&mut palette, KeyCode::Enter);
+    assert_eq!(query_text(&frame(&mut palette, 120, 40)), "@lint-kit");
+
+    ctrl(&mut palette, 'u');
+    press(&mut palette, KeyCode::Tab);
+    for _ in 0..4 {
+        press(&mut palette, KeyCode::Down);
+    }
+    press(&mut palette, KeyCode::Tab);
+    assert_eq!(query_text(&frame(&mut palette, 120, 40)), "@/usr");
+}
+
+#[test]
+fn typing_after_at_matches_any_part_of_a_location_path() {
+    let (histories, _live) = locations_fixture();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    keys(&mut palette, "@code");
+    let rows = location_rows(&frame(&mut palette, 120, 40));
+    let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["lint-kit", "acme-api", "billing-retry", "docs-site"],
+        "{rows:#?}"
+    );
+
+    let histories = Histories::three();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    keys(&mut palette, "@bin");
+    assert_eq!(
+        location_rows(&frame(&mut palette, 120, 40)),
+        [LocationLine {
+            indented: false,
+            label: "/usr/bin".to_string(),
+            detail: "folder".to_string(),
+            count: 1,
+        }]
+    );
+}
+
+#[test]
+fn location_rows_keep_their_kind_words_and_counts_in_narrow_terminals() {
+    let (histories, _live) = locations_fixture();
+    let catalog = histories.catalog();
+    // At 50 columns `acme-api`'s path would have room for only its `…`.
+    for (width, height) in [(80, 24), (60, 20), (50, 12), (48, 12)] {
+        let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+        keys(&mut palette, "@/");
+        let buffer = draw(&mut palette, width, height);
+        let frame = lines(&buffer);
+        let rows = location_rows(&frame);
+        assert_eq!(rows.len(), 6, "{width}×{height}: {frame:#?}");
+        for row in &rows {
+            assert!(
+                ["git repo", "worktree", "folder", "missing"]
+                    .iter()
+                    .any(|kind| row.detail.starts_with(kind)),
+                "{width}×{height}: {row:?}"
+            );
+            assert!(!row.detail.ends_with("· …"), "{width}×{height}: {row:?}");
+        }
+        for y in 3..3 + rows.len() as u16 {
+            assert_eq!(buffer[(0, y)].symbol(), "│", "{width}×{height}: {frame:#?}");
+            assert_eq!(buffer[(width - 1, y)].symbol(), "│", "{frame:#?}");
+            let last = buffer[(width - 2, y)].symbol();
+            assert!(
+                last.chars().all(|c| c.is_ascii_digit()) && !last.is_empty(),
+                "{width}×{height} row {y}: {frame:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mono_reverses_only_the_selected_location_row() {
+    let (histories, _live) = locations_fixture();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Mono, Path::new("/"));
+    press(&mut palette, KeyCode::Tab);
+    press(&mut palette, KeyCode::Down);
+    let buffer = draw(&mut palette, 80, 24);
+    for cell in buffer.content() {
+        assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{cell:?}");
+    }
+    let rows = location_rows(&lines(&buffer)).len() as u16;
+    for y in 3..3 + rows {
+        for x in 1..79 {
+            let reversed = buffer[(x, y)].modifier.contains(Modifier::REVERSED);
+            assert_eq!(reversed, y == 4, "({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn the_footer_names_tab_for_locations_until_the_list_is_open() {
+    let histories = Histories::three();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let footer = frame(&mut palette, 120, 40)[38].clone();
+    assert!(footer.contains("Tab locations"), "{footer}");
+    press(&mut palette, KeyCode::Tab);
+    let footer = frame(&mut palette, 120, 40)[38].clone();
+    assert!(footer.contains("Tab insert"), "{footer}");
+    assert!(!footer.contains("Tab locations"), "{footer}");
 }

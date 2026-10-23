@@ -29,7 +29,9 @@ use yapkeeper_claude::ClaudeCode;
 use yapkeeper_codex::Codex;
 
 pub use location::*;
-pub use query::{Completion, Query, State, Token, TokenKind, location_token};
+pub use query::{
+    Completion, LocationRow, LocationRowKind, Query, State, Token, TokenKind, location_token,
+};
 pub use yapkeeper_model::*;
 
 /// Where each provider keeps its history.
@@ -330,11 +332,16 @@ impl Catalog {
         self.index.conversation(&SessionKey::of(session))
     }
 
-    /// The ways to finish the filter at the end of `text`, with this
-    /// catalog's providers and each one's session count; empty unless the
-    /// last token starts with `@`, `#`, `is:`, `!` or `not:`, nothing
-    /// follows it, so a space never offers any, and it isn't already the only
-    /// way to finish it.
+    /// The ways to finish the filter at the end of `text`, each with how
+    /// many sessions its token lists. After `@`, this is the location list:
+    /// the places where the sessions `@` lists ran. Each project comes with
+    /// its worktrees after it, then the plain folders. Each group is ordered
+    /// most recent first, and missing places come last. A row is kept when a
+    /// session that the typed `@` token lists ran there. Missing places are
+    /// left out while nothing follows the `@`. Empty unless the last token
+    /// starts with `@`, `#`, `is:`, `!` or `not:` and nothing follows it, so
+    /// a space never offers any, and empty when the token typed is already
+    /// the only way to finish it.
     pub fn completions(&self, text: &str) -> Vec<Completion> {
         query::completions(text, &self.providers, &self.sessions)
     }

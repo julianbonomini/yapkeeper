@@ -9,13 +9,18 @@
 //! as a bare provider name, then a bare state name, and otherwise as a word;
 //! a second `!` is just text. Sigils and names ignore case; words keep smart
 //! case. While the last token is a filter being typed, it offers the ways to
-//! finish it, each with how many sessions it lists.
+//! finish it, each with how many sessions it lists; after `@` that is the
+//! location list.
+
+mod locations;
 
 use std::borrow::Borrow;
 use std::ops::Range;
 use std::path::Path;
 
 use crate::{Availability, LeftOut, Listed, Location, Place, RecordedGit};
+
+pub use locations::{LocationRow, LocationRowKind};
 
 /// What the person typed, read as the query language. A session must pass
 /// every filter and contain every search word, in its title, recap or
@@ -494,16 +499,23 @@ pub struct Completion {
     /// How many sessions `token` alone lists, by the same defaults as a
     /// search.
     pub count: usize,
+    /// The row the location list shows for this way to finish an `@`
+    /// token; `None` for every completion not after `@`.
+    pub location: Option<LocationRow>,
 }
 
-/// The ways to finish the last token of `text` when it starts with `@`,
-/// `#`, `is:`, `!` or `not:` and nothing follows it, in this order: for `@`,
-/// the locations of the sessions that token lists, most recent first, a
-/// worktree's project before the worktree; for `#`, the `providers`
-/// starting with what was typed after it; for `is:`, the states that do;
-/// for a bare `!` or `not:`, those providers then those states. Empty when
-/// `text` ends in whitespace or with a word, or when the only way to finish
-/// the token is the token as typed.
+/// The ways to finish the filter at the end of `text`, each with how many
+/// sessions its token lists. After `@`, this is the location list: the
+/// places where the sessions `@` lists ran. Each project comes with its
+/// worktrees after it, then the plain folders. Each group is ordered most
+/// recent first, and missing places come last. A row is kept when a session
+/// that the typed `@` token lists ran there. Missing places are left out
+/// while nothing follows the `@`. After `#`, it is the `providers` starting
+/// with what was typed after it; after `is:`, the states that do; after a
+/// bare `!` or `not:`, those providers then those states. Empty unless the
+/// last token starts with `@`, `#`, `is:`, `!` or `not:` and nothing follows
+/// it, so a space never offers any, and empty when the token typed is
+/// already the only way to finish it.
 pub(crate) fn completions(
     text: &str,
     providers: &[&'static str],
@@ -522,25 +534,27 @@ pub(crate) fn completions(
     let starting = |name: &&str| fold(name).starts_with(&fold(typed));
     let matching_providers = || providers.iter().copied().filter(starting);
     let states = || State::ALL.into_iter().map(State::name).filter(starting);
-    let names: Vec<String> = match named {
-        Some((Sigil::Provider, _)) => matching_providers().map(String::from).collect(),
-        Some((Sigil::State, _)) => states().map(String::from).collect(),
-        Some((Sigil::Location, _)) => locations(&format!("@{typed}"), providers, sessions),
-        None if negated => matching_providers()
-            .chain(states())
-            .map(String::from)
-            .collect(),
+    let plain = |name: &str| Ending {
+        name: name.to_string(),
+        location: None,
+    };
+    let endings: Vec<Ending> = match named {
+        Some((Sigil::Provider, _)) => matching_providers().map(plain).collect(),
+        Some((Sigil::State, _)) => states().map(plain).collect(),
+        Some((Sigil::Location, _)) => locations::rows(typed, providers, sessions),
+        None if negated => matching_providers().chain(states()).map(plain).collect(),
         None => return Vec::new(),
     };
-    let completions: Vec<Completion> = names
+    let completions: Vec<Completion> = endings
         .into_iter()
-        .filter(|name| fits_a_token(name))
-        .map(|name| {
+        .filter(|ending| fits_a_token(&ending.name))
+        .map(|Ending { name, location }| {
             let token = format!("{prefix}{name}");
             Completion {
                 count: listed_by(&token, providers, sessions).len(),
                 query: format!("{head}{name} "),
                 token,
+                location,
             }
         })
         .collect();
@@ -551,26 +565,11 @@ pub(crate) fn completions(
     }
 }
 
-/// The names `@` takes for the sessions `location` lists, in its order, a
-/// worktree's project before the worktree, each once.
-fn locations(location: &str, providers: &[&'static str], sessions: &[Listed]) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    for listed in listed_by(location, providers, sessions) {
-        let place = &listed.location.place;
-        let project = match place {
-            Place::Worktree { project, .. } => Some(project.clone()),
-            _ => None,
-        };
-        for name in project
-            .into_iter()
-            .chain([location_name(place, &listed.session.working_dir)])
-        {
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-    }
-    names
+/// One way to finish the name being typed, before it becomes a `Completion`.
+struct Ending {
+    /// What follows the sigil, or the `!` or `not:`, in the finished token.
+    name: String,
+    location: Option<LocationRow>,
 }
 
 /// The `sessions` that `text`, holding no search words, lists, in a

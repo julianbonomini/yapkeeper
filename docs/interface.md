@@ -9,7 +9,7 @@ The palette fills the terminal inside a single rounded border. From top to botto
 1. The query line, with the match count on the right (`2 / 783`).
 2. A rule.
 3. Results on the left (48%) and the preview on the right (52%) when the palette is at least 80 columns wide. Below that width the preview is dropped and `→` opens the conversation.
-4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action.
+4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action. Under the results the hints include `Tab locations`; while a completion list is open, `Tab insert`.
 
 There is no permanent location sidebar. The query line handles locations (see below).
 
@@ -48,7 +48,7 @@ A session whose directory no longer exists is `orphaned`; one whose directory ex
 
 An orphaned or unavailable session's project is inferred on a best-effort basis. The first of these that applies names the project: the recorded `repository_url`, then the nearest existing repo above the directory, then a path layout (`X.wt/w`, `R/.claude/worktrees/w`, `~/.tool/worktrees/P/w`, `P/worktrees/w` or `P/.worktrees/w`). The worktree comes from that layout, or from a recorded branch whose last segment matches the folder name. When nothing applies, the raw path is shown.
 
-`Tab` (or typing `@`) opens the location list. Each project row comes first and covers the main checkout and every worktree; its worktrees are listed under it. Plain folders follow. Groups are ordered by most recent activity. Each row has a kind icon on the left, a kind label and path, and a session count. With the Unicode icon set:
+`Tab` (or typing `@`) opens the location list. Each project row comes first and covers the main checkout and every worktree; its worktrees are listed under it. Plain folders follow. Project groups come first, then folders, each ordered by most recent activity, with missing places last. Each row has a kind icon on the left, a kind label and path, and a session count. A row's count is the number of sessions its `@` token lists, so a folder also counts its subfolders' sessions. A folder row shows its path once, as its label, with `folder` as its kind. With the Unicode icon set:
 
 ```
 ▣ acme-api                git repo · 3 worktrees · ~/code/acme-api   10
@@ -57,9 +57,11 @@ An orphaned or unavailable session's project is inferred on a best-effort basis.
 ⊘ ~/scratch/regex-tester  missing · folder no longer exists            1
 ```
 
+The kind words are never cut. In a narrow terminal the path gives way from the left, and a missing folder's `folder no longer exists` from the right.
+
 Typing after `@` matches location names and paths, so `@code` finds every project under `~/code`. Result rows label locations as `project › worktree`; the `project:worktree` form is used only inside `@` tokens. `Ctrl+L` inserts the location Yapkeeper was launched from.
 
-In the location list, a folder that no longer exists cannot be checked for Git, so it is shown as `missing` with its path.
+In the location list, a folder that no longer exists cannot be checked for Git, so it is shown as `missing` with its path. A missing folder reads `missing · folder no longer exists`. Missing places are left out while nothing follows `@`, and shown once anything does.
 
 ## Preview
 

@@ -30,86 +30,91 @@
 # every Ticket is done, writes the body with the vago-pr skill and keeps the
 # report's Runs at its end.
 
-# The Harness is the coding agent that performs each agent Step: "claude-code"
-# or "codex". A Step can set its own harness and model, such as review on
-# harness = "codex" with model = "gpt-6-sol" while Claude Code builds; set
-# both together, since a model belongs to one Harness.
-harness = "claude-code"
-model   = "claude-opus-5-5"
-# args = []             # appended to the Harness command; a Step can set its own
-idle_timeout = "10m"  # how long the Harness may print nothing before the Run fails
+# Codex is the default for every agent step, including fresh reviews.
+# These explicit overrides match .codex/config.toml in trusted project sessions.
+# A step using another harness must override both harness/model and args.
+harness = "codex"
+model = "gpt-6.1-sol"
+args = ["-c", 'model_reasoning_effort="high"', "-c", 'service_tier="fast"']
+idle_timeout = "10m"                                                        # how long the Harness may print nothing before the Run fails
 
 [[steps]]
-id   = "branch"
+id = "branch"
 name = "New branch"
 type = "shell"
-run  = "sh .vago/scripts/branch.sh"
+run = "sh .vago/scripts/branch.sh"
 
 [[steps]]
-id     = "design"
-name   = "Design"
-type   = "agent"
+id = "design"
+name = "Design"
+type = "agent"
 prompt = "prompts/design.md"
 
 [[steps]]
-id     = "product"
-name   = "Product"
-type   = "agent"
+id = "product"
+name = "Product"
+type = "agent"
 prompt = "prompts/product.md"
 
 [[steps]]
-id     = "architecture"
-name   = "Architecture"
-type   = "agent"
+id = "architecture"
+name = "Architecture"
+type = "agent"
 prompt = "prompts/architecture.md"
 
 [[steps]]
-id          = "design-choices"
-name        = "Design choices"
-type        = "agent"
-prompt      = "prompts/design-choices.md"
+id = "design-choices"
+name = "Design choices"
+type = "agent"
+prompt = "prompts/design-choices.md"
 goal_report = true
 
 [[steps]]
-id     = "implement"
-name   = "Build"
-type   = "agent"
+id = "implement"
+name = "Build"
+type = "agent"
 prompt = "prompts/implement.md"
 
 [[steps]]
-id      = "check"
-name    = "Checks"
-type    = "shell"
-run     = "bun run check"
-on_fail = "continue"   # review reads a failed check and fixes it
+id = "check"
+name = "Checks"
+type = "shell"
+run = "sh .vago/scripts/check.sh"
+on_fail = "continue"              # review reads a failed check and fixes it
 
 [[steps]]
-id     = "review"
-name   = "Review"
-type   = "agent"
+id = "review"
+name = "Review"
+type = "agent"
 prompt = "prompts/review.md"
 
 [[steps]]
-id     = "goal-review"
-name   = "Goal review"
-type   = "agent"
+id = "goal-review"
+name = "Goal review"
+type = "agent"
 prompt = "prompts/goal-review.md"
-when   = "last-ticket"   # skipped on every other Ticket
+when = "last-ticket"              # skipped on every other Ticket
 
 [[steps]]
-id   = "merge"
+id = "final-check"
+name = "Final checks"
+type = "shell"
+run = "sh .vago/scripts/check.sh"
+
+[[steps]]
+id = "merge"
 name = "Squash merge"
 type = "shell"
-run  = "sh .vago/scripts/merge.sh"
+run = "sh .vago/scripts/merge.sh"
 
 [[after_all]]
-id     = "describe"
-name   = "PR description"
-type   = "agent"
+id = "describe"
+name = "PR description"
+type = "agent"
 prompt = "prompts/describe.md"
 
 [[after_all]]
-id   = "ready"
+id = "ready"
 name = "Ready for review"
 type = "shell"
-run  = "sh .vago/scripts/ready.sh"
+run = "sh .vago/scripts/ready.sh"

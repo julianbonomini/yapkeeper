@@ -1,6 +1,6 @@
 # Yapkeeper v1
 
-Status: product direction agreed through the initial interview; UI, implementation stack, and workflow selection remain open.
+Status: Rust, Ratatui, and SQLite selected; UI design and implementation workflow selection remain open.
 
 ## Purpose
 
@@ -10,7 +10,8 @@ Repository and command name: `yapkeeper`. Tagline: "Now, where was I?"
 
 ## Agreed behavior
 
-- Support macOS and Linux first. Choose the language using measured startup, indexing, and search behavior. TypeScript is preferred where practical, and other languages are acceptable.
+- Support macOS and Linux first, using Rust with Ratatui and SQLite.
+- Write first-party Rust using safe APIs only; enforce `forbid(unsafe_code)` in crate roots and workspace checks.
 - Discover existing Claude Code and Codex histories, including sessions started outside Yapkeeper.
 - Search all sessions globally. Support narrowing by project, Git worktree, and folder; global search must remain available regardless of the current location.
 - Search ordinary user and assistant messages by default. Make tool calls and tool output an explicit search option.
@@ -44,13 +45,9 @@ The prototype should answer these questions with synthetic sessions:
 
 The list and preview should occupy stable space. Use flat separators and avoid nested borders or repeated status markers. Keyboard navigation, terminal restoration, width-aware text handling, and a plain CLI mode are implementation requirements to validate.
 
-## Benchmark and reuse questions
+## Implementation and reuse
 
-Compare Rust/Ratatui, Go/Bubble Tea, and TypeScript with Bun and a suitable TUI framework before committing to a stack. Evaluate SQLite full-text search in each candidate. Measure initial indexing separately from cached launch, incremental refresh, search, and preview loading. Include large files, Unicode, growing files, malformed tails, and orphaned sessions. Read [the language performance investigation](language-performance.md) for evidence and measurement limits.
-
-The local structural inspection found approximately 1,400 transcript files totaling 1.9 GB, with individual files approaching 60 MB. Counts changed during inspection because sessions were being written. Use generated data for repeatable benchmarks; inspect live data read-only when validating discovery.
-
-The user subsequently authorized disposable benchmarks on actual histories. [The real-history comparison](real-history-benchmarks.md) measures full indexing, unchanged refresh, simulated tail catch-up, indexed search, peak resident memory, and a fivefold replay. Source histories remained read-only; private snapshots and indexes were removed. Rust and Bun had similar indexing throughput, with substantially lower peak RAM for Rust. Actual TUI behavior and the implementation language remain open.
+The selected stack is Rust, Ratatui, and SQLite. The README records the measurement-based rationale; the disposable benchmark code and reports have been removed. Actual TUI startup and behavior still need validation in the prototype.
 
 Two candidates merit a focused evaluation:
 
@@ -74,9 +71,11 @@ Construct provider arguments as an argument array with an explicit process worki
 
 The local planning item is `yapkeeper-v1`, using the Codex planning harness. Shared starter workflows are installed; no ready implementation goal or tickets have been created.
 
-Next work is a UI prototype and a performance/reuse investigation. Their results should settle the stack and interaction model before slicing the implementation goal into tickets. Avoid maintaining a second Wayfinder decision map unless the planning grows beyond what this workspace can track.
+Next work is a Rust/Ratatui UI prototype to settle the interaction model before slicing the implementation goal into tickets. Avoid maintaining a second Wayfinder decision map unless the planning grows beyond what this workspace can track.
 
-The starter workflows assume Bun checks and a Claude Code implementation harness, and contain GitHub push, PR, and notification steps. These are starter defaults to review, not accepted choices for Yapkeeper.
+Both workflows use Codex with GPT-6.1 Sol, high reasoning, and Fast mode. Reviews use fresh Codex steps; Claude remains an optional adversarial second opinion. Terminal UI work must use `tui-design`; use `emil-design-eng` only when its interaction-polish principles help within terminal constraints.
+
+Both workflows use `sh .vago/scripts/check.sh` for Cargo formatting, lint, safety, and test checks, including a final gate before merge. GitHub push, PR, and notification steps remain starter defaults to review before execution.
 
 ## Out of scope
 

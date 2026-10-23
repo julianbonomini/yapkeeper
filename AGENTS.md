@@ -18,8 +18,20 @@ Keep the index rebuildable. Store hide/unhide preferences separately so rebuildi
 
 ## Terminal UI and language
 
-Use the `tui-design` skill for terminal interface design, implementation, and review. Read the reference for the selected ecosystem before making framework-specific decisions.
+Use Rust, Ratatui, and SQLite. Write first-party Rust using safe APIs only, including tests and build scripts. Each crate root must declare `#![forbid(unsafe_code)]`; do not weaken this policy or introduce unsafe blocks, functions, implementations, or FFI. Use safe library APIs instead of writing raw-pointer bindings.
 
-Prioritize usable startup time, search latency, and responsiveness during indexing. Compare Rust, Go, and TypeScript on representative workloads; distinguish measured results from estimates and minimal runtime measurements from complete TUI behavior. Real-history benchmarks require explicit user authorization, read-only sources, temporary private indexes, and aggregate output. Keep fixtures synthetic or redacted. Read `docs/language-performance.md` when evaluating the language and TUI framework.
+Always use the `tui-design` skill for terminal interface planning, design, implementation, and review, including prototypes. Load its Rust ecosystem reference for Ratatui work and the visual or interaction references as needed. Validate narrow layouts, keyboard behavior, terminal restoration, and the skill's clutter audit.
 
-The implementation language, runtime, TUI framework, and reuse strategy are open pending benchmarks and a UI prototype. Vago's starter defaults are not project decisions. Review the selected workflow's checks, harness, model, and GitHub steps before running it.
+Use `emil-design-eng` only when interaction polish or perceived responsiveness needs additional guidance. Apply the principles that fit a terminal: immediate keyboard feedback, consistent states, restrained presentation, and purposeful motion. Keep `tui-design` authoritative for terminal behavior; web-specific CSS and browser libraries do not belong in this Rust TUI. UI reports should name the skills used and the concrete decisions they informed.
+
+Prioritize usable startup time, search latency, and responsiveness during indexing. Real-history performance measurements require explicit user authorization, read-only sources, temporary private indexes, and aggregate output. Keep fixtures synthetic or redacted.
+
+Run `sh .vago/scripts/check.sh` before reporting implementation work as complete. It checks formatting, forbids unsafe code in workspace targets, treats Clippy warnings as errors, and runs tests. The first implementation ticket must initialize the Cargo project before these checks can pass.
+
+## Coding agents
+
+Use Codex by default, with GPT-6.1 Sol, high reasoning, and Fast mode. Project defaults live in `.codex/config.toml`; Vago workflows pass the same settings explicitly. Keep them aligned when changing the default.
+
+Use a fresh Codex review step to challenge the implementation. Claude is an optional adversarial second opinion when the user requests it, rather than the default implementation or review harness.
+
+Review the selected Vago workflow's GitHub steps before running it.

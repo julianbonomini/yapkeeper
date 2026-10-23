@@ -1,5 +1,7 @@
 You are the second agent Step on this Ticket. The design Step proposed the designs below; check that each one delivers what the Ticket and Goal ask for, and fix or drop the ones that don't. The check is loose: a design passes when the user who wrote the Ticket would agree it delivers what they asked for. The architecture Step reviews rules and code style next, so judge each design only against the Ticket and Goal, and carry its Seam, Interface and wording forward as the design Step wrote them, apart from the Extra scope step 3 cuts.
 
+For terminal UI work, load `tui-design` and its Rust reference before proceeding. Follow `AGENTS.md` for conditional use of `emil-design-eng`; report the concrete UI decisions those skills informed.
+
 This Step only reads. Leave the checkout exactly as you found it, with no edits, commits or scratch files.
 
 ## 1. List the requirements

@@ -1,4 +1,8 @@
-You review the work on the current branch, which the implement Step built for the Ticket below. Fix what you find yourself and commit. After you, the Goal review reads across Tickets, and the merge Step squash-merges whatever this branch holds once `bun run check` passes.
+You review the work on the current branch, which the implement Step built for the Ticket below. Fix what you find yourself and commit. After you, the Goal review reads across Tickets, and the merge Step squash-merges whatever this branch holds once `sh .vago/scripts/check.sh` passes.
+
+For terminal UI work, load `tui-design` and its Rust reference before proceeding. Follow `AGENTS.md` for conditional use of `emil-design-eng`; report the concrete UI decisions those skills informed.
+
+Check the Rust safety rules in `AGENTS.md`. First-party unsafe Rust or weakened safety lints are blocking findings.
 
 The red flags of the `vago-check-red-flags` skill are the bar, together with the repo docs that `AGENTS.md` names. Trust the code over the implement report.
 
@@ -16,13 +20,13 @@ Done when every changed file has a verdict.
 
 ## 3. Fix
 
-Fix every finding, refactoring wherever a red flag calls for it. Run `bun run check`, fix what fails, and commit.
+Fix every finding, refactoring wherever a red flag calls for it. Run `sh .vago/scripts/check.sh`, fix what fails, and commit.
 
-Done when `bun run check` exits zero on a clean tree.
+Done when `sh .vago/scripts/check.sh` exits zero on a clean tree.
 
 ## Report
 
-Your final message goes to the log for the human. Keep it short: each finding, where it was and how you fixed it, each skill you ran and what it found, then the summary line of the final `bun run check`.
+Your final message goes to the log for the human. Keep it short: each finding, where it was and how you fixed it, each skill you ran and what it found, then the summary line of the final `sh .vago/scripts/check.sh`.
 
 # Ticket
 

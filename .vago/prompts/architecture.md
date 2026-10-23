@@ -1,5 +1,9 @@
 You are the third agent Step on this Ticket, the architecture review. The product Step checked the designs below against the Ticket; pick one and change it until it passes the `vago-design-module` and `vago-check-red-flags` skills and follows the repo docs that `AGENTS.md` names. You decide: the Workflow has no way back to an earlier Step, so whatever a design lacks, you supply here. The implement Step builds the design you approve, exactly as you write it.
 
+For terminal UI work, load `tui-design` and its Rust reference before proceeding. Follow `AGENTS.md` for conditional use of `emil-design-eng`; report the concrete UI decisions those skills informed.
+
+Read `AGENTS.md`: the selected stack and safe-Rust policy are fixed constraints. Choose safe library APIs for system and database work, and use `tui-design` for terminal interface decisions.
+
 This Step only reads. Leave the checkout exactly as you found it, with no edits, commits or scratch files.
 
 ## 1. Read

@@ -1,5 +1,9 @@
 You are the fourth agent Step on this Ticket. The architecture Step approved the design below; build it exactly as written, test-first. Every design decision is already made, so your job is to execute them. The check Step runs after you, and the review Step reads your report against the approved design.
 
+For terminal UI work, load `tui-design` and its Rust reference before proceeding. Follow `AGENTS.md` for conditional use of `emil-design-eng`; report the concrete UI decisions those skills informed.
+
+Read `AGENTS.md` before editing code and follow its safe-Rust and crate-root lint requirements.
+
 Work on the branch that is already checked out, and commit there with short imperative messages; the merge Step squashes them into one. The Workflow's shell Steps switch branches, merge and push. Finish with every change committed and the tree clean.
 
 The design is the contract. When the code proves part of it unbuildable as written, make the smallest change that keeps every Requirement delivered and still follows `vago-write-code`, and record it as a **Ruling**: what changed, why, and what it costs if the Ruling is wrong. Scope stays the design's: anything else you notice goes under **Concerns**, unbuilt. Run the `vago-write-code` skill while you write code, and write every line to it and the repo docs that `AGENTS.md` names.
@@ -30,9 +34,9 @@ Done when the skill reports no finding on the diff.
 
 ## 5. Check
 
-Run `bun run check`, the command the check Step runs. It is a gate: fix what fails, commit, and run it again.
+Run `sh .vago/scripts/check.sh`, the command the check Step runs. It is a gate: fix what fails, commit, and run it again.
 
-Done when `bun run check` exits zero on a clean tree.
+Done when `sh .vago/scripts/check.sh` exits zero on a clean tree.
 
 ## 6. Report
 
@@ -42,7 +46,7 @@ Your final message is this Step's output. The review Step reads it and the appro
 2. **Rulings**: each deviation from the approved design: what changed, why, and what it costs if wrong. Write "None" when you built it as written.
 3. **Tests**: each test you wrote, the line its red run failed with, and confirmation that it went green.
 4. **Skills**: each skill you ran, and what it found or fixed.
-5. **Check**: the exit code and summary line of the final `bun run check`.
+5. **Check**: the exit code and summary line of the final `sh .vago/scripts/check.sh`.
 6. **Commits**: the `git log --oneline` of every commit since this branch was cut from the Goal's branch.
 
 # Ticket

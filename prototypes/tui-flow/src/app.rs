@@ -75,13 +75,9 @@ impl App {
         app
     }
 
-    /// Free-text terms; `@location`, `#agent`, and `is:state` tokens are filters.
+    /// Free-text terms; filter tokens (see `parse`) are excluded.
     pub fn terms(&self) -> Vec<String> {
-        self.query
-            .split_whitespace()
-            .filter(|t| !t.starts_with('@') && !t.starts_with('#') && !t.starts_with("is:"))
-            .map(str::to_string)
-            .collect()
+        parse(&self.query).0
     }
 
     fn match_session(&self, s: &Session, terms: &[String]) -> Option<MatchInfo> {
@@ -112,37 +108,33 @@ impl App {
         Some(info)
     }
 
-    /// Filter tokens. Hidden sessions appear only with `is:hidden`.
-    fn filters_ok(&self, s: &Session) -> bool {
-        let mut want_hidden = false;
-        for tok in self.query.split_whitespace() {
-            let low = tok.to_ascii_lowercase();
-            if let Some(loc) = low.strip_prefix('@') {
-                let hay = format!("{} {}", s.location(), s.dir()).to_ascii_lowercase();
-                if !hay.contains(loc) {
-                    return false;
-                }
-            } else if let Some(agent) = low.strip_prefix('#') {
-                if !s.provider.name().starts_with(agent) {
-                    return false;
-                }
-            } else if let Some(state) = low.strip_prefix("is:") {
-                let ok = match state {
-                    "hidden" => {
-                        want_hidden = true;
-                        s.hidden
-                    }
-                    "orphaned" | "orphan" => s.availability == Availability::Orphaned,
-                    "unavailable" => s.availability == Availability::Unknown,
-                    "" => true,
-                    _ => false,
-                };
-                if !ok {
-                    return false;
-                }
-            }
+    fn filter_ok(s: &Session, f: &Filter) -> bool {
+        match f {
+            Filter::Loc(loc) => format!("{} {} {}", s.loc_key(), s.location(), s.dir())
+                .to_ascii_lowercase()
+                .contains(loc.as_str()),
+            Filter::Agent(a) => s.provider.name().starts_with(a.as_str()),
+            Filter::State(st) => match st.as_str() {
+                "hidden" => s.hidden,
+                "orphaned" | "orphan" => s.availability == Availability::Orphaned,
+                "unavailable" => s.availability == Availability::Unknown,
+                "temp" => s.is_temp(),
+                "pr" => !s.prs.is_empty(),
+                "recap" => s.recap.is_some(),
+                "git" | "repo" => s.project.is_some(),
+                "folder" => s.project.is_none(),
+                _ => true,
+            },
         }
-        !s.hidden || want_hidden
+    }
+
+    /// All filters must pass. Hidden sessions appear only when asked for with `is hidden`.
+    fn filters_ok(&self, s: &Session) -> bool {
+        let (_, filters) = parse(&self.query);
+        let asks_hidden = filters
+            .iter()
+            .any(|(neg, f)| !neg && *f == Filter::State("hidden".into()));
+        filters.iter().all(|(neg, f)| Self::filter_ok(s, f) != *neg) && (!s.hidden || asks_hidden)
     }
 
     pub fn recompute(&mut self) {
@@ -289,76 +281,205 @@ impl App {
         self.quit = true;
     }
 
-    /// The `@` token being typed, if the cursor is still inside it.
-    pub fn completing(&self) -> Option<String> {
-        if self.query.ends_with(' ') {
-            return None;
-        }
-        let last = self.query.split_whitespace().last()?;
-        last.strip_prefix('@').map(str::to_ascii_lowercase)
-    }
-
-    /// Location completions: (label, sessions, depth). Projects come first with their
-    /// worktrees nested beneath; groups are ordered by most recent activity.
-    pub fn loc_suggestions(&self) -> Vec<(String, usize, u16)> {
-        let Some(part) = self.completing() else {
-            return vec![];
+    /// What the cursor is completing, if anything: kind and the partial text.
+    pub fn completing(&self) -> Option<(Kind, String)> {
+        let toks: Vec<&str> = self.query.split_whitespace().collect();
+        let ended = self.query.ends_with(' ') || self.query.is_empty();
+        let (prev, cur) = if ended {
+            (toks.last().copied(), None)
+        } else {
+            (
+                toks.len().checked_sub(2).map(|i| toks[i]),
+                toks.last().copied(),
+            )
         };
-        // (group, label, depth, count, recency)
-        let mut rows: Vec<(String, String, u16, usize, u32)> = Vec::new();
-        for s in self.sessions.iter().filter(|s| !s.hidden) {
-            let entries = match (&s.project, &s.branch) {
-                (Some(p), Some(b)) => vec![
-                    (p.clone(), p.clone(), 0),
-                    (p.clone(), format!("{p}:{b}"), 1),
-                ],
-                (Some(p), None) => vec![(p.clone(), p.clone(), 0)],
-                _ => vec![(s.root.clone(), s.root.clone(), 0)],
-            };
-            for (g, l, d) in entries {
-                match rows.iter_mut().find(|r| r.1 == l) {
-                    Some(r) => {
-                        r.3 += 1;
-                        r.4 = r.4.min(s.minutes_ago);
-                    }
-                    None => rows.push((g, l, d, 1, s.minutes_ago)),
+        let natural = matches!(prev, Some("is" | "not" | "!" | "!is"));
+        match cur {
+            None if natural => Some((Kind::State, String::new())),
+            None => None,
+            Some(c) => {
+                let c = c.trim_start_matches(['-', '!']).to_ascii_lowercase();
+                if let Some(p) = c.strip_prefix('@') {
+                    Some((Kind::Loc, p.to_string()))
+                } else if let Some(p) = c.strip_prefix('#') {
+                    Some((Kind::Agent, p.to_string()))
+                } else if let Some(p) = c.strip_prefix("is:") {
+                    Some((Kind::State, p.to_string()))
+                } else if natural {
+                    Some((Kind::State, c))
+                } else {
+                    None
                 }
             }
         }
-        rows.retain(|r| r.1.to_ascii_lowercase().contains(&part));
-        let group_recency = |g: &str| {
-            rows.iter()
-                .filter(|r| r.0 == g)
-                .map(|r| r.4)
-                .min()
-                .unwrap_or(u32::MAX)
+    }
+
+    /// Completions for the current token, filtered by the partial text.
+    pub fn suggestions(&self) -> Vec<Sugg> {
+        let Some((kind, part)) = self.completing() else {
+            return vec![];
         };
+        let visible = || self.sessions.iter().filter(|s| !s.hidden);
+        let count = |f: &Filter| visible().filter(|s| Self::filter_ok(s, f)).count();
+        match kind {
+            Kind::Agent => ["claude", "codex"]
+                .iter()
+                .filter(|a| a.starts_with(part.as_str()))
+                .map(|a| Sugg {
+                    token: format!("#{a}"),
+                    label: a.to_string(),
+                    detail: String::new(),
+                    count: count(&Filter::Agent(a.to_string())),
+                    depth: 0,
+                })
+                .collect(),
+            Kind::State => [
+                ("orphaned", "folder no longer exists"),
+                ("temp", "in a system temp folder"),
+                ("pr", "linked to a pull request"),
+                ("recap", "has a recap"),
+                ("git", "in a Git repo or worktree"),
+                ("folder", "in a plain folder, not Git"),
+                ("unavailable", "folder can't be checked"),
+                ("hidden", "hidden by you"),
+            ]
+            .iter()
+            .filter(|(st, _)| st.starts_with(part.as_str()))
+            .map(|(st, why)| Sugg {
+                token: st.to_string(),
+                label: st.to_string(),
+                detail: why.to_string(),
+                count: if *st == "hidden" {
+                    self.sessions.iter().filter(|s| s.hidden).count()
+                } else {
+                    count(&Filter::State(st.to_string()))
+                },
+                depth: 0,
+            })
+            .collect(),
+            Kind::Loc => self.loc_suggestions(&part),
+        }
+    }
+
+    /// Projects first with their worktrees nested beneath, then folders; groups ordered
+    /// by most recent activity. Matches the label or anywhere in the path.
+    fn loc_suggestions(&self, part: &str) -> Vec<Sugg> {
+        // key -> (group, depth, label, path, count, recency, every session orphaned)
+        let mut rows: Vec<LocRow> = Vec::new();
+        for s in self.sessions.iter().filter(|s| !s.hidden) {
+            let mut entries = vec![];
+            match (&s.project, &s.branch) {
+                (Some(p), b) => {
+                    let main_root = if b.is_none() {
+                        s.root.clone()
+                    } else {
+                        String::new()
+                    };
+                    entries.push((p.clone(), p.clone(), 0, p.clone(), main_root));
+                    if let Some(b) = b {
+                        entries.push((format!("{p}:{b}"), p.clone(), 1, b.clone(), s.root.clone()));
+                    }
+                }
+                _ => entries.push((
+                    s.root.clone(),
+                    s.root.clone(),
+                    0,
+                    s.root.clone(),
+                    String::new(),
+                )),
+            }
+            let gone = s.availability == Availability::Orphaned;
+            for (key, group, depth, label, path) in entries {
+                match rows.iter_mut().find(|r| r.0 == key) {
+                    Some(r) => {
+                        r.7 &= gone;
+                        r.5 += 1;
+                        r.6 = r.6.min(s.minutes_ago);
+                        if r.4.is_empty() {
+                            r.4 = path;
+                        }
+                    }
+                    None => rows.push((key, group, depth, label, path, 1, s.minutes_ago, gone)),
+                }
+            }
+        }
+        rows.retain(|r| {
+            format!("{} {}", r.0, r.4)
+                .to_ascii_lowercase()
+                .contains(part)
+        });
+        let group_recency = |g: &str| rows.iter().filter(|r| r.1 == g).map(|r| r.6).min();
+        let worktrees = |g: &str| rows.iter().filter(|r| r.1 == g && r.2 == 1).count();
         let mut keyed: Vec<_> = rows
             .iter()
-            .map(|r| ((group_recency(&r.0), r.0.clone(), r.2, r.4), r))
+            .map(|r| ((group_recency(&r.1), r.1.clone(), r.2, r.6), r))
             .collect();
         keyed.sort_by(|a, b| a.0.cmp(&b.0));
         keyed
             .into_iter()
-            .map(|(_, r)| (r.1.clone(), r.3, r.2))
+            .map(|(_, r)| {
+                let n = worktrees(&r.1);
+                // Lead with what the location is: a Git repo, one of its worktrees, or a
+                // plain folder. Folders that no longer exist can't be classified.
+                let detail = match (r.2, n) {
+                    (1, _) => format!("worktree · {}", r.4),
+                    (_, 0) if r.1 == r.0 && r.3 == r.0 && r.7 => {
+                        "missing · folder no longer exists".into()
+                    }
+                    (_, 0) if r.3 == r.0 && r.4.is_empty() => "folder".into(),
+                    (_, 0) => format!("git repo · {}", r.4),
+                    (_, n) => {
+                        let wt =
+                            format!("git repo · {n} worktree{}", if n == 1 { "" } else { "s" });
+                        if r.4.is_empty() {
+                            wt
+                        } else {
+                            format!("{wt} · {}", r.4)
+                        }
+                    }
+                };
+                Sugg {
+                    token: format!("@{}", r.0),
+                    label: r.3.clone(),
+                    detail,
+                    count: r.5,
+                    depth: r.2,
+                }
+            })
             .collect()
     }
 
     fn complete(&mut self) {
-        let sugg = self.loc_suggestions();
-        let Some((label, _, _)) = sugg.get(self.sel) else {
+        let sugg = self.suggestions();
+        let Some(pick) = sugg.get(self.sel) else {
             return;
         };
-        let keep: Vec<&str> = self.query.split_whitespace().collect();
-        let head = keep[..keep.len() - 1].join(" ");
-        self.query = if head.is_empty() {
-            format!("@{label} ")
-        } else {
-            format!("{head} @{label} ")
+        let Some((kind, _)) = self.completing() else {
+            return;
         };
+        let ended = self.query.ends_with(' ');
+        let mut toks: Vec<String> = self.query.split_whitespace().map(str::to_string).collect();
+        let neg = !ended && toks.last().is_some_and(|t| t.starts_with(['-', '!']));
+        let natural = {
+            let prev = if ended {
+                toks.last()
+            } else {
+                toks.iter().rev().nth(1)
+            };
+            matches!(prev.map(String::as_str), Some("is" | "not" | "!" | "!is"))
+        };
+        if !ended {
+            toks.pop();
+        }
+        let token = match kind {
+            Kind::State if !natural => format!("is:{}", pick.token),
+            _ => pick.token.clone(),
+        };
+        toks.push(format!("{}{token}", if neg { "-" } else { "" }));
+        self.query = format!("{} ", toks.join(" "));
         self.sel = 0;
         self.recompute();
-        self.last = format!("location → {label}");
+        self.last = format!("filter → {token}");
     }
 
     fn launch_location(&self) -> Option<String> {
@@ -366,11 +487,7 @@ impl App {
             .iter()
             .filter(|s| !s.root.is_empty() && under(&self.cwd, &s.root))
             .max_by_key(|s| s.root.len())
-            .map(|s| match (&s.project, &s.branch) {
-                (Some(p), Some(b)) => format!("{p}:{b}"),
-                (Some(p), None) => p.clone(),
-                _ => s.root.clone(),
-            })
+            .map(Session::loc_key)
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -455,8 +572,8 @@ impl App {
     }
 
     fn palette_key(&mut self, key: KeyEvent, ctrl: bool) {
-        let sugg = self.loc_suggestions().len();
-        let completing = self.completing().is_some() && sugg > 0;
+        let sugg = self.suggestions().len();
+        let completing = sugg > 0;
         let mv = |app: &mut App, d: isize| {
             if completing {
                 app.sel = (app.sel as isize + d).clamp(0, sugg as isize - 1) as usize;
@@ -525,5 +642,97 @@ impl App {
             KeyCode::F(1) => self.help = true,
             _ => {}
         }
+    }
+}
+
+/// (key, group, depth, label, path, sessions, recency, every session orphaned)
+type LocRow = (String, String, u16, String, String, usize, u32, bool);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Loc,
+    Agent,
+    State,
+}
+
+pub struct Sugg {
+    /// Text inserted into the query (state words without their `is:` prefix).
+    pub token: String,
+    pub label: String,
+    pub detail: String,
+    pub count: usize,
+    pub depth: u16,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Filter {
+    Loc(String),
+    Agent(String),
+    State(String),
+}
+
+const STATES: &[&str] = &[
+    "orphaned",
+    "orphan",
+    "temp",
+    "pr",
+    "recap",
+    "git",
+    "repo",
+    "folder",
+    "unavailable",
+    "hidden",
+];
+
+/// Split a query into free-text terms and filters. Filters: `@loc`, `#agent`, `is:state`,
+/// the natural forms `is orphaned` / `not codex`, and `not`, `!`, or `-` to negate.
+pub fn parse(q: &str) -> (Vec<String>, Vec<(bool, Filter)>) {
+    let toks: Vec<&str> = q.split_whitespace().collect();
+    let mut terms = vec![];
+    let mut filters = vec![];
+    let mut i = 0;
+    while i < toks.len() {
+        let tok = toks[i];
+        let low = tok.to_ascii_lowercase();
+        let next = toks.get(i + 1).map(|t| t.to_ascii_lowercase());
+        // Natural form: `is orphaned`, `not temp`, `not codex`, `not @scratch`.
+        if matches!(low.as_str(), "is" | "not" | "!" | "!is")
+            && let Some(n) = &next
+        {
+            let neg = low != "is";
+            let f = if STATES.contains(&n.as_str()) {
+                Some(Filter::State(n.clone()))
+            } else if ["claude", "codex"].contains(&n.as_str()) {
+                Some(Filter::Agent(n.clone()))
+            } else {
+                token_filter(n)
+            };
+            if let Some(f) = f {
+                filters.push((neg, f));
+                i += 2;
+                continue;
+            }
+        }
+        let (neg, body) = match low.strip_prefix(['-', '!']) {
+            Some(b) if b.len() > 1 => (true, b.to_string()),
+            _ => (false, low.clone()),
+        };
+        match token_filter(&body) {
+            Some(f) => filters.push((neg, f)),
+            None => terms.push(tok.to_string()),
+        }
+        i += 1;
+    }
+    (terms, filters)
+}
+
+fn token_filter(t: &str) -> Option<Filter> {
+    if let Some(l) = t.strip_prefix('@') {
+        Some(Filter::Loc(l.to_string()))
+    } else if let Some(a) = t.strip_prefix('#') {
+        Some(Filter::Agent(a.to_string()))
+    } else {
+        t.strip_prefix("is:")
+            .map(|st| Filter::State(st.to_string()))
     }
 }

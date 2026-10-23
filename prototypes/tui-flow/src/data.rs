@@ -54,6 +54,10 @@ pub struct Session {
     pub hidden: bool,
     pub subagents: Vec<Vec<Msg>>,
     pub msgs: Vec<Msg>,
+    /// Provider-written recap (Claude Code `away_summary`), when present.
+    pub recap: Option<String>,
+    /// Pull requests linked from the session.
+    pub prs: Vec<u64>,
 }
 
 impl Session {
@@ -73,14 +77,34 @@ impl Session {
         }
     }
 
-    /// Short location label: `project:branch` for worktrees, path for folders.
+    /// Display label: `project`, `project › worktree`, or the folder path.
     pub fn location(&self) -> String {
         match (&self.project, &self.branch) {
-            (Some(p), Some(b)) if self.subdir.is_empty() => format!("{p}:{b}"),
-            (Some(p), Some(b)) => format!("{p}:{b} {}", self.subdir.trim_start_matches('/')),
+            (Some(p), Some(b)) => format!("{p} › {b}"),
             (Some(p), None) => p.clone(),
             _ => self.dir(),
         }
+    }
+
+    /// The `@` token form: `project`, `project:worktree`, or the folder path.
+    pub fn loc_key(&self) -> String {
+        match (&self.project, &self.branch) {
+            (Some(p), Some(b)) => format!("{p}:{b}"),
+            (Some(p), None) => p.clone(),
+            _ => self.root.clone(),
+        }
+    }
+
+    /// Scratch locations under the system temp directories.
+    pub fn is_temp(&self) -> bool {
+        [
+            "/private/tmp",
+            "/tmp/",
+            "/var/folders",
+            "/private/var/folders",
+        ]
+        .iter()
+        .any(|t| self.root.starts_with(t))
     }
 
     /// Truncate the location label, keeping whichever end identifies it.
@@ -123,6 +147,8 @@ impl B {
             hidden: false,
             subagents: vec![],
             msgs: vec![],
+            recap: None,
+            prs: vec![],
         })
     }
     fn title(mut self, t: &str) -> Self {

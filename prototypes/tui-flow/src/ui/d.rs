@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph};
 
 use super::{Theme, preview_lines, rule, status};
-use crate::app::App;
+use crate::app::{App, Kind, Sugg};
 use crate::text;
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect, t: &Theme) {
@@ -30,8 +30,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect, t: &Theme) {
     );
     f.render_widget(Paragraph::new(rule(inner.width, t)), sep);
 
-    let sugg = app.loc_suggestions();
-    if app.completing().is_some() && !sugg.is_empty() {
+    let sugg = app.suggestions();
+    if !sugg.is_empty() {
         suggestions(f, app, body, &sugg, t);
         return;
     }
@@ -60,18 +60,21 @@ fn input_line(app: &App, w: usize, t: &Theme) -> Line<'static> {
     if app.query.is_empty() {
         spans.push(Span::styled("▏", t.accent));
         spans.push(Span::styled(
-            "search everything · Tab locations · @place #agent is:orphaned",
+            "search everything · Tab locations · #agent · is orphaned · not temp",
             t.dim,
         ));
     } else {
+        // Color what the parser treats as filters, so the query shows how it was read.
+        let terms = app.terms();
         for (n, tok) in app.query.split(' ').enumerate() {
             if n > 0 {
                 spans.push(Span::raw(" "));
             }
-            let style = if tok.starts_with('@') || tok.starts_with('#') || tok.starts_with("is:") {
-                t.accent
-            } else {
+            let is_term = terms.iter().any(|x| x == tok);
+            let style = if tok.is_empty() || is_term {
                 Style::new()
+            } else {
+                t.accent
             };
             spans.push(Span::styled(tok.to_string(), style));
         }
@@ -144,22 +147,32 @@ fn results(f: &mut Frame, app: &mut App, area: Rect, t: &Theme) {
     );
 }
 
-fn suggestions(f: &mut Frame, app: &mut App, area: Rect, sugg: &[(String, usize, u16)], t: &Theme) {
+fn suggestions(f: &mut Frame, app: &mut App, area: Rect, sugg: &[Sugg], t: &Theme) {
     let w = area.width as usize;
-    let mut items = vec![ListItem::new(Line::styled(" Locations", t.dim))];
-    for (label, n, depth) in sugg {
-        let count = format!("{n} ");
-        let indent = if *depth > 0 { "     " } else { " @" };
-        // Nested worktrees show only their branch; the project row above names it.
-        let shown = match label.split_once(':') {
-            Some((_, b)) if *depth > 0 => b.to_string(),
-            _ => label.clone(),
-        };
-        let lw = w.saturating_sub(count.len() + indent.len());
-        let style = if *depth > 0 { Style::new() } else { t.accent };
+    let heading = match app.completing().map(|c| c.0) {
+        Some(Kind::Loc) => " Locations · projects with their worktrees, then folders",
+        Some(Kind::Agent) => " Agents",
+        _ => " States",
+    };
+    let mut items = vec![ListItem::new(Line::styled(heading, t.dim))];
+    for sg in sugg {
+        let count = format!("{:>5} ", sg.count);
+        let indent = if sg.depth > 0 { "    ↳ " } else { " " };
+        let iw = text::width(indent);
+        let label_w = (w / 3).max(16).min(w.saturating_sub(count.len() + iw));
+        let detail_w = w.saturating_sub(iw + label_w + count.len() + 2);
+        let style = if sg.depth > 0 { Style::new() } else { t.accent };
         items.push(ListItem::new(Line::from(vec![
             Span::styled(indent, t.dim),
-            Span::styled(text::pad(&text::trunc_left(&shown, lw), lw), style),
+            Span::styled(
+                text::pad(&text::trunc_left(&sg.label, label_w), label_w),
+                style,
+            ),
+            Span::raw("  "),
+            Span::styled(
+                text::pad(&text::trunc_left(&sg.detail, detail_w), detail_w),
+                t.dim,
+            ),
             Span::styled(count, t.dim),
         ])));
     }

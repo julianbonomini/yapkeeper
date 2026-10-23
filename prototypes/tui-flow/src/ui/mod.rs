@@ -98,7 +98,7 @@ pub fn keys(app: &App) -> Vec<(&'static str, &'static str)> {
             ("?", "help"),
         ];
     }
-    if app.completing().is_some() && !app.loc_suggestions().is_empty() {
+    if !app.suggestions().is_empty() {
         return vec![
             ("Enter", "pick"),
             ("↑↓", "move"),
@@ -208,6 +208,10 @@ pub fn preview_lines(app: &App, i: usize, w: usize, t: &Theme) -> Vec<Line<'stat
     if !s.subagents.is_empty() {
         meta.push_str(&format!(" · {} subagent", s.subagents.len()));
     }
+    if !s.prs.is_empty() {
+        let prs: Vec<String> = s.prs.iter().map(|n| format!("#{n}")).collect();
+        meta.push_str(&format!(" · PR {}", prs.join(", ")));
+    }
     out.push(Line::styled(text::trunc(&meta, w), t.dim));
     out.push(Line::styled(text::trunc_left(&s.dir(), w), t.dim));
     if let Some(b) = &s.branch {
@@ -251,6 +255,13 @@ pub fn preview_lines(app: &App, i: usize, w: usize, t: &Theme) -> Vec<Line<'stat
         }
     };
 
+    if let Some(r) = &s.recap {
+        out.push(Line::styled("Recap", t.accent));
+        for l in text::wrap(r, w).into_iter().take(5) {
+            out.push(Line::raw(l));
+        }
+        out.push(Line::raw(""));
+    }
     let info = app.matches[i].clone().unwrap_or_default();
     if !terms.is_empty() {
         let n = info.msgs.len();

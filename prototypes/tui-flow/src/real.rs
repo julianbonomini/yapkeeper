@@ -87,6 +87,8 @@ fn blank(provider: Provider, id: String, path: &Path) -> Session {
         hidden: false,
         subagents: vec![],
         msgs: vec![],
+        recap: None,
+        prs: vec![],
     }
 }
 
@@ -124,7 +126,8 @@ fn parse_claude(path: &Path) -> (Option<Session>, Option<String>, usize) {
         let Ok(line) = line else { break };
         let msg = line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"");
         let title = line.contains("custom-title") || line.contains("ai-title");
-        if !msg && !title {
+        let extra = line.contains("away_summary") || line.contains("\"pr-link\"");
+        if !msg && !title && !extra {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
@@ -134,6 +137,18 @@ fn parse_claude(path: &Path) -> (Option<Session>, Option<String>, usize) {
         match v["type"].as_str() {
             Some("custom-title") => custom = v["customTitle"].as_str().map(str::to_string),
             Some("ai-title") => ai = v["aiTitle"].as_str().map(str::to_string),
+            Some("pr-link") => {
+                if let Some(n) = v["prNumber"].as_u64()
+                    && !s.prs.contains(&n)
+                {
+                    s.prs.push(n);
+                }
+            }
+            Some("system") if v["subtype"].as_str() == Some("away_summary") => {
+                if let Some(c) = v["content"].as_str() {
+                    s.recap = Some(cap(c, MAX_MSG_CHARS));
+                }
+            }
             Some(kind @ ("user" | "assistant")) => {
                 if v["isMeta"].as_bool() == Some(true) || v["isSidechain"].as_bool() == Some(true) {
                     continue;

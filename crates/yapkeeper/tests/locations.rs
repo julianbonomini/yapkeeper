@@ -10,7 +10,7 @@ use std::path::Path;
 use support::Locked;
 use support::{main_checkout, repo_with_worktree};
 use tempfile::TempDir;
-use yapkeeper::{Availability, Location, Place, RecordedGit, Roots, list};
+use yapkeeper::{Availability, DataDir, Location, Place, RecordedGit, Roots, list};
 
 mod support;
 
@@ -69,7 +69,7 @@ impl Histories {
 
     /// The location of the only session listed.
     fn location(&self) -> Location {
-        let listing = list(&self.roots());
+        let listing = list(&self.roots(), &DataDir::at(self.dir.path().join("data"))).unwrap();
         let [listed] = listing.sessions.as_slice() else {
             panic!("expected one session, got {}", listing.sessions.len());
         };

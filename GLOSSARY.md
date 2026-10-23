@@ -32,7 +32,13 @@ A session the user has excluded from ordinary Yapkeeper results. Hiding is rever
 A conversation recorded for an agent acting within another session. A fork or a message's parent link alone does not establish this relationship.
 
 **Adapter**:
-The provider-specific part of Yapkeeper that discovers a provider's history, reads it without modifying it, and builds the resume command. The shared model, index and interface see only its sessions.
+The provider-specific part of Yapkeeper that discovers a provider's history, reads it without modifying it by turning each record into facts, and builds the resume command. The shared model combines facts into sessions; the index and interface see only sessions.
+
+**Index**:
+Yapkeeper's rebuildable copy of every session and its searchable text, in `index.sqlite`. Deleting it loses nothing; the next listing builds it again.
+
+**Preferences**:
+The user's own choices, such as hidden sessions, in `prefs.sqlite`, kept apart from the index so rebuilding never loses them.
 
 **Title**:
 The name shown for a session: the one the user set, else the one the provider generated, else the first prompt the user typed. Injected context never counts as a prompt.

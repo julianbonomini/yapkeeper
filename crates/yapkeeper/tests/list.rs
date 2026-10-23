@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use yapkeeper::{Roots, list};
+use yapkeeper::{DataDir, Roots, list};
 
 const CLAUDE_FIXTURES: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -17,10 +17,15 @@ const CODEX_FIXTURES: &str = concat!(
 
 #[test]
 fn list_merges_every_provider_most_recent_first() {
-    let listing = list(&Roots {
-        claude: PathBuf::from(CLAUDE_FIXTURES),
-        codex: PathBuf::from(CODEX_FIXTURES),
-    });
+    let tmp = tempfile::tempdir().unwrap();
+    let listing = list(
+        &Roots {
+            claude: PathBuf::from(CLAUDE_FIXTURES),
+            codex: PathBuf::from(CODEX_FIXTURES),
+        },
+        &DataDir::at(tmp.path().join("data")),
+    )
+    .unwrap();
     let sessions: Vec<(&str, &str)> = listing
         .sessions
         .iter()

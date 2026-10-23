@@ -1,6 +1,6 @@
-//! Drives the Codex adapter through `Codex::at(..).scan()` against committed
-//! synthetic fixtures, and against files written into a tempdir when their
-//! exact bytes matter.
+//! Drives the Codex adapter through `yapkeeper_model::scan` and
+//! `Adapter::read` against committed synthetic fixtures, and against files
+//! written into a tempdir when their exact bytes matter.
 
 #![forbid(unsafe_code)]
 
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use yapkeeper_codex::Codex;
-use yapkeeper_model::{Adapter, Message, RecordedGit, ResumeCommand, Role, Scan, Session};
+use yapkeeper_model::{Adapter, Message, RecordedGit, ResumeCommand, Role, Scan, Transcript};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex");
 
@@ -19,21 +19,21 @@ const FORK: &str = "cccccccc-0000-7000-8000-00000000000c";
 const SUBAGENT: &str = "dddddddd-0000-7000-8000-00000000000d";
 
 fn scan_fixtures() -> Scan {
-    Codex::at(PathBuf::from(FIXTURES)).scan()
+    yapkeeper_model::scan(&Codex::at(PathBuf::from(FIXTURES)))
 }
 
-fn session<'a>(scan: &'a Scan, id: &str) -> &'a Session {
-    scan.sessions
+fn session<'a>(scan: &'a Scan, id: &str) -> &'a Transcript {
+    scan.transcripts
         .iter()
-        .find(|session| session.id == id)
+        .find(|transcript| transcript.session.id == id)
         .unwrap_or_else(|| panic!("session {id} is missing from {:?}", ids(scan)))
 }
 
 fn ids(scan: &Scan) -> Vec<&str> {
     let mut ids: Vec<&str> = scan
-        .sessions
+        .transcripts
         .iter()
-        .map(|session| session.id.as_str())
+        .map(|transcript| transcript.session.id.as_str())
         .collect();
     ids.sort_unstable();
     ids
@@ -49,9 +49,9 @@ fn active_and_archived_rollouts_and_forks_are_sessions_but_subagent_rollouts_are
     assert_eq!(ids(&scan), [RETRY, ARCHIVED, FORK]);
     assert!(!ids(&scan).contains(&SUBAGENT));
     assert!(
-        scan.sessions
+        scan.transcripts
             .iter()
-            .all(|session| session.provider == "codex")
+            .all(|session| session.session.provider == "codex")
     );
     assert_eq!(scan.malformed_lines, 0);
     assert_eq!(scan.searched, PathBuf::from(FIXTURES));
@@ -78,11 +78,11 @@ fn a_subagent_rollout_belongs_to_its_parent_and_a_fork_is_no_subagent() {
 fn the_title_is_the_latest_thread_name_or_else_the_first_prompt() {
     let scan = scan_fixtures();
     assert_eq!(
-        session(&scan, RETRY).title,
+        session(&scan, RETRY).session.title,
         "Tune the synthetic retry policy"
     );
     assert_eq!(
-        session(&scan, ARCHIVED).title,
+        session(&scan, ARCHIVED).session.title,
         "Archive the synthetic changelog"
     );
 }
@@ -109,17 +109,23 @@ fn messages_come_from_response_items_without_echoes_injected_context_or_tool_out
 fn a_fork_takes_its_identity_from_the_first_session_meta_and_keeps_later_directories() {
     let scan = scan_fixtures();
     let fork = session(&scan, FORK);
-    assert_eq!(fork.title, "Fork of the retry policy");
-    assert_eq!(fork.working_dir, PathBuf::from("/synthetic/epsilon"));
-    assert_eq!(fork.other_working_dirs, [PathBuf::from("/synthetic/delta")]);
-    assert_eq!(fork.last_active, timestamp("2026-10-21T10:00:00Z"));
+    assert_eq!(fork.session.title, "Fork of the retry policy");
+    assert_eq!(
+        fork.session.working_dir,
+        PathBuf::from("/synthetic/epsilon")
+    );
+    assert_eq!(
+        fork.session.other_working_dirs,
+        [PathBuf::from("/synthetic/delta")]
+    );
+    assert_eq!(fork.session.last_active, timestamp("2026-10-21T10:00:00Z"));
 }
 
 #[test]
 fn each_session_resumes_with_codex_resume_in_its_working_directory() {
     let scan = scan_fixtures();
     assert_eq!(
-        session(&scan, RETRY).resume,
+        session(&scan, RETRY).session.resume,
         ResumeCommand {
             program: "codex".to_string(),
             args: ["resume", RETRY, "-C", "/synthetic/delta"]
@@ -163,12 +169,12 @@ fn malformed_lines_are_counted_and_an_unfinished_final_line_is_left_for_later() 
     );
     fs::write(home.path().join("session_index.jsonl"), "not json either\n").unwrap();
 
-    let scan = Codex::at(home.path().to_path_buf()).scan();
+    let scan = yapkeeper_model::scan(&Codex::at(home.path().to_path_buf()));
     assert_eq!(scan.malformed_lines, 2);
-    let [session] = scan.sessions.as_slice() else {
+    let [session] = scan.transcripts.as_slice() else {
         panic!("expected one session, got {:?}", ids(&scan));
     };
-    assert_eq!(session.title, "A finished prompt");
+    assert_eq!(session.session.title, "A finished prompt");
     assert_eq!(session.messages.len(), 1);
 }
 
@@ -190,7 +196,10 @@ fn rollouts_without_a_prompt_or_a_session_meta_are_skipped() {
     )
     .unwrap();
 
-    assert_eq!(Codex::at(home.path().to_path_buf()).scan().sessions, []);
+    assert_eq!(
+        yapkeeper_model::scan(&Codex::at(home.path().to_path_buf())).transcripts,
+        []
+    );
 }
 
 #[test]
@@ -202,7 +211,10 @@ fn a_rollout_whose_first_session_meta_has_no_id_does_not_borrow_a_later_one() {
         &format!("{nameless}\n{META}\n{}\n", prompt("A synthetic prompt")),
     );
 
-    assert_eq!(Codex::at(home.path().to_path_buf()).scan().sessions, []);
+    assert_eq!(
+        yapkeeper_model::scan(&Codex::at(home.path().to_path_buf())).transcripts,
+        []
+    );
 }
 
 #[test]
@@ -214,12 +226,12 @@ fn recorded_git_comes_from_the_first_session_meta_only() {
         home.path(),
         &format!("{own}\n{parents}\n{}\n", prompt("A synthetic prompt")),
     );
-    let scan = Codex::at(home.path().to_path_buf()).scan();
-    let [session] = scan.sessions.as_slice() else {
+    let scan = yapkeeper_model::scan(&Codex::at(home.path().to_path_buf()));
+    let [session] = scan.transcripts.as_slice() else {
         panic!("expected one session, got {:?}", ids(&scan));
     };
     assert_eq!(
-        session.recorded_git,
+        session.session.recorded_git,
         RecordedGit {
             branch: Some("feature/billing-retry".to_string()),
             repository_url: Some("git@example.com:acme/acme-api.git".to_string()),
@@ -231,11 +243,11 @@ fn recorded_git_comes_from_the_first_session_meta_only() {
         home.path(),
         &format!("{META}\n{}\n", prompt("A synthetic prompt")),
     );
-    let scan = Codex::at(home.path().to_path_buf()).scan();
-    let [session] = scan.sessions.as_slice() else {
+    let scan = yapkeeper_model::scan(&Codex::at(home.path().to_path_buf()));
+    let [session] = scan.transcripts.as_slice() else {
         panic!("expected one session, got {:?}", ids(&scan));
     };
-    assert_eq!(session.recorded_git, RecordedGit::default());
+    assert_eq!(session.session.recorded_git, RecordedGit::default());
 }
 
 /// A rollout's first `session_meta`, with `extra` fields added to its payload.
@@ -284,9 +296,9 @@ fn a_subagent_of_a_subagent_belongs_to_the_top_session_and_one_without_a_session
         .unwrap();
     }
 
-    let scan = Codex::at(home.path().to_path_buf()).scan();
+    let scan = yapkeeper_model::scan(&Codex::at(home.path().to_path_buf()));
     assert_eq!(ids(&scan), [parent]);
-    let mut texts: Vec<&str> = scan.sessions[0]
+    let mut texts: Vec<&str> = scan.transcripts[0]
         .subagents
         .iter()
         .flat_map(|subagent| &subagent.messages)
@@ -294,4 +306,32 @@ fn a_subagent_of_a_subagent_belongs_to_the_top_session_and_one_without_a_session
         .collect();
     texts.sort_unstable();
     assert_eq!(texts, ["Child task", "Grandchild task"]);
+}
+
+#[test]
+fn reading_on_from_the_offset_reached_gives_the_same_facts_as_one_whole_read() {
+    let home = tempfile::tempdir().unwrap();
+    let first = format!("{META}\n{}\n", prompt("A synthetic prompt"));
+    let unfinished = prompt("A later prompt");
+    write_rollout(home.path(), &format!("{first}{unfinished}"));
+    let path = home
+        .path()
+        .join("sessions/2026/10/22/rollout-2026-10-22T08-00-00-synthetic.jsonl");
+    let adapter = Codex::at(home.path().to_path_buf());
+
+    let before = adapter.read(&path, 0);
+    assert_eq!(before.offset, first.len() as u64);
+    let mut file = fs::File::options().append(true).open(&path).unwrap();
+    std::io::Write::write_all(
+        &mut file,
+        format!("\n{}\n", prompt("The last prompt")).as_bytes(),
+    )
+    .unwrap();
+    let after = adapter.read(&path, before.offset);
+
+    let whole = adapter.read(&path, 0);
+    let mut resumed = before.facts;
+    resumed.extend(after.facts);
+    assert_eq!(resumed, whole.facts);
+    assert_eq!(after.offset, whole.offset);
 }

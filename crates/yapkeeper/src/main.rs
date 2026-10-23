@@ -1,5 +1,6 @@
 //! The `yapkeeper` command line. It owns presentation only: one plain line per
-//! session for people, `grep` and `wc -l`, and diagnostics on stderr.
+//! session or path for people, `grep`, `cut` and `wc -l`, and diagnostics and
+//! confirmations on stderr.
 
 #![forbid(unsafe_code)]
 
@@ -8,14 +9,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::SystemTime;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use yapkeeper::{Availability, Listed, Place, Roots, list};
+use yapkeeper::{Availability, DataDir, IndexError, Listed, Place, Roots, list, rebuild};
 
 /// Wide enough for most titles; what follows may wrap on an 80-column terminal.
 const MAX_TITLE_WIDTH: usize = 48;
 
-const EXIT_MISSING_HOME: u8 = 1;
+const EXIT_FAILURE: u8 = 1;
 
 const HISTORIES: &str = "Histories are read, never modified, from:
   Claude Code  $CLAUDE_CONFIG_DIR/projects (default ~/.claude/projects)
@@ -23,7 +24,7 @@ const HISTORIES: &str = "Histories are read, never modified, from:
 
 /// Find coding sessions across projects, worktrees and folders.
 #[derive(Parser)]
-#[command(version, arg_required_else_help = true, after_help = HISTORIES)]
+#[command(version, arg_required_else_help = true)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -35,25 +36,108 @@ enum Command {
     ///
     /// Each line shows a session's title, provider, age, an orphaned or unavailable
     /// label when one applies, and where it ran.
-    #[command(after_help = HISTORIES)]
     List,
+    /// Print where Yapkeeper keeps its index and preferences
+    Paths,
+    /// Delete the index and build it again from every history file
+    Rebuild,
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
+    // Built at runtime so help names the files this environment resolves to.
+    let footer = help_footer();
+    let matches = Cli::command()
+        .after_help(footer.clone())
+        .mut_subcommands(|subcommand| subcommand.after_help(footer.clone()))
+        .get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    match cli.command {
         Command::List => print_list(),
+        Command::Paths => print_paths(),
+        Command::Rebuild => print_rebuild(),
+    }
+}
+
+/// Where histories are read from and where Yapkeeper keeps its own files,
+/// so nothing it stores is hidden.
+fn help_footer() -> String {
+    let own_files = match DataDir::from_env() {
+        Ok(data) => format!(
+            "  Index        {} (rebuildable)\n  Preferences  {}",
+            data.index().display(),
+            data.prefs().display()
+        ),
+        Err(_) => {
+            "  Folder       $XDG_DATA_HOME/yapkeeper (default ~/.local/share/yapkeeper)".to_string()
+        }
+    };
+    format!("{HISTORIES}\n\nYapkeeper's own files:\n{own_files}")
+}
+
+/// Two space-aligned columns, so `cut` and `awk` can read them. Creates nothing.
+fn print_paths() -> ExitCode {
+    let data = match DataDir::from_env() {
+        Ok(data) => data,
+        Err(error) => {
+            eprintln!("yapkeeper: {error}");
+            return ExitCode::from(EXIT_FAILURE);
+        }
+    };
+    println!("index        {}", data.index().display());
+    println!("preferences  {}", data.prefs().display());
+    ExitCode::SUCCESS
+}
+
+/// The history roots and data directory this environment names, or the
+/// exit code once it has said why there are none.
+fn environment() -> Result<(Roots, DataDir), ExitCode> {
+    match (Roots::from_env(), DataDir::from_env()) {
+        (Ok(roots), Ok(data)) => Ok((roots, data)),
+        (Err(error), _) | (_, Err(error)) => {
+            eprintln!("yapkeeper: {error}");
+            Err(ExitCode::from(EXIT_FAILURE))
+        }
+    }
+}
+
+/// Says why the index failed and how to fix it, and gives the exit code.
+fn index_failure(error: IndexError) -> ExitCode {
+    eprintln!("yapkeeper: {error}");
+    eprintln!("Check its permissions, or set XDG_DATA_HOME.");
+    ExitCode::from(EXIT_FAILURE)
+}
+
+/// The confirmation goes to stderr, so stdout stays empty for scripts.
+fn print_rebuild() -> ExitCode {
+    let (roots, data) = match environment() {
+        Ok(environment) => environment,
+        Err(code) => return code,
+    };
+    match rebuild(&roots, &data) {
+        Ok(listing) => {
+            let sessions = match listing.sessions.len() {
+                1 => "1 session".to_string(),
+                n => format!("{n} sessions"),
+            };
+            eprintln!(
+                "yapkeeper: rebuilt the index at {} ({sessions})",
+                data.index().display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => index_failure(error),
     }
 }
 
 fn print_list() -> ExitCode {
-    let roots = match Roots::from_env() {
-        Ok(roots) => roots,
-        Err(error) => {
-            eprintln!("yapkeeper: {error}");
-            return ExitCode::from(EXIT_MISSING_HOME);
-        }
+    let (roots, data) = match environment() {
+        Ok(environment) => environment,
+        Err(code) => return code,
     };
-    let listing = list(&roots);
+    let listing = match list(&roots, &data) {
+        Ok(listing) => listing,
+        Err(error) => return index_failure(error),
+    };
     if listing.sessions.is_empty() {
         for dir in &listing.searched {
             eprintln!("yapkeeper: no sessions found in {}", dir.display());

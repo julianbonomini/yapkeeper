@@ -1,11 +1,16 @@
 //! Sessions from every provider, merged and ordered, each with where it ran.
 //! Each provider's format stays inside its adapter; this crate knows where
-//! each one is rooted and reads each session's location from the disk.
+//! each one is rooted and where Yapkeeper keeps its own files, keeps the
+//! index of every session up to date, and reads each session's location
+//! from the disk when it is listed.
 
 #![forbid(unsafe_code)]
 
+mod index;
 mod location;
 
+use std::error::Error;
+use std::fmt;
 use std::path::PathBuf;
 
 use yapkeeper_claude::ClaudeCode;
@@ -31,13 +36,58 @@ impl Roots {
     }
 }
 
-/// Sessions from every provider, with what was skipped and where it looked.
+/// Where Yapkeeper keeps its own files: `$XDG_DATA_HOME/yapkeeper` when that
+/// is set and absolute, otherwise `$HOME/.local/share/yapkeeper`. Creates nothing.
+pub struct DataDir {
+    dir: PathBuf,
+}
+
+impl DataDir {
+    /// Fails with `MissingHome { variable: "XDG_DATA_HOME" }` when neither names a directory.
+    pub fn from_env() -> Result<DataDir, MissingHome> {
+        // The XDG spec says a relative path is invalid and must be ignored.
+        let base = match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+            Some(dir) if dir.is_absolute() => dir,
+            _ => match std::env::var_os("HOME") {
+                Some(home) if !home.is_empty() => PathBuf::from(home).join(".local/share"),
+                _ => {
+                    return Err(MissingHome {
+                        variable: "XDG_DATA_HOME",
+                    });
+                }
+            },
+        };
+        Ok(DataDir::at(base.join("yapkeeper")))
+    }
+
+    pub fn at(dir: PathBuf) -> DataDir {
+        DataDir { dir }
+    }
+
+    /// `<dir>/index.sqlite`, rebuildable and safe to delete at any time.
+    pub fn index(&self) -> PathBuf {
+        self.dir.join("index.sqlite")
+    }
+
+    /// `<dir>/prefs.sqlite`, the user's hides; never touched by the index.
+    pub fn prefs(&self) -> PathBuf {
+        self.dir.join("prefs.sqlite")
+    }
+}
+
+/// Sessions from every provider, with what was skipped, where it looked and
+/// what it read.
 pub struct Listing {
     /// Most recent first.
     pub sessions: Vec<Listed>,
+    /// Malformed complete lines in every indexed file, not just those read this call.
     pub malformed_lines: usize,
     /// Each provider's directory looked in, for the empty-state message.
     pub searched: Vec<PathBuf>,
+    /// History files opened during this call; zero when nothing changed.
+    pub files_read: usize,
+    /// History bytes read during this call; only the new bytes of a file that grew.
+    pub bytes_read: u64,
 }
 
 /// A session with its location as of this listing.
@@ -46,38 +96,44 @@ pub struct Listed {
     pub location: Location,
 }
 
-/// Sessions from every provider, most recent `last_active` first, each with
-/// its location as the disk shows it now. Ties break by provider, then id,
-/// so the order is stable.
-pub fn list(roots: &Roots) -> Listing {
-    let adapters: [&dyn Adapter; 2] = [
-        &ClaudeCode::at(roots.claude.clone()),
-        &Codex::at(roots.codex.clone()),
-    ];
-    let mut sessions = Vec::new();
-    let mut malformed_lines = 0;
-    let mut searched = Vec::new();
-    for adapter in adapters {
-        let scan = adapter.scan();
-        sessions.extend(scan.sessions);
-        malformed_lines += scan.malformed_lines;
-        searched.push(scan.searched);
+/// The index at `path` can't be created, opened or written.
+#[derive(Debug)]
+pub struct IndexError {
+    pub path: PathBuf,
+    source: Box<dyn Error + Send + Sync>,
+}
+
+impl fmt::Display for IndexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "can't write the index at {}: {}",
+            self.path.display(),
+            self.source
+        )
     }
-    sessions.sort_by(|a, b| {
-        b.last_active
-            .cmp(&a.last_active)
-            .then_with(|| a.provider.cmp(b.provider))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    Listing {
-        sessions: sessions
-            .into_iter()
-            .map(|session| Listed {
-                location: Location::of(&session.working_dir, &session.recorded_git),
-                session,
-            })
-            .collect(),
-        malformed_lines,
-        searched,
+}
+
+impl Error for IndexError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
     }
+}
+
+/// Brings the index up to date, opening only history files that changed
+/// since the last call, then returns every session in it, most recent
+/// `last_active` first (ties by provider, then id), each with its location
+/// read from the disk now. A missing, corrupt or old index is recreated.
+/// Fails only when the index can't be created or written.
+pub fn list(roots: &Roots, data: &DataDir) -> Result<Listing, IndexError> {
+    let claude = ClaudeCode::at(roots.claude.clone());
+    let codex = Codex::at(roots.codex.clone());
+    index::refresh(&[&claude, &codex], &data.index())
+}
+
+/// Deletes the index and builds it again from every history file, then
+/// returns what `list` would. Never touches `prefs.sqlite`.
+pub fn rebuild(roots: &Roots, data: &DataDir) -> Result<Listing, IndexError> {
+    index::delete(&data.index())?;
+    list(roots, data)
 }

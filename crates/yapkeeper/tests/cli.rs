@@ -444,3 +444,123 @@ fn list_leaves_out_the_label_column_when_every_session_is_available() {
         );
     }
 }
+
+/// Runs `yapkeeper` with only `HOME` and, when given, `XDG_DATA_HOME` set.
+fn yapkeeper_with_data_home(args: &[&str], home: &Path, data_home: Option<&Path>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yapkeeper"));
+    command.args(args).env_clear().env("HOME", home);
+    if let Some(dir) = data_home {
+        command.env("XDG_DATA_HOME", dir);
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn paths_prints_the_index_and_preferences_under_xdg_data_home_and_creates_neither() {
+    let home = tempfile::tempdir().unwrap();
+    let data_home = home.path().join("data");
+    let output = yapkeeper_with_data_home(&["paths"], home.path(), Some(&data_home));
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let dir = data_home.join("yapkeeper");
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "index        {}\npreferences  {}\n",
+            dir.join("index.sqlite").display(),
+            dir.join("prefs.sqlite").display()
+        )
+    );
+    assert!(!dir.exists());
+}
+
+#[test]
+fn paths_falls_back_to_home_when_xdg_data_home_is_unset_or_relative() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join(".local/share/yapkeeper");
+    let expected = format!(
+        "index        {}\npreferences  {}\n",
+        dir.join("index.sqlite").display(),
+        dir.join("prefs.sqlite").display()
+    );
+    for data_home in [None, Some(Path::new("relative/data"))] {
+        let output = yapkeeper_with_data_home(&["paths"], home.path(), data_home);
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(stdout(&output), expected, "XDG_DATA_HOME={data_home:?}");
+    }
+}
+
+#[test]
+fn help_shows_where_the_index_and_preferences_are_kept() {
+    let home = tempfile::tempdir().unwrap();
+    let data_home = home.path().join("data");
+    let dir = data_home.join("yapkeeper");
+    for args in [&["--help"][..], &["list", "--help"]] {
+        let output = yapkeeper_with_data_home(args, home.path(), Some(&data_home));
+        assert!(output.status.success(), "{args:?}");
+        let stdout = stdout(&output);
+        for file in ["index.sqlite", "prefs.sqlite"] {
+            let path = dir.join(file).display().to_string();
+            assert!(
+                stdout.contains(&path),
+                "{args:?} should name {path}: {stdout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rebuild_reports_on_stderr_and_list_prints_the_same_afterwards() {
+    let home = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+            .args(args)
+            .env_clear()
+            .env("HOME", home.path())
+            .env("CLAUDE_CONFIG_DIR", FIXTURES)
+            .env("CODEX_HOME", CODEX_FIXTURES)
+            .output()
+            .unwrap()
+    };
+    let before = run(&["list"]);
+    assert!(before.status.success(), "{}", stderr(&before));
+
+    let output = run(&["rebuild"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    let index = home.path().join(".local/share/yapkeeper/index.sqlite");
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "yapkeeper: rebuilt the index at {} (7 sessions)\n",
+            index.display()
+        )
+    );
+
+    let after = run(&["list"]);
+    assert_eq!(stdout(&after), stdout(&before));
+}
+
+#[test]
+fn list_fails_naming_the_index_when_it_cannot_be_written() {
+    let home = tempfile::tempdir().unwrap();
+    let not_a_dir = home.path().join("data");
+    fs::write(&not_a_dir, "a regular file").unwrap();
+
+    let output = yapkeeper_with_data_home(&["list"], home.path(), Some(&not_a_dir));
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    let stderr = stderr(&output);
+    let index = not_a_dir.join("yapkeeper/index.sqlite");
+    assert!(
+        stderr.starts_with(&format!(
+            "yapkeeper: can't write the index at {}: ",
+            index.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.lines().last(),
+        Some("Check its permissions, or set XDG_DATA_HOME.")
+    );
+}

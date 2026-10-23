@@ -119,13 +119,33 @@ For an orphaned session the dialog explains that the folder is gone and offers `
 
 ## Loading
 
+`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line.
+
 The prototype reads every history file at launch, in parallel threads, without an index. On the real histories (866 files, 1.18 GB) it loaded 783 sessions in about 0.3 s with 55 MB peak memory on the user's Mac. It skips tool results, keeps tool calls as one-line summaries, caps messages at 4,000 characters, and drops injected context such as command caveats, `AGENTS.md` instructions, and environment blocks. Sessions with no user prompt (64) and Codex subagent sessions (19) are left out.
+
+## Where Yapkeeper keeps its files
+
+Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` when `XDG_DATA_HOME` is unset or relative:
+
+- `index.sqlite`, the index: rebuildable, and safe to delete at any time.
+- `prefs.sqlite`, the preferences, such as hides. Rebuilding the index never touches it.
+
+## Command line
+
+| Command | stdout | stderr |
+|---|---|---|
+| `yapkeeper list` | One line per session, most recent first | No sessions found, malformed lines skipped |
+| `yapkeeper paths` | `index` and `preferences`, each followed by its path in a space-aligned column | Nothing |
+| `yapkeeper rebuild` | Nothing | `yapkeeper: rebuilt the index at <path> (N sessions)` |
+
+When the index can't be written, any command that uses it exits 1. Its stderr ends with `Check its permissions, or set XDG_DATA_HOME.`
+
+The help footer names where histories are read from and the paths this environment resolves for the index and preferences.
 
 ## Open questions
 
 - Cursor movement inside the query, so a filter in the middle can be edited.
 - Fuzzy matching for search words and locations.
 - Summaries for sessions without a recap: an opt-in, cached model call during indexing, which costs tokens and sends conversation text to a model.
-- Where hides and settings persist. The prototype keeps them in memory; `docs/product.md` requires hides to survive index rebuilds.
 - Behavior at 60 columns and 80×24 was built (the preview drops below 80 columns, and a "terminal too small" message appears below 48×12) but not reviewed by the user on real data.
 - Plain CLI output mode, `Ctrl+Z` suspend, and mouse support were not prototyped.

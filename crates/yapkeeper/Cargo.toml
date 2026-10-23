@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 clap.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
 unicode-width.workspace = true
 yapkeeper-claude.workspace = true
 yapkeeper-codex.workspace = true

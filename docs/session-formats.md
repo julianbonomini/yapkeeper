@@ -56,7 +56,7 @@ Not yet supported. No OpenCode history was available locally to inspect.
 - Prefer recorded working directories to decoding folder names. Preserve the recorded branch separately from a worktree's current Git branch.
 - Parse complete JSONL lines and retry an unfinished final line after more data arrives. Skip malformed complete records with bounded diagnostics.
 - Handle unknown records, large lines, file replacement, truncation, repeated metadata, and growing histories.
-- Consider source file identity, byte offsets, size/mtime, and parser version in rebuildable index state. Decide and test how incomplete bytes are retained and retried.
+- The index keeps each file's identity, size, mtime, offset, parser version and fold version. Incomplete bytes are never read: the next read starts at the last complete line. See [ADR 0001](adr/0001-adapters-translate-records-into-facts.md).
 - Keep archived, orphaned, unreadable, forked, and subagent states explicit.
 - Only an absent recorded directory establishes an orphan. Permission errors and unavailable filesystems require an unknown/unavailable state.
 

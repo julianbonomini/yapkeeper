@@ -1,6 +1,6 @@
-//! Drives the Claude Code adapter through `ClaudeCode::at(..).scan()` against
-//! committed synthetic fixtures, and against files written into a tempdir
-//! when their exact bytes or metadata matter.
+//! Drives the Claude Code adapter through `yapkeeper_model::scan` and
+//! `Adapter::read` against committed synthetic fixtures, and against files
+//! written into a tempdir when their exact bytes or metadata matter.
 
 #![forbid(unsafe_code)]
 
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use yapkeeper_claude::ClaudeCode;
-use yapkeeper_model::{Adapter, Message, RecordedGit, ResumeCommand, Role, Scan, Session};
+use yapkeeper_model::{Adapter, Message, RecordedGit, ResumeCommand, Role, Scan, Transcript};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude");
 
@@ -22,20 +22,20 @@ const NO_WORKING_DIR: &str = "66666666-6666-4666-8666-666666666666";
 const NOTES: &str = "77777777-7777-4777-8777-777777777777";
 
 fn scan_fixtures() -> Scan {
-    ClaudeCode::at(PathBuf::from(FIXTURES)).scan()
+    yapkeeper_model::scan(&ClaudeCode::at(PathBuf::from(FIXTURES)))
 }
 
-fn session<'a>(scan: &'a Scan, id: &str) -> &'a Session {
-    scan.sessions
+fn session<'a>(scan: &'a Scan, id: &str) -> &'a Transcript {
+    scan.transcripts
         .iter()
-        .find(|session| session.id == id)
+        .find(|transcript| transcript.session.id == id)
         .unwrap_or_else(|| panic!("session {id} is missing from {:?}", ids(scan)))
 }
 
 fn ids(scan: &Scan) -> Vec<&str> {
-    scan.sessions
+    scan.transcripts
         .iter()
-        .map(|session| session.id.as_str())
+        .map(|transcript| transcript.session.id.as_str())
         .collect()
 }
 
@@ -56,7 +56,7 @@ fn timestamp(rfc3339: &str) -> SystemTime {
 fn last_active_is_the_latest_record_timestamp_or_else_the_file_mtime() {
     let scan = scan_fixtures();
     assert_eq!(
-        session(&scan, LAUNCH).last_active,
+        session(&scan, LAUNCH).session.last_active,
         timestamp("2026-10-20T10:05:00Z")
     );
 
@@ -77,9 +77,11 @@ fn last_active_is_the_latest_record_timestamp_or_else_the_file_mtime() {
         .set_modified(mtime)
         .unwrap();
 
-    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
+    let scan = yapkeeper_model::scan(&ClaudeCode::at(root.path().to_path_buf()));
     assert_eq!(
-        session(&scan, "aaaaaaaa-0000-4000-8000-000000000001").last_active,
+        session(&scan, "aaaaaaaa-0000-4000-8000-000000000001")
+            .session
+            .last_active,
         mtime
     );
 }
@@ -87,10 +89,13 @@ fn last_active_is_the_latest_record_timestamp_or_else_the_file_mtime() {
 #[test]
 fn title_is_the_latest_custom_title_then_the_latest_ai_title_then_the_first_prompt() {
     let scan = scan_fixtures();
-    assert_eq!(session(&scan, LAUNCH).title, "Launch checklist");
-    assert_eq!(session(&scan, BUILD).title, "Fix synthetic build failure");
+    assert_eq!(session(&scan, LAUNCH).session.title, "Launch checklist");
     assert_eq!(
-        session(&scan, NOTES).title,
+        session(&scan, BUILD).session.title,
+        "Fix synthetic build failure"
+    );
+    assert_eq!(
+        session(&scan, NOTES).session.title,
         "Tidy the synthetic notes folder"
     );
 }
@@ -99,7 +104,10 @@ fn title_is_the_latest_custom_title_then_the_latest_ai_title_then_the_first_prom
 fn injected_context_is_never_a_title_or_a_message() {
     let scan = scan_fixtures();
     let release = session(&scan, RELEASE);
-    assert_eq!(release.title, "Summarise the synthetic release notes");
+    assert_eq!(
+        release.session.title,
+        "Summarise the synthetic release notes"
+    );
     for message in &release.messages {
         for injected in ["Caveat:", "<command-name>", "# AGENTS.md", "Meta text"] {
             assert!(
@@ -151,8 +159,8 @@ fn an_unfinished_final_line_is_never_applied_or_counted() {
         ),
     );
 
-    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
-    assert_eq!(session(&scan, id).title, "Finished prompt");
+    let scan = yapkeeper_model::scan(&ClaudeCode::at(root.path().to_path_buf()));
+    assert_eq!(session(&scan, id).session.title, "Finished prompt");
     assert_eq!(scan.malformed_lines, 0);
 }
 
@@ -160,7 +168,7 @@ fn an_unfinished_final_line_is_never_applied_or_counted() {
 fn each_session_carries_the_command_that_resumes_it_in_its_working_directory() {
     let scan = scan_fixtures();
     assert_eq!(
-        session(&scan, BUILD).resume,
+        session(&scan, BUILD).session.resume,
         ResumeCommand {
             program: "claude".to_string(),
             args: vec!["--resume".to_string(), BUILD.to_string()],
@@ -173,9 +181,12 @@ fn each_session_carries_the_command_that_resumes_it_in_its_working_directory() {
 fn working_dir_is_the_first_one_recorded_and_later_ones_are_kept_once() {
     let scan = scan_fixtures();
     let launch = session(&scan, LAUNCH);
-    assert_eq!(launch.working_dir, PathBuf::from("/synthetic/alpha"));
     assert_eq!(
-        launch.other_working_dirs,
+        launch.session.working_dir,
+        PathBuf::from("/synthetic/alpha")
+    );
+    assert_eq!(
+        launch.session.other_working_dirs,
         [PathBuf::from("/synthetic/alpha/nested")]
     );
 }
@@ -236,9 +247,9 @@ fn subagent_transcripts_whose_session_is_missing_are_left_out() {
     )
     .unwrap();
 
-    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
+    let scan = yapkeeper_model::scan(&ClaudeCode::at(root.path().to_path_buf()));
     assert_eq!(ids(&scan), [kept]);
-    assert_eq!(scan.sessions[0].subagents, []);
+    assert_eq!(scan.transcripts[0].subagents, []);
 }
 
 #[test]
@@ -267,15 +278,18 @@ fn the_recap_is_the_latest_away_summary() {
         ),
     );
 
-    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
+    let scan = yapkeeper_model::scan(&ClaudeCode::at(root.path().to_path_buf()));
     assert_eq!(
         session(&scan, "aaaaaaaa-0000-4000-8000-000000000051")
+            .session
             .recap
             .as_deref(),
         Some("The latest synthetic recap")
     );
     assert_eq!(
-        session(&scan, "aaaaaaaa-0000-4000-8000-000000000052").recap,
+        session(&scan, "aaaaaaaa-0000-4000-8000-000000000052")
+            .session
+            .recap,
         None
     );
 }
@@ -301,8 +315,8 @@ fn linked_prs_come_from_pr_link_records_each_once() {
         ),
     );
 
-    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
-    assert_eq!(session(&scan, id).linked_prs, [42, 7]);
+    let scan = yapkeeper_model::scan(&ClaudeCode::at(root.path().to_path_buf()));
+    assert_eq!(session(&scan, id).session.linked_prs, [42, 7]);
 }
 
 #[test]
@@ -356,7 +370,7 @@ fn long_messages_and_tool_calls_are_capped_on_a_char_boundary() {
     let id = "aaaaaaaa-0000-4000-8000-000000000011";
     write_session(root.path(), id, &contents);
 
-    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
+    let scan = yapkeeper_model::scan(&ClaudeCode::at(root.path().to_path_buf()));
     let messages = &session(&scan, id).messages;
     assert_eq!(messages[0].text, format!("{}…", "a".repeat(3_999)));
     assert_eq!(
@@ -383,15 +397,49 @@ fn the_recorded_branch_is_the_first_git_branch_on_a_kept_record() {
         ),
     );
 
-    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
-    let [session] = scan.sessions.as_slice() else {
+    let scan = yapkeeper_model::scan(&ClaudeCode::at(root.path().to_path_buf()));
+    let [session] = scan.transcripts.as_slice() else {
         panic!("expected one session, got {:?}", ids(&scan));
     };
     assert_eq!(
-        session.recorded_git,
+        session.session.recorded_git,
         RecordedGit {
             branch: Some("feature/billing-retry".to_string()),
             repository_url: None,
         }
     );
+}
+
+#[test]
+fn reading_on_from_the_offset_reached_gives_the_same_facts_as_one_whole_read() {
+    let root = tempfile::tempdir().unwrap();
+    let first = concat!(
+        r#"{"type":"user","message":{"content":"A synthetic prompt"},"cwd":"/synthetic/temp","timestamp":"2026-10-20T10:00:00Z"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"content":"A synthetic reply"},"cwd":"/synthetic/temp","timestamp":"2026-10-20T10:01:00Z"}"#,
+        "\n",
+    );
+    let unfinished = r#"{"type":"custom-title","customTitle":"A synthetic title"}"#;
+    let path = write_session(
+        root.path(),
+        "aaaaaaaa-0000-4000-8000-000000000071",
+        &format!("{first}{unfinished}"),
+    );
+    let adapter = ClaudeCode::at(root.path().to_path_buf());
+
+    let before = adapter.read(&path, 0);
+    assert_eq!(before.offset, first.len() as u64);
+    let mut file = fs::File::options().append(true).open(&path).unwrap();
+    std::io::Write::write_all(
+        &mut file,
+        concat!("\n", r#"{"type":"pr-link","prNumber":42}"#, "\n").as_bytes(),
+    )
+    .unwrap();
+    let after = adapter.read(&path, before.offset);
+
+    let whole = adapter.read(&path, 0);
+    let mut resumed = before.facts;
+    resumed.extend(after.facts);
+    assert_eq!(resumed, whole.facts);
+    assert_eq!(after.offset, whole.offset);
 }

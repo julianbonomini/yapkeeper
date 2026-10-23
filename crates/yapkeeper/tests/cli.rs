@@ -7,6 +7,12 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[cfg(unix)]
+use support::Locked;
+use support::repo_with_worktree;
+
+mod support;
+
 const FIXTURES: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../yapkeeper-claude/tests/fixtures/claude"
@@ -296,4 +302,145 @@ fn list_reports_how_many_malformed_lines_it_skipped() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output).lines().count(), 1);
     assert_eq!(stderr(&output), "yapkeeper: skipped 1 malformed line\n");
+}
+
+/// The one line of `stdout` that starts with `title`.
+fn line_titled<'a>(stdout: &'a str, title: &str) -> &'a str {
+    stdout
+        .lines()
+        .find(|line| line.starts_with(title))
+        .unwrap_or_else(|| panic!("no line titled {title:?} in {stdout}"))
+}
+
+#[test]
+fn list_shows_a_worktree_as_project_and_worktree_and_a_main_checkout_as_project() {
+    let home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, worktree) = repo_with_worktree(tmp.path());
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000040",
+        "Work in the worktree",
+        &worktree,
+        "",
+    );
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000041",
+        "Work in the main checkout",
+        &repo,
+        "",
+    );
+
+    let output = yapkeeper(&["list"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    for (title, location) in [
+        ("Work in the worktree", "  acme-api › billing-retry"),
+        ("Work in the main checkout", "  acme-api"),
+    ] {
+        let line = line_titled(&stdout, title);
+        assert!(
+            line.ends_with(location),
+            "{line:?} should end with {location:?}"
+        );
+        assert!(
+            !line.contains("orphaned") && !line.contains("unavailable"),
+            "{line:?}"
+        );
+    }
+}
+
+#[test]
+fn list_labels_a_session_whose_directory_is_gone_as_orphaned() {
+    let home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let gone = tmp.path().join("gone");
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000042",
+        "Work that was deleted",
+        &gone,
+        "",
+    );
+
+    let output = yapkeeper(&["list"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    let line = line_titled(&stdout, "Work that was deleted");
+    let location = gone.display().to_string();
+    assert!(
+        line.ends_with(&format!("  orphaned  {location}")),
+        "{line:?} should label {location:?} orphaned"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn list_labels_a_session_whose_directory_it_may_not_enter_as_unavailable() {
+    let home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let locked = tmp.path().join("locked");
+    fs::create_dir_all(locked.join("inner")).unwrap();
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000043",
+        "Work behind a locked door",
+        &locked.join("inner"),
+        "",
+    );
+    let locked = Locked::new(&locked);
+    if !locked.denies_access() {
+        return;
+    }
+
+    let output = yapkeeper(&["list"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    let line = line_titled(&stdout, "Work behind a locked door");
+    assert!(line.contains("  unavailable  "), "{line:?}");
+    assert!(!line.contains("orphaned"), "{line:?}");
+}
+
+#[test]
+fn list_leaves_out_the_label_column_when_every_session_is_available() {
+    let home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, _) = repo_with_worktree(tmp.path());
+    let folder = tmp.path().join("notes");
+    fs::create_dir(&folder).unwrap();
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000044",
+        "Work in the main checkout",
+        &repo,
+        "",
+    );
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000045",
+        "Work in a plain folder",
+        &folder,
+        "",
+    );
+
+    let output = yapkeeper(&["list"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    let folder = folder.display().to_string();
+    for (title, location) in [
+        ("Work in the main checkout", "acme-api"),
+        ("Work in a plain folder", folder.as_str()),
+    ] {
+        let line = line_titled(&stdout, title);
+        let (before, after) = line.split_at(line.len() - location.len());
+        assert_eq!(after, location, "{line:?} should end with {location:?}");
+        let age = before
+            .strip_suffix("  ")
+            .and_then(|rest| rest.rsplit(' ').next());
+        assert!(
+            age.is_some_and(is_age),
+            "{line:?} should follow the age with exactly two spaces"
+        );
+    }
 }

@@ -24,7 +24,7 @@ fn list_merges_every_provider_most_recent_first() {
     let sessions: Vec<(&str, &str)> = listing
         .sessions
         .iter()
-        .map(|session| (session.provider, session.id.as_str()))
+        .map(|listed| (listed.session.provider, listed.session.id.as_str()))
         .collect();
     assert_eq!(
         sessions,

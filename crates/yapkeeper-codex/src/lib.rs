@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 use yapkeeper_model::{
-    Adapter, Message, MissingHome, ResumeCommand, Role, Scan, Session, read_jsonl,
+    Adapter, Message, MissingHome, RecordedGit, ResumeCommand, Role, Scan, Session, read_jsonl,
 };
 
 /// Codex's history under one `CODEX_HOME`.
@@ -93,6 +93,7 @@ fn read_session(
 ) -> Option<Session> {
     let mut seen_meta = false;
     let mut id: Option<String> = None;
+    let mut recorded_git = RecordedGit::default();
     let mut working_dirs: Vec<PathBuf> = Vec::new();
     let mut messages = Vec::new();
     let mut latest_timestamp = None;
@@ -113,6 +114,10 @@ fn read_session(
                         return ControlFlow::Break(());
                     }
                     id = payload["id"].as_str().map(str::to_string);
+                    recorded_git = RecordedGit {
+                        branch: non_empty(&payload["git"]["branch"]),
+                        repository_url: non_empty(&payload["git"]["repository_url"]),
+                    };
                 }
                 if let Some(cwd) = payload["cwd"].as_str().map(PathBuf::from)
                     && !working_dirs.contains(&cwd)
@@ -190,6 +195,7 @@ fn read_session(
         working_dir,
         other_working_dirs: working_dirs,
         last_active,
+        recorded_git,
         messages,
     })
 }

@@ -50,9 +50,21 @@ pub struct Session {
     /// first seen, for the preview.
     pub other_working_dirs: Vec<PathBuf>,
     pub last_active: SystemTime,
+    /// What the provider recorded about Git when the session started.
+    pub recorded_git: RecordedGit,
     /// In transcript order, with injected context removed and long text capped.
     pub messages: Vec<Message>,
     pub resume: ResumeCommand,
+}
+
+/// Git facts the provider recorded when the session ran. They may no longer
+/// match the disk, and either may be missing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordedGit {
+    /// Such as `feature/billing-retry`.
+    pub branch: Option<String>,
+    /// The remote, such as `git@example.com:acme/acme-api.git`.
+    pub repository_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

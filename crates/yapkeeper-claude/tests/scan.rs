@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use yapkeeper_claude::ClaudeCode;
-use yapkeeper_model::{Adapter, Message, ResumeCommand, Role, Scan, Session};
+use yapkeeper_model::{Adapter, Message, RecordedGit, ResumeCommand, Role, Scan, Session};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude");
 
@@ -249,5 +249,36 @@ fn long_messages_and_tool_calls_are_capped_on_a_char_boundary() {
     assert_eq!(
         messages[1].text,
         format!(r#"Bash {{"command":"{}…"#, "b".repeat(282))
+    );
+}
+
+#[test]
+fn the_recorded_branch_is_the_first_git_branch_on_a_kept_record() {
+    let root = tempfile::tempdir().unwrap();
+    write_session(
+        root.path(),
+        "aaaaaaaa-0000-4000-8000-000000000031",
+        concat!(
+            r#"{"type":"user","isMeta":true,"message":{"content":"Injected"},"cwd":"/synthetic/temp","gitBranch":"meta-branch"}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"A synthetic prompt"},"cwd":"/synthetic/temp","gitBranch":""}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":"Done"},"cwd":"/synthetic/temp","gitBranch":"feature/billing-retry"}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"Again"},"cwd":"/synthetic/temp","gitBranch":"later"}"#,
+            "\n",
+        ),
+    );
+
+    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
+    let [session] = scan.sessions.as_slice() else {
+        panic!("expected one session, got {:?}", ids(&scan));
+    };
+    assert_eq!(
+        session.recorded_git,
+        RecordedGit {
+            branch: Some("feature/billing-retry".to_string()),
+            repository_url: None,
+        }
     );
 }

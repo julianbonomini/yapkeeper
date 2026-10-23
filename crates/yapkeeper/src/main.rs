@@ -10,9 +10,9 @@ use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use yapkeeper::{Roots, list};
+use yapkeeper::{Availability, Listed, Place, Roots, list};
 
-/// Wide enough for most titles while leaving the directory room at 80 columns.
+/// Wide enough for most titles; what follows may wrap on an 80-column terminal.
 const MAX_TITLE_WIDTH: usize = 48;
 
 const EXIT_MISSING_HOME: u8 = 1;
@@ -33,7 +33,8 @@ struct Cli {
 enum Command {
     /// List Claude Code and Codex sessions, most recent first
     ///
-    /// Each line shows a session's title, provider, age and working directory.
+    /// Each line shows a session's title, provider, age, an orphaned or unavailable
+    /// label when one applies, and where it ran.
     #[command(after_help = HISTORIES)]
     List,
 }
@@ -70,25 +71,41 @@ fn print_list() -> ExitCode {
     let titles: Vec<String> = listing
         .sessions
         .iter()
-        .map(|session| fit_title(&one_line(&session.title)))
+        .map(|listed| fit_title(&one_line(&listed.session.title)))
         .collect();
     let title_width = titles.iter().map(|title| title.width()).max().unwrap_or(0);
     let provider_width = listing
         .sessions
         .iter()
-        .map(|session| session.provider.width())
+        .map(|listed| listed.session.provider.width())
+        .max()
+        .unwrap_or(0);
+    let state_width = listing
+        .sessions
+        .iter()
+        .map(|listed| state_label(listed.location.availability).width())
         .max()
         .unwrap_or(0);
     let mut stdout = io::stdout().lock();
-    for (session, title) in listing.sessions.iter().zip(&titles) {
+    for (listed, title) in listing.sessions.iter().zip(&titles) {
+        let session = &listed.session;
         let padding = " ".repeat(title_width - title.width());
         let provider = session.provider;
         let age = ago(session.last_active, now);
-        let dir = without_controls(&with_tilde(&session.working_dir, home.as_deref()));
+        // The label column is dropped when no line has one, rather than
+        // left as blank padding.
+        let state = match state_width {
+            0 => String::new(),
+            _ => format!(
+                "{:<state_width$}  ",
+                state_label(listed.location.availability)
+            ),
+        };
+        let location = without_controls(&location_text(listed, home.as_deref()));
         // A closed pipe, as with `| head`, just ends the listing.
         if writeln!(
             stdout,
-            "{title}{padding}  {provider:<provider_width$}  {age:>3}  {dir}"
+            "{title}{padding}  {provider:<provider_width$}  {age:>3}  {state}{location}"
         )
         .is_err()
         {
@@ -96,6 +113,25 @@ fn print_list() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Words rather than colour, so the state survives `NO_COLOR` and `grep`.
+fn state_label(availability: Availability) -> &'static str {
+    match availability {
+        Availability::Available => "",
+        Availability::Orphaned => "orphaned",
+        Availability::Unavailable => "unavailable",
+    }
+}
+
+/// `project`, `project › worktree`, or the working directory when the
+/// session ran outside any known repo.
+fn location_text(listed: &Listed, home: Option<&Path>) -> String {
+    match &listed.location.place {
+        Place::MainCheckout { project } => project.clone(),
+        Place::Worktree { project, worktree } => format!("{project} › {worktree}"),
+        Place::Folder => with_tilde(&listed.session.working_dir, home),
+    }
 }
 
 /// `dir` with a leading home directory shown as `~`.

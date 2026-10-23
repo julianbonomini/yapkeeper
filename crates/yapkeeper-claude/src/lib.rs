@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 use yapkeeper_model::{
-    Adapter, Message, MissingHome, ResumeCommand, Role, Scan, Session, read_jsonl,
+    Adapter, Message, MissingHome, RecordedGit, ResumeCommand, Role, Scan, Session, read_jsonl,
 };
 
 /// Claude Code's history under one configuration directory.
@@ -77,6 +77,7 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
     let mut latest_timestamp = None;
     let mut custom_title = None;
     let mut ai_title = None;
+    let mut branch = None;
     let read_to_end = read_jsonl(path, malformed_lines, |record| {
         if let Some(time) = record["timestamp"].as_str().and_then(parse_timestamp) {
             latest_timestamp = latest_timestamp.max(Some(time));
@@ -102,6 +103,9 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
             && !working_dirs.contains(&cwd)
         {
             working_dirs.push(cwd);
+        }
+        if branch.is_none() {
+            branch = non_empty(&record["gitBranch"]);
         }
         match &record["message"]["content"] {
             Value::String(text) => push_message(&mut messages, role, text),
@@ -155,6 +159,10 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
         working_dir,
         other_working_dirs: working_dirs,
         last_active,
+        recorded_git: RecordedGit {
+            branch,
+            repository_url: None,
+        },
         messages,
     })
 }

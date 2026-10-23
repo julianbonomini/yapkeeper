@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use yapkeeper_codex::Codex;
-use yapkeeper_model::{Adapter, Message, ResumeCommand, Role, Scan, Session};
+use yapkeeper_model::{Adapter, Message, RecordedGit, ResumeCommand, Role, Scan, Session};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex");
 
@@ -186,4 +186,37 @@ fn a_rollout_whose_first_session_meta_has_no_id_does_not_borrow_a_later_one() {
     );
 
     assert_eq!(Codex::at(home.path().to_path_buf()).scan().sessions, []);
+}
+
+#[test]
+fn recorded_git_comes_from_the_first_session_meta_only() {
+    let home = tempfile::tempdir().unwrap();
+    let own = r#"{"timestamp":"2026-10-22T08:00:00Z","type":"session_meta","payload":{"id":"eeeeeeee-0000-7000-8000-00000000000e","cwd":"/synthetic/eta","source":"cli","git":{"branch":"feature/billing-retry","repository_url":"git@example.com:acme/acme-api.git"}}}"#;
+    let parents = r#"{"timestamp":"2026-10-22T08:00:00Z","type":"session_meta","payload":{"id":"ffffffff-0000-7000-8000-00000000000f","cwd":"/synthetic/theta","source":"cli","git":{"branch":"main","repository_url":"git@example.com:acme/other.git"}}}"#;
+    write_rollout(
+        home.path(),
+        &format!("{own}\n{parents}\n{}\n", prompt("A synthetic prompt")),
+    );
+    let scan = Codex::at(home.path().to_path_buf()).scan();
+    let [session] = scan.sessions.as_slice() else {
+        panic!("expected one session, got {:?}", ids(&scan));
+    };
+    assert_eq!(
+        session.recorded_git,
+        RecordedGit {
+            branch: Some("feature/billing-retry".to_string()),
+            repository_url: Some("git@example.com:acme/acme-api.git".to_string()),
+        }
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    write_rollout(
+        home.path(),
+        &format!("{META}\n{}\n", prompt("A synthetic prompt")),
+    );
+    let scan = Codex::at(home.path().to_path_buf()).scan();
+    let [session] = scan.sessions.as_slice() else {
+        panic!("expected one session, got {:?}", ids(&scan));
+    };
+    assert_eq!(session.recorded_git, RecordedGit::default());
 }

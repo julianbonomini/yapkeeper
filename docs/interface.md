@@ -44,6 +44,10 @@ Rules:
 
 A location is a Git repo, one of its linked worktrees, or a plain folder. Yapkeeper derives it from the session's recorded working directory: it walks up to the nearest `.git`, treats a `.git` directory as a main checkout and a `.git` file as a linked worktree, and names the project after the main checkout's folder.
 
+A session whose directory no longer exists is `orphaned`; one whose directory exists but can't be inspected, such as when permission is denied, is `unavailable`. Both are read from the disk on every listing and never stored, so deleting a directory takes effect on the next listing. `yapkeeper list` prints each session's location as `project`, `project › worktree`, or the folder path, after an `orphaned` or `unavailable` label when one applies.
+
+An orphaned or unavailable session's project is inferred on a best-effort basis. The first of these that applies names the project: the recorded `repository_url`, then the nearest existing repo above the directory, then a path layout (`X.wt/w`, `R/.claude/worktrees/w`, `~/.tool/worktrees/P/w`, `P/worktrees/w` or `P/.worktrees/w`). The worktree comes from that layout, or from a recorded branch whose last segment matches the folder name. When nothing applies, the raw path is shown.
+
 `Tab` (or typing `@`) opens the location list. Each project row comes first and covers the main checkout and every worktree; its worktrees are listed under it. Plain folders follow. Groups are ordered by most recent activity. Each row has a kind icon on the left, a kind label and path, and a session count. With the Unicode icon set:
 
 ```
@@ -55,7 +59,7 @@ A location is a Git repo, one of its linked worktrees, or a plain folder. Yapkee
 
 Typing after `@` matches location names and paths, so `@code` finds every project under `~/code`. Result rows label locations as `project › worktree`; the `project:worktree` form is used only inside `@` tokens. `Ctrl+L` inserts the location Yapkeeper was launched from.
 
-A folder that no longer exists cannot be checked for Git, so it is shown as `missing` with its path.
+In the location list, a folder that no longer exists cannot be checked for Git, so it is shown as `missing` with its path.
 
 ## Preview
 
@@ -80,7 +84,7 @@ Recaps cost nothing extra: Claude Code writes `away_summary` records into its se
 
 | Setting | Default | Reason |
 |---|---|---|
-| Hide sessions in temp folders (`/private/tmp`, `/tmp`, `/var/folders`) | On | 59 of 783 real sessions were scratch work in temp folders. The header shows how many are hidden, and `is:temp` shows them anyway. |
+| Hide sessions in temp folders (`/private/tmp`, `/tmp`, `/var/folders`, `/private/var/folders`) | On | 59 of 783 real sessions were scratch work in temp folders. The header shows how many are hidden, and `is:temp` shows them anyway. |
 | Hide missing folders in the location list | On | 46 of 82 real recorded folders no longer exist. They still appear when the user types a name after `@`. |
 | List orphaned sessions after the rest | On | 501 of 783 real sessions were orphaned and crowded out live ones. They stay searchable. |
 | Accent | Sage (256-color index 108), soft grey selection bar (index 237) | Chosen from cyan, amber, violet, sky, sage, and monochrome. |
@@ -119,7 +123,6 @@ The prototype reads every history file at launch, in parallel threads, without a
 
 ## Open questions
 
-- Project for orphaned worktrees. A deleted worktree's project could be inferred from its path (for example `~/.vago/worktrees/<project>/...`) or from the recorded Git branch. Today it falls back to the raw path.
 - Cursor movement inside the query, so a filter in the middle can be edited.
 - Fuzzy matching for search words and locations.
 - Summaries for sessions without a recap: an opt-in, cached model call during indexing, which costs tokens and sends conversation text to a model.

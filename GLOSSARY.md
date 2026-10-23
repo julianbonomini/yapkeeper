@@ -17,7 +17,13 @@ The filesystem directory recorded for a session. It may be a Git worktree or an 
 Where a session ran, derived from its working directory: a Git repo's main checkout, one of its linked worktrees, or a plain folder. A project groups a repo's main checkout and its worktrees.
 
 **Orphaned session**:
-A session whose recorded working directory no longer exists. A directory that cannot be inspected has an unknown availability state, rather than being presumed absent.
+A session whose recorded working directory no longer exists. A directory that cannot be inspected makes it an unavailable session instead.
+
+**Unavailable session**:
+A session whose working directory exists but cannot be inspected, such as when permission is denied. It is never presumed orphaned.
+
+**Temp session**:
+A session whose working directory is under a system temp folder.
 
 **Hidden session**:
 A session the user has excluded from ordinary Yapkeeper results. Hiding is reversible and preserves the provider's original history.

@@ -1,0 +1,13 @@
+# PROTOTYPE: Yapkeeper command palette
+
+Disposable. It settles the interaction model in `docs/product.md` → *UI prototype questions* before implementation tickets are written. Resume is simulated: after you confirm, the TUI exits and prints the command it would have run.
+
+```sh
+cargo run --release --manifest-path prototypes/tui-flow/Cargo.toml              # your real histories
+cargo run --release --manifest-path prototypes/tui-flow/Cargo.toml -- --demo    # synthetic sessions
+cargo run --release --manifest-path prototypes/tui-flow/Cargo.toml -- --stats   # aggregate counts only
+```
+
+The real mode reads `~/.claude/projects` and `~/.codex` (or `CLAUDE_CONFIG_DIR` / `CODEX_HOME`) read-only at launch and keeps everything in memory. It writes nothing, and hiding lasts only until you quit. Tool results are skipped, tool calls are kept as short one-liners, and messages are capped at 4,000 characters.
+
+Type to search everything. `Tab` browses locations (`@project` / `@project:worktree`), `^L` inserts the launch location, `#codex` / `#claude` filter by agent, and `is:orphaned` / `is:unavailable` / `is:hidden` filter by state. `Enter` resumes (simulated), `→` reads the whole conversation, `^X` hides, `^T` includes tool calls, and `Esc` clears then quits.

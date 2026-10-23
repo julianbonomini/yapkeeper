@@ -1,0 +1,14 @@
+# PROTOTYPE: disposable interaction study. Not part of the Yapkeeper build.
+[package]
+name = "yapkeeper-tui-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Keep this crate out of any future root workspace.
+[workspace]
+
+[dependencies]
+ratatui = "0.30"
+unicode-width = "0.2"
+serde_json = "1"

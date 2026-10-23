@@ -1,8 +1,10 @@
-# The small Workflow, for a Goal whose Tickets are small and already clear:
-# one agent builds each Ticket and a fresh one reviews it. Pick it with
-# `vago goal new <goal> --workflow small`. Prompt paths resolve from .vago/,
-# include paths from the repo root, and shell commands run in the Goal's
-# worktree.
+# The small Workflow, for a Ticket that is small and already clear: one agent
+# builds it and a fresh one reviews it. It has no Goal Steps, so a Ticket of a
+# try-hard Goal can go through it with
+# `vago ticket add <goal> <ticket> --workflow small`. A Goal names try-hard,
+# whose Goal Steps write the PR description and mark it ready for review.
+# Prompt paths resolve from .vago/, include paths from the repo root, and
+# shell commands run in the Goal's worktree.
 #
 # Git: Vago runs each Goal in its own worktree on the Goal's branch,
 # vago/<goal>, which Vago cuts from the repo's default branch and owns.
@@ -23,7 +25,7 @@
 # Ticket added later is done, so a Step that mustn't repeat checks for itself.
 # Goal Steps run in the Goal's worktree on vago/<goal>, with $VAGO_GOAL and
 # $VAGO_PROJECT_ROOT but no Ticket, and {{steps.<id>.output}} reads only Steps
-# of its own group. This Workflow has no before_all.
+# of its own group. This Workflow has neither, so that a Ticket can use it.
 
 # Claude Code with Claude Opus 5.5 runs every agent step, including fresh reviews.
 # A step using another harness must override both harness/model and args.
@@ -74,15 +76,3 @@ id = "merge"
 name = "Squash merge"
 type = "shell"
 run = "sh .vago/scripts/merge.sh"
-
-[[after_all]]
-id = "describe"
-name = "PR description"
-type = "agent"
-prompt = "prompts/describe.md"
-
-[[after_all]]
-id = "ready"
-name = "Ready for review"
-type = "shell"
-run = "sh .vago/scripts/ready.sh"

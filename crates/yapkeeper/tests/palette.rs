@@ -1498,3 +1498,235 @@ fn the_footer_names_tab_for_locations_until_the_list_is_open() {
     assert!(footer.contains("Tab insert"), "{footer}");
     assert!(!footer.contains("Tab locations"), "{footer}");
 }
+
+/// The rows of the conversation's body, inside the border, trimmed: from
+/// under the rule below its title and details down to the footer.
+fn conversation_body(frame: &[String]) -> Vec<String> {
+    frame[4..frame.len() - 2]
+        .iter()
+        .map(|row| row.trim_matches('│').trim().to_string())
+        .collect()
+}
+
+/// Writes a Claude Code session of forty exchanges, `turn 0` to `turn 39`,
+/// whose prompts 5, 20 and 35 mention a needle, and whose first reply
+/// calls a tool with a long command.
+fn long_session(histories: &Histories) {
+    let mut records = Vec::new();
+    for turn in 0..40 {
+        let prompt = match turn {
+            5 | 20 | 35 => format!("turn {turn} finds the needle"),
+            _ => format!("turn {turn} asks"),
+        };
+        records.push(json!({ "type": "user", "message": { "content": prompt } }));
+        let mut reply = vec![json!({ "type": "text", "text": format!("reply {turn}") })];
+        if turn == 0 {
+            let command = "cargo test --workspace ".repeat(10);
+            reply.push(
+                json!({ "type": "tool_use", "name": "Bash", "input": { "command": command } }),
+            );
+        }
+        records.push(json!({ "type": "assistant", "message": { "content": reply } }));
+    }
+    histories.claude_records(CLAUDE_FULL, "/usr", &records);
+}
+
+#[test]
+fn right_opens_the_conversation_and_esc_or_left_returns_unchanged() {
+    let histories = Histories::three();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    // Every title has a "t", so all three rows stay.
+    keys(&mut palette, "t");
+    press(&mut palette, KeyCode::Down);
+    let palette_frame = frame(&mut palette, 80, 24);
+    assert_eq!(selected(&draw(&mut palette, 80, 24)), Some("Retry"));
+
+    for back in [KeyCode::Esc, KeyCode::Left] {
+        assert_eq!(press(&mut palette, KeyCode::Right), Step::Continue);
+        let reading = frame(&mut palette, 80, 24);
+        assert!(reading[1].contains("Retry the billing job"), "{reading:#?}");
+        let body = conversation_body(&reading);
+        assert!(body[0].starts_with("you"), "{reading:#?}");
+        assert!(body[0].contains("Retry the billing job"), "{reading:#?}");
+        assert!(reading[22].contains("Esc back"), "{reading:#?}");
+
+        assert_eq!(press(&mut palette, back), Step::Continue);
+        assert_eq!(frame(&mut palette, 80, 24), palette_frame);
+    }
+}
+
+#[test]
+fn printable_keys_and_enter_leave_the_query_alone_while_reading() {
+    let histories = Histories::three();
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    let palette_frame = frame(&mut palette, 80, 24);
+
+    press(&mut palette, KeyCode::Right);
+    let reading = frame(&mut palette, 80, 24);
+    keys(&mut palette, "xyz");
+    assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
+    assert_eq!(frame(&mut palette, 80, 24), reading);
+    press(&mut palette, KeyCode::Esc);
+    assert_eq!(frame(&mut palette, 80, 24), palette_frame);
+
+    press(&mut palette, KeyCode::Right);
+    assert_eq!(ctrl(&mut palette, 'c'), Step::Quit);
+}
+
+#[test]
+fn arrows_and_page_keys_scroll_the_conversation() {
+    let histories = Histories::new();
+    long_session(&histories);
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    press(&mut palette, KeyCode::Right);
+    let first_row = |palette: &mut Palette| conversation_body(&frame(palette, 80, 24))[0].clone();
+
+    assert!(first_row(&mut palette).contains("turn 0 asks"));
+    press(&mut palette, KeyCode::Up);
+    assert!(first_row(&mut palette).contains("turn 0 asks"));
+    // A blank line sits between messages.
+    press(&mut palette, KeyCode::Down);
+    assert_eq!(first_row(&mut palette), "");
+    press(&mut palette, KeyCode::Down);
+    assert!(first_row(&mut palette).contains("reply 0"));
+
+    // A page is the body's height: 24 rows less the border, the title,
+    // the details, the rule and the footer.
+    press(&mut palette, KeyCode::PageDown);
+    let paged = conversation_body(&frame(&mut palette, 80, 24));
+    assert_eq!(paged.len(), 18);
+    press(&mut palette, KeyCode::PageUp);
+    assert!(first_row(&mut palette).contains("reply 0"));
+
+    press(&mut palette, KeyCode::End);
+    let end = conversation_body(&frame(&mut palette, 80, 24));
+    assert!(end.last().unwrap().contains("reply 39"), "{end:#?}");
+    // The end stays put.
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::PageDown);
+    assert_eq!(conversation_body(&frame(&mut palette, 80, 24)), end);
+    press(&mut palette, KeyCode::Home);
+    assert!(first_row(&mut palette).contains("turn 0 asks"));
+}
+
+#[test]
+fn a_page_down_moves_the_last_row_to_the_top() {
+    let histories = Histories::new();
+    long_session(&histories);
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    press(&mut palette, KeyCode::Right);
+
+    let before = conversation_body(&frame(&mut palette, 80, 24));
+    press(&mut palette, KeyCode::PageDown);
+    let after = conversation_body(&frame(&mut palette, 80, 24));
+    assert_eq!(after[0], before[before.len() - 1], "{before:#?} {after:#?}");
+}
+
+/// Which `turn N finds the needle` prompts `body` shows.
+fn needles(body: &[String]) -> Vec<String> {
+    body.iter()
+        .filter(|row| row.contains("needle"))
+        .map(|row| row.split_whitespace().nth(2).unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn n_and_shift_n_move_between_matches_and_wrap_around() {
+    let histories = Histories::new();
+    long_session(&histories);
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    keys(&mut palette, "needle");
+    press(&mut palette, KeyCode::Right);
+
+    // Opening shows the first match; each one is the only match a page holds.
+    let reading = frame(&mut palette, 80, 24);
+    assert_eq!(needles(&conversation_body(&reading)), ["5"]);
+    assert!(reading[1].contains("match 1 / 3"), "{reading:#?}");
+    let mut seen = Vec::new();
+    for key in ['n', 'n', 'n', 'N', 'N'] {
+        press(&mut palette, KeyCode::Char(key));
+        let reading = frame(&mut palette, 80, 24);
+        let header = reading[1]
+            .split("match ")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(['│', ' ']);
+        seen.push((needles(&conversation_body(&reading)), header.to_string()));
+    }
+    let expected = [
+        ("20", "2 / 3"),
+        ("35", "3 / 3"),
+        ("5", "1 / 3"),
+        ("35", "3 / 3"),
+        ("20", "2 / 3"),
+    ];
+    let expected: Vec<(Vec<String>, String)> = expected
+        .iter()
+        .map(|(turn, header)| (vec![turn.to_string()], header.to_string()))
+        .collect();
+    assert_eq!(seen, expected);
+}
+
+#[test]
+fn matches_are_highlighted_in_the_conversation() {
+    let histories = Histories::new();
+    long_session(&histories);
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Mono, Path::new("/"));
+    keys(&mut palette, "needle");
+    press(&mut palette, KeyCode::Right);
+
+    let buffer = draw(&mut palette, 80, 24);
+    let frame = lines(&buffer);
+    let y = frame
+        .iter()
+        .position(|row| row.contains("finds the needle"))
+        .unwrap();
+    let x = frame[y][..frame[y].find("needle").unwrap()].chars().count() as u16;
+    let underlined = |x: u16| {
+        buffer[(x, y as u16)]
+            .modifier
+            .contains(Modifier::UNDERLINED)
+    };
+    assert!((x..x + 6).all(underlined), "{}", frame[y]);
+    assert!(!underlined(x - 1) && !underlined(x + 6), "{}", frame[y]);
+}
+
+#[test]
+fn a_tool_call_reads_as_one_line() {
+    let histories = Histories::new();
+    long_session(&histories);
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    press(&mut palette, KeyCode::Right);
+
+    let body = conversation_body(&frame(&mut palette, 80, 24));
+    let call = body.iter().position(|row| row.contains("Bash")).unwrap();
+    assert!(body[call].ends_with('…'), "{body:#?}");
+    assert!(body[call + 1].is_empty(), "{body:#?}");
+}
+
+#[test]
+fn at_60_columns_right_opens_the_conversation_inside_the_border() {
+    let histories = Histories::new();
+    let long = format!("{} then the needle at last", "padding words ".repeat(20));
+    histories.claude(CLAUDE_RETRY, "/usr", &long);
+    let catalog = histories.catalog();
+    let mut palette = Palette::new(&catalog, Colour::Sage, Path::new("/"));
+    keys(&mut palette, "needle");
+    press(&mut palette, KeyCode::Right);
+
+    let reading = frame(&mut palette, 60, 20);
+    for row in &reading[1..19] {
+        assert!(row.starts_with('│') && row.ends_with('│'), "{reading:#?}");
+        assert_eq!(row.width(), 60, "{reading:#?}");
+    }
+    // The long prompt wraps, whole, rather than being cut.
+    let body = conversation_body(&reading).join(" ");
+    assert!(body.contains("then the needle at last"), "{reading:#?}");
+}

@@ -103,11 +103,13 @@ END;
 /// `OR`, `NEAR`, `*` and `:` in it are matched as text.
 const PHRASE: &str = r#"'"' || replace(?1, '"', '""') || '"'"#;
 
-/// Messages that aren't tool-level: what the person and the assistant
-/// said in the session's own thread. Tool calls, tool output and every
-/// subagent thread are tool-level.
-const CONVERSATION: &str =
-    "messages.role IN ('user', 'assistant') AND threads.thread = threads.session_id";
+/// What the person and the assistant said, leaving out tool calls and
+/// tool output. In the session's own thread, these messages are the ones
+/// that aren't tool-level.
+const SAID: &str = "messages.role IN ('user', 'assistant')";
+
+/// Threads that are the session's own, leaving out every subagent's.
+const OWN_THREAD: &str = "threads.thread = threads.session_id";
 
 /// The index, open and up to date as of the refresh that returned it.
 pub(crate) struct Index {
@@ -128,7 +130,8 @@ impl Index {
     }
 
     /// What the person and the assistant said in `session`'s own thread,
-    /// in the order recorded; empty for a session the index doesn't hold.
+    /// and the tools the assistant called there, in the order recorded;
+    /// empty for a session the index doesn't hold.
     /// Fails only when the index can no longer be read.
     pub(crate) fn conversation(&self, session: &SessionKey) -> Result<Vec<Message>, DataError> {
         conversation(&self.connection, session).map_err(|source| self.error(source))
@@ -151,16 +154,17 @@ fn conversation(connection: &Connection, session: &SessionKey) -> Result<Vec<Mes
         JOIN sources ON sources.path = messages.source_path
         JOIN threads ON threads.provider = sources.provider
             AND threads.thread = sources.thread
-        WHERE threads.provider = ?1 AND threads.session_id = ?2 AND {CONVERSATION}
+        WHERE threads.provider = ?1 AND threads.session_id = ?2 AND {OWN_THREAD}
+            AND messages.role != 'tool_output'
         ORDER BY sources.path, messages.seq"
     ))?;
     let messages = statement
         .query_map(params![session.provider, session.id], |row| {
-            // `CONVERSATION` admits only the person's and the assistant's rows.
-            let role = match row.get::<_, String>(0)?.as_str() {
-                "user" => Role::User,
-                _ => Role::Assistant,
-            };
+            let stored = row.get::<_, String>(0)?;
+            let role = [Role::User, Role::Assistant, Role::ToolCall]
+                .into_iter()
+                .find(|role| role_name(*role) == stored)
+                .unwrap_or(Role::Assistant);
             Ok(Message {
                 role,
                 text: row.get(1)?,
@@ -179,13 +183,16 @@ fn narrow(
     let mut words: Vec<_> = query.words().iter().collect();
     // A longer word tends to be rarer, so fewer sessions are left for the rest.
     words.sort_by_key(|word| Reverse(word.key().chars().count()));
-    let scope = if query.tools() { "true" } else { CONVERSATION };
+    let scope = match query.tools() {
+        true => "true".to_string(),
+        false => format!("{SAID} AND {OWN_THREAD}"),
+    };
     for word in words {
-        let matched = sessions_matching(connection, word, scope, &candidates)?;
+        let matched = sessions_matching(connection, word, &scope, &candidates)?;
         candidates.retain(|key| matched.contains(key));
     }
     for word in query.excluded_words() {
-        let matched = sessions_matching(connection, word, scope, &candidates)?;
+        let matched = sessions_matching(connection, word, &scope, &candidates)?;
         candidates.retain(|key| !matched.contains(key));
     }
     Ok(candidates)
@@ -494,19 +501,23 @@ fn store_messages(transaction: &Transaction, source: &Path, facts: &[Fact]) -> R
         _ => None,
     });
     for (seq, message) in (next..).zip(messages) {
-        let role = match message.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::ToolCall => "tool_call",
-            Role::ToolOutput => "tool_output",
-        };
-        statement.execute(params![source, seq, role, message.text])?;
+        statement.execute(params![source, seq, role_name(message.role), message.text])?;
         searchable.execute(params![
             transaction.last_insert_rowid(),
             query::fold(&message.text)
         ])?;
     }
     Ok(())
+}
+
+/// How `role` is stored in the `messages` table.
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::ToolCall => "tool_call",
+        Role::ToolOutput => "tool_output",
+    }
 }
 
 /// Replaces `adapter`'s sessions and threads with those its stored digests

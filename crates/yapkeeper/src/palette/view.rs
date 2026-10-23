@@ -1,9 +1,10 @@
 //! How the palette looks: its theme, its breakpoints and every line it
 //! draws, from the query line, its filters in the accent, down to the
 //! completions or the results and the footer, plus the too-small state.
-//! The preview's lines are its own module's.
+//! The preview's lines and the whole conversation's are their own modules'.
 
 mod preview;
+mod reading;
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -17,9 +18,9 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{Colour, Palette};
 use crate::line::{
-    age, availability_label, directory, fit, fit_left, one_line, place, without_controls,
+    age, availability_label, directory, fit, fit_left, one_line, place, without_controls, wrap,
 };
-use crate::{Availability, Listed, LocationRow, LocationRowKind, Place, TokenKind};
+use crate::{Availability, Listed, LocationRow, LocationRowKind, Place, Query, Role, TokenKind};
 
 /// The smallest terminal the palette draws in; below it only says so.
 const MIN_WIDTH: u16 = 48;
@@ -103,13 +104,24 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
         .border_style(theme.dim);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [query, rule, body, footer] = Layout::vertical([
-        Constraint::Length(1),
+    // Reading, a title and where the session ran take the query's place.
+    let reading = palette.reading.is_some();
+    let [top, rule, body, footer] = Layout::vertical([
+        Constraint::Length(if reading { 2 } else { 1 }),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
     .areas(inner);
+    frame.render_widget(
+        Paragraph::new("─".repeat(usize::from(rule.width))).style(theme.dim),
+        rule,
+    );
+    footer_line(palette, &theme, frame, footer);
+    if reading {
+        reading::render(palette, &theme, frame, top, body);
+        return;
+    }
     let results = match area.width >= SPLIT_WIDTH && palette.completions.is_empty() {
         true => {
             let [results, preview] =
@@ -120,16 +132,11 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
         }
         false => body,
     };
-    query_line(palette, &theme, frame, query);
-    frame.render_widget(
-        Paragraph::new("─".repeat(usize::from(rule.width))).style(theme.dim),
-        rule,
-    );
+    query_line(palette, &theme, frame, top);
     match palette.completions.is_empty() {
         true => rows(palette, &theme, frame, results),
         false => completions(palette, &theme, frame, results),
     }
-    footer_line(palette, &theme, frame, footer);
 }
 
 /// Says the terminal is too small, and how big it must be, centred.
@@ -442,8 +449,15 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
         true => "quit",
         false => "clear",
     };
-    let hints = match palette.completions.is_empty() {
-        true => vec![
+    let hints = match (palette.reading.is_some(), palette.completions.is_empty()) {
+        (true, _) => vec![
+            Some(("↑↓", "scroll")),
+            Some(("n N", "match")),
+            Some(("PgDn", "page")),
+            Some(("Esc", "back")),
+            Some(("^C", "quit")),
+        ],
+        (false, true) => vec![
             Some(("↑↓", "move")),
             Some(("Tab", "locations")),
             Some(("Esc", esc)),
@@ -451,7 +465,7 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
             palette.launch_token.as_ref().map(|_| ("^L", "here")),
             Some(("^C", "quit")),
         ],
-        false => vec![
+        (false, false) => vec![
             Some(("↑↓", "choose")),
             Some(("Tab", "insert")),
             Some(("Esc", esc)),
@@ -476,4 +490,82 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
         used += cells;
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// How one session's text is drawn, `cells` wide, with what the query
+/// matches highlighted.
+struct Text<'a> {
+    query: &'a Query,
+    theme: &'a Theme,
+    cells: usize,
+    /// Such as `claude`, the label of the assistant's messages.
+    provider: &'static str,
+}
+
+/// What `Text::paragraph` drew.
+struct Drawn {
+    lines: Vec<Line<'static>>,
+    /// The line each highlight drawn starts on, in order.
+    hits: Vec<usize>,
+}
+
+impl Text<'_> {
+    /// Who said a message in `role`, padded to one column of labels as
+    /// wide as the widest one.
+    fn label(&self, role: Role) -> String {
+        let speaker = match role {
+            Role::User => "you",
+            Role::ToolCall | Role::ToolOutput => "tool",
+            Role::Assistant => self.provider,
+        };
+        let cells = [self.provider, "you", "tool"]
+            .iter()
+            .map(|label| label.width())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        format!("{speaker:<cells$}")
+    }
+
+    /// `text` on one line wrapped into at most `max_lines` lines in `style`,
+    /// what the query matches highlighted, ending in `…` when cut. `label`
+    /// starts the first line, in its own column.
+    fn paragraph(&self, text: &str, label: &str, max_lines: usize, style: Style) -> Drawn {
+        let text = one_line(text);
+        let label_cells = label.width();
+        let wrapped = wrap(&text, self.cells.saturating_sub(label_cells), max_lines);
+        let highlights = self.query.highlights(&text);
+        let highlighted = style.patch(self.theme.highlight);
+        let last = wrapped.lines.len().saturating_sub(1);
+        let mut drawn = Drawn {
+            lines: Vec::new(),
+            hits: Vec::new(),
+        };
+        for (n, range) in wrapped.lines.into_iter().enumerate() {
+            let lead = match n {
+                0 => label.to_string(),
+                _ => " ".repeat(label_cells),
+            };
+            let mut spans = vec![Span::styled(lead, self.theme.dim)];
+            let mut at = range.start;
+            for hit in &highlights {
+                let (start, end) = (hit.start.max(range.start), hit.end.min(range.end));
+                if start >= end {
+                    continue;
+                }
+                if start == hit.start {
+                    drawn.hits.push(n);
+                }
+                spans.push(Span::styled(text[at..start].to_string(), style));
+                spans.push(Span::styled(text[start..end].to_string(), highlighted));
+                at = end;
+            }
+            spans.push(Span::styled(text[at..range.end].to_string(), style));
+            if wrapped.cut && n == last {
+                spans.push(Span::styled("…", style));
+            }
+            drawn.lines.push(Line::from(spans));
+        }
+        drawn
+    }
 }

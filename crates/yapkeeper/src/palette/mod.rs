@@ -1,10 +1,11 @@
 //! The command palette: a query line searched live as the person types,
 //! the sessions it matches or the ways to finish the filter being typed, a
 //! preview of the selected session and key hints, over a `Catalog` loaded
-//! once.
+//! once; or, in their place, the selected session's whole conversation.
 //! It owns every terminal decision (keys, layout, theme and the terminal's
 //! lifecycle) and never touches the index, the preferences or the disk.
 
+mod reading;
 mod terminal;
 mod view;
 
@@ -14,6 +15,7 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
+use self::reading::Reading;
 use crate::{Catalog, Completion, LeftOut, Listed, Message, Query, line, location_token};
 
 pub use terminal::{Restore, run};
@@ -38,8 +40,12 @@ pub struct Palette<'c> {
     /// any they take the results' place and the arrows move among them.
     completions: Vec<Completion>,
     completion: ListState,
-    /// What was said in the selected session, for the preview.
+    /// What was said in the selected session, with the tools called, for
+    /// the preview and for reading.
     conversation: Vec<Message>,
+    /// While the selected session's whole conversation is open, in place of
+    /// the query, the results and the preview, which stay as they were.
+    reading: Option<Reading>,
     /// Why the last search, or the selected session's conversation, failed
     /// to read; cleared by the next search that succeeds. After a failed
     /// search the rows are the last ones that didn't fail.
@@ -89,6 +95,7 @@ impl<'c> Palette<'c> {
             completions: Vec::new(),
             completion: ListState::default(),
             conversation: Vec::new(),
+            reading: None,
             error: None,
         };
         palette.search();
@@ -102,6 +109,14 @@ impl<'c> Palette<'c> {
             return Step::Continue;
         }
         let ctrl = key.modifiers == KeyModifiers::CONTROL;
+        if let Some(reading) = &mut self.reading {
+            match key.code {
+                KeyCode::Char('c') if ctrl => return Step::Quit,
+                KeyCode::Esc | KeyCode::Left => self.reading = None,
+                _ => reading.handle(key),
+            }
+            return Step::Continue;
+        }
         match key.code {
             KeyCode::Char('c') if ctrl => return Step::Quit,
             KeyCode::Char('u') if ctrl => self.set_query(String::new()),
@@ -110,6 +125,7 @@ impl<'c> Palette<'c> {
             KeyCode::Char('n') if ctrl => self.move_selection(Direction::Down),
             KeyCode::Up => self.move_selection(Direction::Up),
             KeyCode::Down => self.move_selection(Direction::Down),
+            KeyCode::Right => self.open_reading(),
             KeyCode::Tab | KeyCode::Enter => {
                 let chosen = self.completion.selected().map(|row| &self.completions[row]);
                 match chosen {
@@ -173,6 +189,14 @@ impl<'c> Palette<'c> {
             false => format!("{} @", self.query),
         };
         self.set_query(query);
+    }
+
+    /// Opens the selected session's whole conversation; nothing while
+    /// completions are open, or when no session is selected.
+    fn open_reading(&mut self) {
+        if self.completions.is_empty() && self.selected().is_some() {
+            self.reading = Some(Reading::new());
+        }
     }
 
     /// Searches the catalog for the query and selects the first row.

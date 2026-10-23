@@ -31,9 +31,26 @@ Installed CLI help supports `claude --resume <session-id>`. Launch it with the s
 
 Installed CLI help supports `codex resume <session-id> -C <directory>`. Use the exact ID instead of the native picker's most recent session. Verify whether archived or otherwise unusual sessions can resume, rather than inferring it from successful parsing.
 
+## Pi
+
+Observed read-only on 2026-10-23, aggregate counts only.
+
+- Top-level path: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<session-id>.jsonl`. `--session-dir` overrides the root for Pi itself.
+- The first record has type `session` with `version`, `id`, `timestamp`, and `cwd`. Some session files also carry `parentSession`.
+- Other record types: `message`, `custom_message`, `custom`, `session_info` (its `name` is the session's title), `model_change`, `thinking_level_change`, and `compaction`. Some records in nested files have no `type`.
+- Records link through `id` and `parentId`, forming a tree.
+- `message.message` has a `role` (`user`, `assistant`, `toolResult`, `bashExecution`) and `content` as a block array. Observed blocks are `text`, `toolCall`, and `thinking`.
+- Under a session's folder, `<session-dir>/<run-id>/run-<n>/session.jsonl` holds subagent runs, and `<session-dir>/forks/<timestamp>_<id>.jsonl` holds forks whose header names a `parentSession`. `subagent-artifacts/` beside the sessions holds worker transcripts and metadata. Verify which of these are subagent transcripts before classifying them; a `parentSession` alone does not establish it.
+
+Installed CLI help supports `pi --session <path|id>` to open a specific session. Launch it with the recorded `cwd` as the process working directory. `--fork` creates a new session and is not ordinary resume.
+
+## OpenCode
+
+Not yet supported. No OpenCode history was available locally to inspect.
+
 ## Adapter considerations
 
-- Support configurable roots, including `CODEX_HOME` and `CLAUDE_CONFIG_DIR`.
+- Support configurable roots, including `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and Pi's session directory.
 - Prefer recorded working directories to decoding folder names. Preserve the recorded branch separately from a worktree's current Git branch.
 - Parse complete JSONL lines and retry an unfinished final line after more data arrives. Skip malformed complete records with bounded diagnostics.
 - Handle unknown records, large lines, file replacement, truncation, repeated metadata, and growing histories.

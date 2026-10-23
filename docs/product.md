@@ -12,7 +12,7 @@ Repository and command name: `yapkeeper`. Tagline: "Now, where was I?"
 
 - Support macOS and Linux first, using Rust with Ratatui and SQLite.
 - Write first-party Rust using safe APIs only; enforce `forbid(unsafe_code)` in crate roots and workspace checks.
-- Discover existing Claude Code and Codex histories, including sessions started outside Yapkeeper.
+- Discover existing Claude Code, Codex, and Pi histories, including sessions started outside Yapkeeper. Adding a provider means adding an adapter; OpenCode is planned later.
 - Search all sessions globally. Support narrowing by project, Git worktree, and folder; global search must remain available regardless of the current location.
 - Search ordinary user and assistant messages by default. Make tool calls and tool output an explicit search option.
 - Let the user preview a conversation before resuming it.
@@ -69,11 +69,11 @@ Construct provider arguments as an argument array with an explicit process worki
 
 ## Vago planning
 
-The local planning item is `yapkeeper-v1`, using the Codex planning harness. Shared starter workflows are installed; no ready implementation goal or tickets have been created.
+Goals and their Tickets are written directly with `vago goal new` and `vago ticket add`.
 
 The UI prototype is done (see [interface.md](interface.md)). Next work is slicing the implementation goal into tickets. Avoid maintaining a second Wayfinder decision map unless the planning grows beyond what this workspace can track.
 
-Both workflows use Codex with GPT-6.1 Sol, high reasoning, and Fast mode. Reviews use fresh Codex steps; Claude remains an optional adversarial second opinion. Terminal UI work must use `tui-design`; use `emil-design-eng` only when its interaction-polish principles help within terminal constraints.
+Both workflows use Claude Code with Claude Opus 5.5. Reviews run as fresh agent steps. Terminal UI work must use `tui-design`; use `emil-design-eng` only when its interaction-polish principles help within terminal constraints.
 
 Both workflows use `sh .vago/scripts/check.sh` for Cargo formatting, lint, safety, and test checks, including a final gate before merge. GitHub push, PR, and notification steps remain starter defaults to review before execution.
 

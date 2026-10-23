@@ -30,8 +30,7 @@
 # every Ticket is done, writes the body with the vago-pr skill and keeps the
 # report's Runs at its end.
 
-# Codex is the default for every agent step, including fresh reviews.
-# These explicit overrides match .codex/config.toml in trusted project sessions.
+# Claude Code with Claude Opus 5.5 runs every agent step, including fresh reviews.
 # A step using another harness must override both harness/model and args.
 harness = "claude"
 model = "claude-opus-5-5"

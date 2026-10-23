@@ -8,7 +8,7 @@ Yapkeeper finds coding conversations and the locations where they took place.
 A conversation recorded by a coding agent, identified within that provider's history. A session remains a session when its original working directory disappears.
 
 **Provider**:
-The coding agent that records and resumes a session, initially Claude Code or Codex.
+The coding agent that records and resumes a session, initially Claude Code, Codex, or Pi.
 
 **Working directory**:
 The filesystem directory recorded for a session. It may be a Git worktree or an ordinary folder.

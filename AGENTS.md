@@ -30,8 +30,8 @@ Run `sh .vago/scripts/check.sh` before reporting implementation work as complete
 
 ## Coding agents
 
-Use Codex by default, with GPT-6.1 Sol, high reasoning, and Fast mode. Project defaults live in `.codex/config.toml`; Vago workflows pass the same settings explicitly. Keep them aligned when changing the default.
+Use Claude Code with Claude Opus 5.5 by default. Each Vago workflow sets its harness and model at the top of its file; keep the workflows aligned when changing the default.
 
-Use a fresh Codex review step to challenge the implementation. Claude is an optional adversarial second opinion when the user requests it, rather than the default implementation or review harness.
+Use a fresh review step, with no memory of the implementation, to challenge it.
 
 Review the selected Vago workflow's GitHub steps before running it.

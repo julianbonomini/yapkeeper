@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 #[cfg(unix)]
 use support::Locked;
 use support::{repo_with_worktree, temp_dir};
+use yapkeeper::{Roots, State};
 
 mod support;
 
@@ -190,14 +191,69 @@ fn help_describes_the_list_command() {
         assert!(output.status.success(), "{args:?}");
         let stdout = stdout(&output);
         assert!(stdout.contains("list"), "{args:?}: {stdout}");
-        assert!(stdout.contains("CLAUDE_CONFIG_DIR"), "{args:?}: {stdout}");
-        assert!(stdout.contains("CODEX_HOME"), "{args:?}: {stdout}");
     }
 
     let output = yapkeeper(&[], home.path(), None);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(stdout(&output), "");
     assert!(stderr(&output).contains("list"), "{}", stderr(&output));
+}
+
+#[test]
+fn help_names_the_history_directories_the_environment_resolves() {
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join("c");
+    let codex = home.path().join("x");
+    for args in [&["--help"][..], &["list", "--help"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+            .args(args)
+            .env_clear()
+            .env("HOME", home.path())
+            .env("CLAUDE_CONFIG_DIR", &claude)
+            .env("CODEX_HOME", &codex)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        let stdout = stdout(&output);
+        for dir in [claude.join("projects"), codex.clone()] {
+            let dir = dir.display().to_string();
+            assert!(
+                stdout.contains(&dir),
+                "{args:?} should name {dir}: {stdout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn help_names_the_default_history_directories_under_home() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [&["--help"][..], &["list", "--help"]] {
+        let output = yapkeeper(args, home.path(), None);
+        assert!(output.status.success(), "{args:?}");
+        let stdout = stdout(&output);
+        for dir in [".claude/projects", ".codex"] {
+            let dir = home.path().join(dir).display().to_string();
+            assert!(
+                stdout.contains(&dir),
+                "{args:?} should name {dir}: {stdout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn help_says_why_no_history_directory_resolves_without_a_home() {
+    for args in [&["--help"][..], &["search", "--help"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+            .args(args)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        let stdout = stdout(&output);
+        assert!(stdout.contains("nor HOME is set"), "{args:?}: {stdout}");
+    }
 }
 
 #[test]
@@ -714,6 +770,24 @@ fn search_matching_nothing_says_so_on_stderr_and_succeeds() {
     let stderr = stderr(&output);
     assert!(stderr.contains("no sessions found in"), "{stderr}");
     assert!(!stderr.contains("match"), "{stderr}");
+}
+
+#[test]
+fn search_help_names_every_state_and_provider_the_query_accepts() {
+    let home = tempfile::tempdir().unwrap();
+    let output = yapkeeper(&["search", "--help"], home.path(), None);
+    assert!(output.status.success());
+    let help = stdout(&output);
+    let roots = Roots {
+        claude: home.path().to_path_buf(),
+        codex: home.path().to_path_buf(),
+    };
+    let states = State::ALL.map(|state| format!("is:{}", state.name()));
+    let providers = roots.providers().into_iter().map(|p| format!("#{p}"));
+    for phrase in states.into_iter().chain(providers) {
+        assert!(help.contains(&phrase), "{phrase:?} is missing from {help}");
+    }
+    assert!(help.contains("'!temp'"), "{help}");
 }
 
 #[test]

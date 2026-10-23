@@ -50,6 +50,25 @@ impl Roots {
             .map(|adapter| adapter.provider())
             .collect()
     }
+
+    /// Each adapter's provider name and history directory, in search order.
+    /// Opens nothing.
+    pub fn history_dirs(&self) -> Vec<HistoryDir> {
+        adapters(self)
+            .iter()
+            .map(|adapter| HistoryDir {
+                provider: adapter.provider(),
+                dir: adapter.history_dir(),
+            })
+            .collect()
+    }
+}
+
+/// One provider's history directory, as this environment resolves it.
+pub struct HistoryDir {
+    /// Such as "claude", the name `#provider` takes.
+    pub provider: &'static str,
+    pub dir: PathBuf,
 }
 
 /// An adapter for each provider, reading from `roots`.

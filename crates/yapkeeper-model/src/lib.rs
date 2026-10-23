@@ -29,9 +29,12 @@ pub trait Adapter {
     fn provider(&self) -> &'static str;
     /// Bump when `read` would give different facts from the same bytes.
     fn parser_version(&self) -> u32;
-    /// Every history file to read, and the directory looked in. Lists
-    /// directories but opens no file; a missing root gives no files.
-    fn sources(&self) -> Sources;
+    /// The directory this adapter reads its history under. Touches nothing on
+    /// disk.
+    fn history_dir(&self) -> PathBuf;
+    /// Every history file to read, under `history_dir`. Lists directories but
+    /// opens no file; a missing directory gives no files.
+    fn sources(&self) -> Vec<PathBuf>;
     /// The facts in `source` from byte `from` to the end of its last complete
     /// line, in file order, and the offset reached. `from` is 0 or an offset
     /// this method returned for the same file; reading on from that offset
@@ -40,14 +43,6 @@ pub trait Adapter {
     fn read(&self, source: &Path, from: u64) -> Reading;
     /// The exact process that resumes session `id` in `working_dir`.
     fn resume(&self, id: &str, working_dir: &Path) -> ResumeCommand;
-}
-
-/// One adapter's history files.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sources {
-    pub files: Vec<PathBuf>,
-    /// The directory looked in, for the empty-state message.
-    pub searched: PathBuf,
 }
 
 /// What one call to `Adapter::read` found.
@@ -112,13 +107,11 @@ pub enum TitleKind {
 pub fn scan(adapter: &dyn Adapter) -> Scan {
     let mut sources = adapter.sources();
     // `assemble` breaks title ties by path order.
-    sources
-        .files
-        .sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+    sources.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
     let mut digests = Vec::new();
     let mut messages = Vec::new();
     let mut malformed_lines = 0;
-    for path in &sources.files {
+    for path in &sources {
         let Ok(modified) = fs::metadata(path).and_then(|metadata| metadata.modified()) else {
             continue;
         };
@@ -172,7 +165,6 @@ pub fn scan(adapter: &dyn Adapter) -> Scan {
     Scan {
         transcripts,
         malformed_lines,
-        searched: sources.searched,
     }
 }
 
@@ -181,8 +173,6 @@ pub fn scan(adapter: &dyn Adapter) -> Scan {
 pub struct Scan {
     pub transcripts: Vec<Transcript>,
     pub malformed_lines: usize,
-    /// The directory looked in, for the empty-state message.
-    pub searched: PathBuf,
 }
 
 /// A conversation recorded by a provider, ready to show and resume, without its text.

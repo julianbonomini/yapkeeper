@@ -225,11 +225,10 @@ fn refresh_in(
     let mut searched = Vec::new();
     for &adapter in adapters {
         let provider = adapter.provider();
-        let sources = adapter.sources();
-        searched.push(sources.searched);
+        searched.push(adapter.history_dir());
         let mut stored = stored_sources(transaction, adapter)?;
         let mut changed = false;
-        for file in sources.files {
+        for file in adapter.sources() {
             // Taken before reading, so a file that grows during the read is
             // seen as changed next time.
             let Ok(metadata) = fs::metadata(&file) else {
@@ -619,7 +618,7 @@ fn time(nanos: i64) -> SystemTime {
 mod tests {
     use std::cell::Cell;
 
-    use yapkeeper_model::{Message, Reading, Sources, ThreadKind};
+    use yapkeeper_model::{Message, Reading, ThreadKind};
 
     use super::*;
 
@@ -639,16 +638,17 @@ mod tests {
             self.version.get()
         }
 
-        fn sources(&self) -> Sources {
+        fn history_dir(&self) -> PathBuf {
+            self.dir.clone()
+        }
+
+        fn sources(&self) -> Vec<PathBuf> {
             let mut files: Vec<PathBuf> = fs::read_dir(&self.dir)
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
                 .collect();
             files.sort();
-            Sources {
-                files,
-                searched: self.dir.clone(),
-            }
+            files
         }
 
         fn read(&self, source: &Path, from: u64) -> Reading {

@@ -54,7 +54,10 @@ fn active_and_archived_rollouts_and_forks_are_sessions_but_subagent_rollouts_are
             .all(|session| session.session.provider == "codex")
     );
     assert_eq!(scan.malformed_lines, 0);
-    assert_eq!(scan.searched, PathBuf::from(FIXTURES));
+    assert_eq!(
+        Codex::at(PathBuf::from(FIXTURES)).history_dir(),
+        PathBuf::from(FIXTURES)
+    );
 }
 
 #[test]

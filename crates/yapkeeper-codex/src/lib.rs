@@ -10,8 +10,8 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 use yapkeeper_model::{
-    Adapter, Fact, Message, MissingHome, Reading, RecordedGit, ResumeCommand, Role, Sources,
-    ThreadKind, TitleKind, jsonl_files, read_jsonl_from,
+    Adapter, Fact, Message, MissingHome, Reading, RecordedGit, ResumeCommand, Role, ThreadKind,
+    TitleKind, jsonl_files, read_jsonl_from,
 };
 
 const PARSER_VERSION: u32 = 2;
@@ -40,7 +40,11 @@ impl Adapter for Codex {
         PARSER_VERSION
     }
 
-    fn sources(&self) -> Sources {
+    fn history_dir(&self) -> PathBuf {
+        self.home.clone()
+    }
+
+    fn sources(&self) -> Vec<PathBuf> {
         // Active rollouts sit in `<year>/<month>/<day>/`; archived ones don't.
         let mut files = jsonl_files(&self.home.join("sessions"), 3);
         files.extend(jsonl_files(&self.home.join("archived_sessions"), 0));
@@ -48,10 +52,7 @@ impl Adapter for Codex {
         if session_index.is_file() {
             files.push(session_index);
         }
-        Sources {
-            files,
-            searched: self.home.clone(),
-        }
+        files
     }
 
     fn read(&self, source: &Path, from: u64) -> Reading {

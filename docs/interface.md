@@ -143,7 +143,7 @@ Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` wh
 
 When the index can't be written or the preferences can't be read or written, any command that uses them exits 1. Its stderr ends with `Check its permissions, or set XDG_DATA_HOME.` Hiding a session that is already hidden, or unhiding one that is shown, succeeds and changes nothing.
 
-The help footer names where histories are read from and the paths this environment resolves for the index and preferences.
+The help footer names each provider's history directory and the index and preferences paths, as this environment resolves them; when a history directory can't be resolved, it says why instead. `search --help` names every state the query language accepts, and every provider when the history directories resolve.
 
 ## Open questions
 

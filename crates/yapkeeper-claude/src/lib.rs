@@ -10,8 +10,8 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 use yapkeeper_model::{
-    Adapter, Fact, Message, MissingHome, Reading, RecordedGit, ResumeCommand, Role, Sources,
-    ThreadKind, TitleKind, jsonl_files, read_jsonl_from,
+    Adapter, Fact, Message, MissingHome, Reading, RecordedGit, ResumeCommand, Role, ThreadKind,
+    TitleKind, jsonl_files, read_jsonl_from,
 };
 
 const PARSER_VERSION: u32 = 2;
@@ -37,8 +37,12 @@ impl Adapter for ClaudeCode {
         PARSER_VERSION
     }
 
-    fn sources(&self) -> Sources {
-        let projects = self.config_dir.join("projects");
+    fn history_dir(&self) -> PathBuf {
+        self.config_dir.join("projects")
+    }
+
+    fn sources(&self) -> Vec<PathBuf> {
+        let projects = self.history_dir();
         // A session's transcript is `<encoded-project>/<id>.jsonl`; the
         // agents it started are `<encoded-project>/<id>/subagents/*.jsonl`.
         let mut files = jsonl_files(&projects, 1);
@@ -47,10 +51,7 @@ impl Adapter for ClaudeCode {
                 .into_iter()
                 .filter(|path| subagent_session(path).is_some()),
         );
-        Sources {
-            files,
-            searched: projects,
-        }
+        files
     }
 
     fn read(&self, source: &Path, from: u64) -> Reading {

@@ -12,8 +12,8 @@ use std::time::SystemTime;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use yapkeeper::{
-    Availability, DataDir, DataError, Listed, Place, Query, Roots, State, TokenKind, hide, rebuild,
-    search, unhide,
+    Availability, DataDir, DataError, Listed, MissingHome, Place, Query, Roots, State, TokenKind,
+    hide, rebuild, search, unhide,
 };
 
 /// Wide enough for most titles; what follows may wrap on an 80-column terminal.
@@ -21,11 +21,7 @@ const MAX_TITLE_WIDTH: usize = 48;
 
 const EXIT_FAILURE: u8 = 1;
 
-const HISTORIES: &str = "Histories are read, never modified, from:
-  Claude Code  $CLAUDE_CONFIG_DIR/projects (default ~/.claude/projects)
-  Codex        $CODEX_HOME (default ~/.codex)";
-
-/// Find coding sessions across projects, worktrees and folders.
+/// Find coding sessions wherever they ran: in a repo, a worktree or a folder.
 #[derive(Parser)]
 #[command(version, arg_required_else_help = true)]
 struct Cli {
@@ -35,7 +31,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List Claude Code and Codex sessions, most recent first
+    /// List every session, most recent first
     ///
     /// Each line shows a session's title, provider, age, an orphaned or unavailable
     /// label when one applies, and where it ran. Sessions in temp folders are left
@@ -43,22 +39,6 @@ enum Command {
     /// Orphaned sessions come after the rest, each group most recent first.
     List(Columns),
     /// Find sessions by what was said, where they ran and their state
-    ///
-    /// Words match titles, messages and recaps as substrings; every word must
-    /// match. A word with an uppercase letter matches case. --tools also
-    /// searches tool calls, tool output and subagent transcripts. Put -- before
-    /// a word that starts with -.
-    ///
-    /// Filters must all match too. @where matches a project, project:worktree or
-    /// any part of the path. #provider matches #claude or #codex. is:state matches
-    /// is:orphaned, is:temp, is:git, is:folder, is:pr, is:recap, is:unavailable or
-    /// is:hidden. !x or not:x excludes a filter, a provider or state named bare
-    /// (!codex, !temp) or a word (!flaky); quote ! for the shell, as in '!codex'.
-    /// A space ends a filter, so "is pr" is two words.
-    ///
-    /// Sessions in temp folders are left out unless the query has is:temp, and
-    /// hidden ones unless it has is:hidden. Orphaned sessions come after the
-    /// rest, each group most recent first.
     Search(Search),
     /// Hide a session from list and search; search is:hidden still lists it
     ///
@@ -101,9 +81,17 @@ struct Id {
 }
 
 fn main() -> ExitCode {
-    // Built at runtime so help names the files this environment resolves to.
-    let footer = help_footer();
+    // Built at runtime so help names what this environment resolves to.
+    let roots = Roots::from_env();
+    let providers = roots.as_ref().map(Roots::providers).unwrap_or_default();
+    let footer = help_footer(roots.as_ref());
     let matches = Cli::command()
+        .mut_subcommand("search", |search| {
+            // `long_about` replaces `about` in `--help`, so it starts with it.
+            let about = search.get_about().map(ToString::to_string);
+            let about = about.unwrap_or_default();
+            search.long_about(format!("{about}\n\n{}", search_help(&providers)))
+        })
         .after_help(footer.clone())
         .mut_subcommands(|subcommand| subcommand.after_help(footer.clone()))
         .get_matches();
@@ -121,20 +109,104 @@ fn main() -> ExitCode {
     }
 }
 
-/// Where histories are read from and where Yapkeeper keeps its own files,
-/// so nothing it stores is hidden.
-fn help_footer() -> String {
-    let own_files = match DataDir::from_env() {
-        Ok(data) => format!(
-            "  Index        {} (rebuildable)\n  Preferences  {}",
-            data.index().display(),
-            data.prefs().display()
-        ),
-        Err(_) => {
-            "  Folder       $XDG_DATA_HOME/yapkeeper (default ~/.local/share/yapkeeper)".to_string()
-        }
+/// The query language as `search --help` explains it, naming every provider
+/// in `providers` and every state.
+fn search_help(providers: &[&str]) -> String {
+    let temp = State::Temp.name();
+    let hidden = State::Hidden.name();
+    let providers: Vec<String> = providers.iter().map(|p| format!("#{p}")).collect();
+    let provider_sentence = match providers.is_empty() {
+        true => String::new(),
+        false => format!(" #provider matches {}.", or_list(&providers)),
     };
-    format!("{HISTORIES}\n\nYapkeeper's own files:\n{own_files}")
+    let states: Vec<String> = State::ALL
+        .iter()
+        .map(|state| format!("is:{}", state.name()))
+        .collect();
+    let states = or_list(&states);
+    format!(
+        "Words match titles, messages and recaps as substrings; every word must \
+         match. A word with an uppercase letter matches case. --tools also \
+         searches tool calls, tool output and subagent transcripts. Put -- before \
+         a word that starts with -.\n\n\
+         Filters must all match too. @where matches a project, project:worktree or \
+         any part of the path.{provider_sentence} is:state matches {states}. !x or \
+         not:x excludes a filter, a provider or state named bare (!{temp}) or a \
+         word (!flaky); quote ! for the shell, as in '!{temp}'. A space ends a \
+         filter, so \"is pr\" is two words.\n\n\
+         Sessions in temp folders are left out unless the query has is:{temp}, \
+         and hidden ones unless it has is:{hidden}. Orphaned sessions come after the \
+         rest, each group most recent first."
+    )
+}
+
+/// `a`, `a or b`, `a, b or c`: no serial comma, as the rest of help writes it.
+fn or_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
+/// Where histories are read from and where Yapkeeper keeps its own files,
+/// so nothing it stores is hidden. Every path starts in one column; a
+/// history directory the environment can't resolve is replaced by why.
+fn help_footer(roots: Result<&Roots, &MissingHome>) -> String {
+    let histories = roots.map(|roots| {
+        roots
+            .history_dirs()
+            .into_iter()
+            .map(|history_dir| FooterRow {
+                label: history_dir.provider,
+                path: history_dir.dir.display().to_string(),
+            })
+            .collect::<Vec<_>>()
+    });
+    let own_files = match DataDir::from_env() {
+        Ok(data) => vec![
+            FooterRow {
+                label: "Index",
+                path: format!("{} (rebuildable)", data.index().display()),
+            },
+            FooterRow {
+                label: "Preferences",
+                path: data.prefs().display().to_string(),
+            },
+        ],
+        Err(_) => vec![FooterRow {
+            label: "Folder",
+            path: "$XDG_DATA_HOME/yapkeeper (default ~/.local/share/yapkeeper)".to_string(),
+        }],
+    };
+    let width = histories
+        .iter()
+        .flatten()
+        .chain(&own_files)
+        .map(|row| row.label.width())
+        .max()
+        .unwrap_or(0);
+    let lines = |rows: &[FooterRow]| {
+        rows.iter()
+            .map(|row| format!("  {:<width$}  {}", row.label, row.path))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let histories = match &histories {
+        Ok(rows) => lines(rows),
+        Err(error) => format!("  {error}"),
+    };
+    format!(
+        "Histories are read, never modified, from:\n{histories}\n\n\
+         Yapkeeper's own files:\n{}",
+        lines(&own_files)
+    )
+}
+
+/// One line of the help footer: what a path is, then the path.
+struct FooterRow {
+    label: &'static str,
+    path: String,
 }
 
 /// Two space-aligned columns, so `cut` and `awk` can read them. Creates nothing.

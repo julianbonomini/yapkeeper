@@ -15,4 +15,5 @@ serde_json = "1.0"
 tempfile = "3.27"
 unicode-width = "0.2"
 yapkeeper-claude = { path = "crates/yapkeeper-claude" }
+yapkeeper-codex = { path = "crates/yapkeeper-codex" }
 yapkeeper-model = { path = "crates/yapkeeper-model" }

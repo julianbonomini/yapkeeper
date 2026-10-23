@@ -17,9 +17,13 @@ const MAX_TITLE_WIDTH: usize = 48;
 
 const EXIT_MISSING_HOME: u8 = 1;
 
+const HISTORIES: &str = "Histories are read, never modified, from:
+  Claude Code  $CLAUDE_CONFIG_DIR/projects (default ~/.claude/projects)
+  Codex        $CODEX_HOME (default ~/.codex)";
+
 /// Find coding sessions across projects, worktrees and folders.
 #[derive(Parser)]
-#[command(version, arg_required_else_help = true)]
+#[command(version, arg_required_else_help = true, after_help = HISTORIES)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -27,11 +31,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List Claude Code sessions from $CLAUDE_CONFIG_DIR/projects, most recent first
+    /// List Claude Code and Codex sessions, most recent first
     ///
-    /// CLAUDE_CONFIG_DIR defaults to ~/.claude. Each line shows a session's
-    /// title, provider, age and working directory. Histories are read without
-    /// being modified.
+    /// Each line shows a session's title, provider, age and working directory.
+    #[command(after_help = HISTORIES)]
     List,
 }
 

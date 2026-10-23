@@ -170,11 +170,13 @@ fn each_session_carries_the_command_that_resumes_it_in_its_working_directory() {
 }
 
 #[test]
-fn working_dir_is_the_first_one_recorded() {
+fn working_dir_is_the_first_one_recorded_and_later_ones_are_kept_once() {
     let scan = scan_fixtures();
+    let launch = session(&scan, LAUNCH);
+    assert_eq!(launch.working_dir, PathBuf::from("/synthetic/alpha"));
     assert_eq!(
-        session(&scan, LAUNCH).working_dir,
-        PathBuf::from("/synthetic/alpha")
+        launch.other_working_dirs,
+        [PathBuf::from("/synthetic/alpha/nested")]
     );
 }
 

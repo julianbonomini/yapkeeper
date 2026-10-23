@@ -478,6 +478,7 @@ dependencies = [
  "tempfile",
  "unicode-width",
  "yapkeeper-claude",
+ "yapkeeper-codex",
  "yapkeeper-model",
 ]
 
@@ -492,8 +493,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "yapkeeper-codex"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde_json",
+ "tempfile",
+ "yapkeeper-model",
+]
+
+[[package]]
 name = "yapkeeper-model"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "zmij"

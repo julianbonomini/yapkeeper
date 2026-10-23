@@ -6,13 +6,14 @@
 use std::path::PathBuf;
 
 use yapkeeper_claude::ClaudeCode;
+use yapkeeper_codex::Codex;
 
-pub use yapkeeper_claude::MissingHome;
 pub use yapkeeper_model::*;
 
 /// Where each provider keeps its history.
 pub struct Roots {
     pub claude: PathBuf,
+    pub codex: PathBuf,
 }
 
 impl Roots {
@@ -21,6 +22,7 @@ impl Roots {
     pub fn from_env() -> Result<Roots, MissingHome> {
         Ok(Roots {
             claude: yapkeeper_claude::config_dir()?,
+            codex: yapkeeper_codex::home_dir()?,
         })
     }
 }
@@ -37,7 +39,10 @@ pub struct Listing {
 /// Sessions from every provider, most recent `last_active` first. Ties break
 /// by provider, then id, so the order is stable.
 pub fn list(roots: &Roots) -> Listing {
-    let adapters: [&dyn Adapter; 1] = [&ClaudeCode::at(roots.claude.clone())];
+    let adapters: [&dyn Adapter; 2] = [
+        &ClaudeCode::at(roots.claude.clone()),
+        &Codex::at(roots.codex.clone()),
+    ];
     let mut listing = Listing {
         sessions: Vec::new(),
         malformed_lines: 0,

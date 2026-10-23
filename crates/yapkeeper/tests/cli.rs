@@ -11,6 +11,10 @@ const FIXTURES: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../yapkeeper-claude/tests/fixtures/claude"
 );
+const CODEX_FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../yapkeeper-codex/tests/fixtures/codex"
+);
 
 fn yapkeeper(args: &[&str], home: &Path, claude_config_dir: Option<&Path>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_yapkeeper"));
@@ -105,6 +109,66 @@ fn list_with_no_history_says_where_it_looked_and_succeeds() {
         stderr.contains(&missing.join("projects").display().to_string()),
         "{stderr}"
     );
+    assert!(
+        stderr.contains(&home.path().join(".codex").display().to_string()),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn list_shows_claude_code_and_codex_sessions_together_in_aligned_columns() {
+    let home = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yapkeeper"));
+    command
+        .arg("list")
+        .env_clear()
+        .env("HOME", home.path())
+        .env("CLAUDE_CONFIG_DIR", FIXTURES)
+        .env("CODEX_HOME", CODEX_FIXTURES);
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let stdout = stdout(&output);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let expected = [
+        ("Fork of the retry policy", "codex", "/synthetic/epsilon"),
+        ("Fix synthetic build failure", "claude", "/synthetic/beta"),
+        (
+            "Tune the synthetic retry policy",
+            "codex",
+            "/synthetic/delta",
+        ),
+        ("Launch checklist", "claude", "/synthetic/alpha"),
+        (
+            "Summarise the synthetic release notes",
+            "claude",
+            "/synthetic/beta",
+        ),
+        (
+            "Tidy the synthetic notes folder",
+            "claude",
+            "/synthetic/gamma",
+        ),
+        (
+            "Archive the synthetic changelog",
+            "codex",
+            "/synthetic/zeta",
+        ),
+    ];
+    assert_eq!(lines.len(), expected.len(), "{stdout}");
+    let provider_column = lines[0].find("  codex ").unwrap();
+    for (line, (title, provider, dir)) in lines.iter().zip(expected) {
+        assert!(
+            line.starts_with(title),
+            "{line:?} should start with {title:?}"
+        );
+        assert_eq!(
+            line.find(&format!("  {provider} ")),
+            Some(provider_column),
+            "{line:?} should name {provider:?} in the provider column"
+        );
+        assert!(line.ends_with(dir), "{line:?} should end with {dir:?}");
+    }
 }
 
 #[test]
@@ -116,6 +180,7 @@ fn help_describes_the_list_command() {
         let stdout = stdout(&output);
         assert!(stdout.contains("list"), "{args:?}: {stdout}");
         assert!(stdout.contains("CLAUDE_CONFIG_DIR"), "{args:?}: {stdout}");
+        assert!(stdout.contains("CODEX_HOME"), "{args:?}: {stdout}");
     }
 
     let output = yapkeeper(&[], home.path(), None);

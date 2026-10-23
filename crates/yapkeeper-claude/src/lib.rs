@@ -4,19 +4,15 @@
 
 #![forbid(unsafe_code)]
 
-use std::fmt;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
-use yapkeeper_model::{Adapter, Message, ResumeCommand, Role, Scan, Session};
-
-// Caps keep memory small on long transcripts; a tool call's input matters
-// far less than what the person and the assistant said.
-const MAX_MESSAGE_BYTES: usize = 4_000;
-const MAX_TOOL_CALL_BYTES: usize = 300;
+use yapkeeper_model::{
+    Adapter, Message, MissingHome, ResumeCommand, Role, Scan, Session, read_jsonl,
+};
 
 /// Claude Code's history under one configuration directory.
 pub struct ClaudeCode {
@@ -76,26 +72,12 @@ fn transcript_files(projects: &Path) -> Vec<PathBuf> {
 /// `malformed_lines`, whether or not the session is kept.
 fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
     let id = path.file_stem()?.to_string_lossy().into_owned();
-    let file = fs::File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
     let mut messages = Vec::new();
-    let mut working_dir = None;
+    let mut working_dirs: Vec<PathBuf> = Vec::new();
     let mut latest_timestamp = None;
     let mut custom_title = None;
     let mut ai_title = None;
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        reader.read_until(b'\n', &mut line).ok()?;
-        // A final line without its newline may still be being written, so
-        // it is neither applied nor counted as malformed.
-        if line.last() != Some(&b'\n') {
-            break;
-        }
-        let Ok(record) = serde_json::from_slice::<Value>(&line) else {
-            *malformed_lines += 1;
-            continue;
-        };
+    let read_to_end = read_jsonl(path, malformed_lines, |record| {
         if let Some(time) = record["timestamp"].as_str().and_then(parse_timestamp) {
             latest_timestamp = latest_timestamp.max(Some(time));
         }
@@ -103,21 +85,23 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
             Some("user") => Role::User,
             Some("assistant") => Role::Assistant,
             Some("custom-title") => {
-                custom_title = non_empty(&record["customTitle"]).or(custom_title);
-                continue;
+                custom_title = non_empty(&record["customTitle"]).or(custom_title.take());
+                return ControlFlow::Continue(());
             }
             Some("ai-title") => {
-                ai_title = non_empty(&record["aiTitle"]).or(ai_title);
-                continue;
+                ai_title = non_empty(&record["aiTitle"]).or(ai_title.take());
+                return ControlFlow::Continue(());
             }
-            _ => continue,
+            _ => return ControlFlow::Continue(()),
         };
         if record["isMeta"].as_bool() == Some(true) || record["isSidechain"].as_bool() == Some(true)
         {
-            continue;
+            return ControlFlow::Continue(());
         }
-        if working_dir.is_none() {
-            working_dir = record["cwd"].as_str().map(PathBuf::from);
+        if let Some(cwd) = record["cwd"].as_str().map(PathBuf::from)
+            && !working_dirs.contains(&cwd)
+        {
+            working_dirs.push(cwd);
         }
         match &record["message"]["content"] {
             Value::String(text) => push_message(&mut messages, role, text),
@@ -138,6 +122,10 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
             }
             _ => {}
         }
+        ControlFlow::Continue(())
+    });
+    if !read_to_end {
+        return None;
     }
     let last_active = match latest_timestamp {
         Some(time) => time,
@@ -145,7 +133,10 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
             .and_then(|metadata| metadata.modified())
             .ok()?,
     };
-    let working_dir = working_dir?;
+    if working_dirs.is_empty() {
+        return None;
+    }
+    let working_dir = working_dirs.remove(0);
     let first_prompt = messages
         .iter()
         .find(|message| message.role == Role::User)?
@@ -162,30 +153,17 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
         id,
         title,
         working_dir,
+        other_working_dirs: working_dirs,
         last_active,
         messages,
     })
 }
 
 fn push_message(messages: &mut Vec<Message>, role: Role, text: &str) {
-    let text = text.trim();
-    if text.is_empty() || (role == Role::User && is_injected(text)) {
+    if role == Role::User && is_injected(text.trim()) {
         return;
     }
-    let max_bytes = match role {
-        Role::User | Role::Assistant => MAX_MESSAGE_BYTES,
-        Role::ToolCall => MAX_TOOL_CALL_BYTES,
-    };
-    let text = if text.len() <= max_bytes {
-        text.to_string()
-    } else {
-        let mut end = max_bytes;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &text[..end])
-    };
-    messages.push(Message { role, text });
+    messages.extend(Message::new(role, text));
 }
 
 /// Text Claude Code adds to a user turn on the user's behalf: command
@@ -206,23 +184,5 @@ fn parse_timestamp(text: &str) -> Option<SystemTime> {
 /// Claude Code's configuration directory for this process: `$CLAUDE_CONFIG_DIR`
 /// when it is set and non-empty, otherwise `$HOME/.claude`.
 pub fn config_dir() -> Result<PathBuf, MissingHome> {
-    match std::env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ => match std::env::var_os("HOME") {
-            Some(home) if !home.is_empty() => Ok(PathBuf::from(home).join(".claude")),
-            _ => Err(MissingHome),
-        },
-    }
+    yapkeeper_model::root_from_env("CLAUDE_CONFIG_DIR", ".claude")
 }
-
-/// Neither `CLAUDE_CONFIG_DIR` nor `HOME` names a directory to read.
-#[derive(Debug)]
-pub struct MissingHome;
-
-impl fmt::Display for MissingHome {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("neither CLAUDE_CONFIG_DIR nor HOME is set")
-    }
-}
-
-impl std::error::Error for MissingHome {}

@@ -1,0 +1,2 @@
+{"timestamp":"2026-10-21T11:00:00.000Z","type":"session_meta","payload":{"id":"dddddddd-0000-7000-8000-00000000000d","session_id":"aaaaaaaa-0000-7000-8000-00000000000a","parent_thread_id":"aaaaaaaa-0000-7000-8000-00000000000a","cwd":"/synthetic/delta","source":{"subagent":{"thread_spawn":{"parent_thread_id":"aaaaaaaa-0000-7000-8000-00000000000a","depth":1,"agent_role":"worker"}}}}}
+{"timestamp":"2026-10-21T11:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Synthetic subagent task"}]}}

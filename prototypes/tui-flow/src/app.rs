@@ -44,6 +44,11 @@ pub struct App {
     pub receipt: Option<String>,
     pub quit: bool,
     pub list_state: ListState,
+    pub settings_open: bool,
+    pub settings_sel: usize,
+    pub hide_temp: bool,
+    pub hide_missing: bool,
+    pub orphans_last: bool,
 }
 
 fn under(dir: &str, prefix: &str) -> bool {
@@ -70,6 +75,11 @@ impl App {
             receipt: None,
             quit: false,
             list_state: ListState::default(),
+            settings_open: false,
+            settings_sel: 0,
+            hide_temp: true,
+            hide_missing: true,
+            orphans_last: true,
         };
         app.recompute();
         app
@@ -88,7 +98,8 @@ impl App {
         let title = s.display_title();
         let mut info = MatchInfo::default();
         for t in terms {
-            let in_title = text::contains(&title, t);
+            let in_title = text::contains(&title, t)
+                || s.recap.as_deref().is_some_and(|r| text::contains(r, t));
             let in_msgs = s
                 .msgs
                 .iter()
@@ -110,6 +121,13 @@ impl App {
 
     fn filter_ok(s: &Session, f: &Filter) -> bool {
         match f {
+            Filter::Text(w) => {
+                text::contains(&s.display_title(), w)
+                    || s.recap.as_deref().is_some_and(|r| text::contains(r, w))
+                    || s.msgs
+                        .iter()
+                        .any(|m| m.role != Role::Tool && text::contains(&m.text, w))
+            }
             Filter::Loc(loc) => format!("{} {} {}", s.loc_key(), s.location(), s.dir())
                 .to_ascii_lowercase()
                 .contains(loc.as_str()),
@@ -150,12 +168,29 @@ impl App {
             .collect();
         hits.sort_by_key(|&i| {
             let title = self.matches[i].as_ref().is_some_and(|m| m.title);
-            (!terms.is_empty() && !title, self.sessions[i].minutes_ago)
+            let s = &self.sessions[i];
+            let sink = self.orphans_last && s.availability == Availability::Orphaned;
+            (sink, !terms.is_empty() && !title, s.minutes_ago)
         });
         self.hits = hits;
         self.sel = prev
             .and_then(|p| self.hits.iter().position(|&i| i == p))
             .unwrap_or(0);
+    }
+
+    /// Sessions left out only by the "hide temp folders" default, for the header hint.
+    pub fn temp_hidden(&self) -> usize {
+        let asks = parse(&self.query)
+            .1
+            .iter()
+            .any(|(_, f)| *f == Filter::State("temp".into()));
+        if !self.hide_temp || asks {
+            return 0;
+        }
+        self.sessions
+            .iter()
+            .filter(|s| !s.hidden && s.is_temp())
+            .count()
     }
 
     pub fn visible_total(&self) -> usize {
@@ -283,34 +318,28 @@ impl App {
 
     /// What the cursor is completing, if anything: kind and the partial text.
     pub fn completing(&self) -> Option<(Kind, String)> {
-        let toks: Vec<&str> = self.query.split_whitespace().collect();
-        let ended = self.query.ends_with(' ') || self.query.is_empty();
-        let (prev, cur) = if ended {
-            (toks.last().copied(), None)
-        } else {
-            (
-                toks.len().checked_sub(2).map(|i| toks[i]),
-                toks.last().copied(),
-            )
+        if self.query.ends_with(' ') {
+            return None;
+        }
+        let cur = self.query.split_whitespace().last()?.to_ascii_lowercase();
+        if let Some(p) = cur.strip_prefix("not:") {
+            return Some((Kind::Neg, p.to_string()));
+        }
+        let (neg, c) = match cur.strip_prefix(['!', '-']) {
+            Some(rest) => (true, rest),
+            None => (false, cur.as_str()),
         };
-        let natural = matches!(prev, Some("is" | "not" | "!" | "!is"));
-        match cur {
-            None if natural => Some((Kind::State, String::new())),
-            None => None,
-            Some(c) => {
-                let c = c.trim_start_matches(['-', '!']).to_ascii_lowercase();
-                if let Some(p) = c.strip_prefix('@') {
-                    Some((Kind::Loc, p.to_string()))
-                } else if let Some(p) = c.strip_prefix('#') {
-                    Some((Kind::Agent, p.to_string()))
-                } else if let Some(p) = c.strip_prefix("is:") {
-                    Some((Kind::State, p.to_string()))
-                } else if natural {
-                    Some((Kind::State, c))
-                } else {
-                    None
-                }
-            }
+        if let Some(p) = c.strip_prefix('@') {
+            Some((Kind::Loc, p.to_string()))
+        } else if let Some(p) = c.strip_prefix('#') {
+            Some((Kind::Agent, p.to_string()))
+        } else if let Some(p) = c.strip_prefix("is:") {
+            Some((Kind::State, p.to_string()))
+        } else if neg {
+            // `!` alone or `!te…`: offer everything that can be excluded by name.
+            Some((Kind::Neg, c.to_string()))
+        } else {
+            None
         }
     }
 
@@ -331,32 +360,58 @@ impl App {
                     detail: String::new(),
                     count: count(&Filter::Agent(a.to_string())),
                     depth: 0,
+                    kind: None,
                 })
                 .collect(),
-            Kind::State => [
-                ("orphaned", "folder no longer exists"),
-                ("temp", "in a system temp folder"),
-                ("pr", "linked to a pull request"),
-                ("recap", "has a recap"),
-                ("git", "in a Git repo or worktree"),
-                ("folder", "in a plain folder, not Git"),
-                ("unavailable", "folder can't be checked"),
-                ("hidden", "hidden by you"),
-            ]
-            .iter()
-            .filter(|(st, _)| st.starts_with(part.as_str()))
-            .map(|(st, why)| Sugg {
-                token: st.to_string(),
-                label: st.to_string(),
-                detail: why.to_string(),
-                count: if *st == "hidden" {
-                    self.sessions.iter().filter(|s| s.hidden).count()
-                } else {
-                    count(&Filter::State(st.to_string()))
-                },
-                depth: 0,
-            })
-            .collect(),
+            Kind::State => STATE_HELP
+                .iter()
+                .filter(|(st, _)| st.starts_with(part.as_str()))
+                .map(|(st, why)| Sugg {
+                    token: st.to_string(),
+                    label: st.to_string(),
+                    detail: why.to_string(),
+                    count: if *st == "hidden" {
+                        self.sessions.iter().filter(|s| s.hidden).count()
+                    } else {
+                        count(&Filter::State(st.to_string()))
+                    },
+                    depth: 0,
+                    kind: None,
+                })
+                .collect(),
+            Kind::Neg => {
+                let mut out: Vec<Sugg> =
+                    ["claude", "codex"]
+                        .iter()
+                        .map(|a| {
+                            (
+                                a.to_string(),
+                                "agent".to_string(),
+                                Filter::Agent(a.to_string()),
+                            )
+                        })
+                        .chain(STATE_HELP.iter().filter(|(st, _)| *st != "hidden").map(
+                            |(st, why)| {
+                                (
+                                    st.to_string(),
+                                    why.to_string(),
+                                    Filter::State(st.to_string()),
+                                )
+                            },
+                        ))
+                        .filter(|(w, _, _)| w.starts_with(part.as_str()))
+                        .map(|(w, why, f)| Sugg {
+                            count: visible().filter(|s| !Self::filter_ok(s, &f)).count(),
+                            token: w.clone(),
+                            label: w,
+                            detail: format!("exclude · {why}"),
+                            depth: 0,
+                            kind: None,
+                        })
+                        .collect();
+                out.sort_by_key(|s| s.label != "temp");
+                out
+            }
             Kind::Loc => self.loc_suggestions(&part),
         }
     }
@@ -403,6 +458,21 @@ impl App {
                 }
             }
         }
+        let temp = |k: &str| {
+            [
+                "/private/tmp",
+                "/tmp/",
+                "/var/folders",
+                "/private/var/folders",
+            ]
+            .iter()
+            .any(|t| k.starts_with(t))
+        };
+        rows.retain(|r| {
+            let hide =
+                part.is_empty() && ((self.hide_missing && r.7) || (self.hide_temp && temp(&r.0)));
+            !hide
+        });
         rows.retain(|r| {
             format!("{} {}", r.0, r.4)
                 .to_ascii_lowercase()
@@ -438,7 +508,15 @@ impl App {
                         }
                     }
                 };
+                use crate::ui::LocKind;
+                let kind = match (r.2, detail.as_str()) {
+                    (1, _) => LocKind::Worktree,
+                    (_, d) if d.starts_with("missing") => LocKind::Missing,
+                    (_, d) if d.starts_with("folder") => LocKind::Folder,
+                    _ => LocKind::Repo,
+                };
                 Sugg {
+                    kind: Some(kind),
                     token: format!("@{}", r.0),
                     label: r.3.clone(),
                     detail,
@@ -457,25 +535,16 @@ impl App {
         let Some((kind, _)) = self.completing() else {
             return;
         };
-        let ended = self.query.ends_with(' ');
         let mut toks: Vec<String> = self.query.split_whitespace().map(str::to_string).collect();
-        let neg = !ended && toks.last().is_some_and(|t| t.starts_with(['-', '!']));
-        let natural = {
-            let prev = if ended {
-                toks.last()
-            } else {
-                toks.iter().rev().nth(1)
-            };
-            matches!(prev.map(String::as_str), Some("is" | "not" | "!" | "!is"))
-        };
-        if !ended {
-            toks.pop();
-        }
+        let cur = toks.pop().unwrap_or_default().to_ascii_lowercase();
+        let bang = if cur.starts_with(['!', '-']) { "!" } else { "" };
         let token = match kind {
-            Kind::State if !natural => format!("is:{}", pick.token),
-            _ => pick.token.clone(),
+            Kind::Loc | Kind::Agent => format!("{bang}{}", pick.token),
+            Kind::State => format!("{bang}is:{}", pick.token),
+            Kind::Neg if cur.starts_with("not:") => format!("not:{}", pick.token),
+            Kind::Neg => format!("!{}", pick.token),
         };
-        toks.push(format!("{}{token}", if neg { "-" } else { "" }));
+        toks.push(token.clone());
         self.query = format!("{} ", toks.join(" "));
         self.sel = 0;
         self.recompute();
@@ -500,6 +569,10 @@ impl App {
             self.help = false;
             return;
         }
+        if self.settings_open {
+            self.settings_key(key);
+            return;
+        }
         if self.sheet.is_some() {
             self.sheet_key(key);
             return;
@@ -509,6 +582,41 @@ impl App {
             return;
         }
         self.palette_key(key, ctrl);
+    }
+
+    fn settings_key(&mut self, key: KeyEvent) {
+        use crate::ui::{ICON_SETS, ICONS, THEME, THEMES};
+        use std::sync::atomic::Ordering;
+        let cycle = |a: &std::sync::atomic::AtomicUsize, n: usize, d: isize| {
+            let v = a.load(Ordering::Relaxed) as isize;
+            a.store((v + d).rem_euclid(n as isize) as usize, Ordering::Relaxed);
+        };
+        let d = match key.code {
+            KeyCode::Left => -1,
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => 1,
+            KeyCode::Up => {
+                self.settings_sel = self.settings_sel.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                self.settings_sel = (self.settings_sel + 1).min(4);
+                return;
+            }
+            _ => {
+                self.settings_open = false;
+                self.last = "settings closed".into();
+                return;
+            }
+        };
+        match self.settings_sel {
+            0 => self.hide_temp = !self.hide_temp,
+            1 => self.hide_missing = !self.hide_missing,
+            2 => self.orphans_last = !self.orphans_last,
+            3 => cycle(&THEME, THEMES.len(), d),
+            _ => cycle(&ICONS, ICON_SETS.len(), d),
+        }
+        self.recompute();
+        self.last = format!("setting {} changed", self.settings_sel);
     }
 
     fn sheet_key(&mut self, key: KeyEvent) {
@@ -588,6 +696,10 @@ impl App {
                     self.recompute();
                 }
                 'x' => self.toggle_hidden(),
+                's' => {
+                    self.settings_open = true;
+                    self.last = "settings".into();
+                }
                 't' => self.toggle_tools(),
                 'o' => self.open_conversation(),
                 'n' | 'j' => mv(self, 1),
@@ -653,9 +765,24 @@ pub enum Kind {
     Loc,
     Agent,
     State,
+    /// Anything excludable by name, after `!` or `not:`.
+    Neg,
 }
 
+pub const STATE_HELP: &[(&str, &str)] = &[
+    ("orphaned", "folder no longer exists"),
+    ("temp", "in a system temp folder"),
+    ("pr", "linked to a pull request"),
+    ("recap", "has a recap"),
+    ("git", "in a Git repo or worktree"),
+    ("folder", "in a plain folder, not Git"),
+    ("unavailable", "folder can't be checked"),
+    ("hidden", "hidden by you"),
+];
+
 pub struct Sugg {
+    /// Location kind, for the icon; `None` for agents and states.
+    pub kind: Option<crate::ui::LocKind>,
     /// Text inserted into the query (state words without their `is:` prefix).
     pub token: String,
     pub label: String,
@@ -666,6 +793,7 @@ pub struct Sugg {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Filter {
+    Text(String),
     Loc(String),
     Agent(String),
     State(String),
@@ -684,46 +812,45 @@ const STATES: &[&str] = &[
     "hidden",
 ];
 
-/// Split a query into free-text terms and filters. Filters: `@loc`, `#agent`, `is:state`,
-/// the natural forms `is orphaned` / `not codex`, and `not`, `!`, or `-` to negate.
+/// Split a query into free-text terms and filters.
+///
+/// Filters: `@where`, `#agent`, `is:state`. Negate with `!` or `-` (`!@scratch`, `!#codex`,
+/// `!is:temp`), or name an agent or state directly: `!codex`, `!temp`, `not:temp`.
+/// `!word` for anything else excludes sessions containing that word.
 pub fn parse(q: &str) -> (Vec<String>, Vec<(bool, Filter)>) {
-    let toks: Vec<&str> = q.split_whitespace().collect();
     let mut terms = vec![];
     let mut filters = vec![];
-    let mut i = 0;
-    while i < toks.len() {
-        let tok = toks[i];
+    for tok in q.split_whitespace() {
         let low = tok.to_ascii_lowercase();
-        let next = toks.get(i + 1).map(|t| t.to_ascii_lowercase());
-        // Natural form: `is orphaned`, `not temp`, `not codex`, `not @scratch`.
-        if matches!(low.as_str(), "is" | "not" | "!" | "!is")
-            && let Some(n) = &next
-        {
-            let neg = low != "is";
-            let f = if STATES.contains(&n.as_str()) {
-                Some(Filter::State(n.clone()))
-            } else if ["claude", "codex"].contains(&n.as_str()) {
-                Some(Filter::Agent(n.clone()))
-            } else {
-                token_filter(n)
-            };
-            if let Some(f) = f {
-                filters.push((neg, f));
-                i += 2;
-                continue;
+        if let Some(word) = low.strip_prefix("not:") {
+            if let Some(f) = named(word) {
+                filters.push((true, f));
             }
+            continue;
         }
-        let (neg, body) = match low.strip_prefix(['-', '!']) {
-            Some(b) if b.len() > 1 => (true, b.to_string()),
-            _ => (false, low.clone()),
+        let (neg, body) = match low.strip_prefix(['!', '-']) {
+            Some(b) if !b.is_empty() => (true, b),
+            Some(_) => continue,
+            None => (false, low.as_str()),
         };
-        match token_filter(&body) {
+        match token_filter(body).or_else(|| if neg { named(body) } else { None }) {
             Some(f) => filters.push((neg, f)),
+            None if neg => filters.push((true, Filter::Text(body.to_string()))),
             None => terms.push(tok.to_string()),
         }
-        i += 1;
     }
     (terms, filters)
+}
+
+/// An agent or state named without its sigil, as in `!codex` or `not:temp`.
+fn named(w: &str) -> Option<Filter> {
+    if ["claude", "codex"].contains(&w) {
+        Some(Filter::Agent(w.to_string()))
+    } else if STATES.contains(&w) {
+        Some(Filter::State(w.to_string()))
+    } else {
+        None
+    }
 }
 
 fn token_filter(t: &str) -> Option<Filter> {

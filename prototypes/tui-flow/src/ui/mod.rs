@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use crate::app::{App, View};
 use crate::data::{Availability, Role, Session};
 use crate::text;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Smallest size where the palette still works.
 pub const MIN: (u16, u16) = (48, 12);
@@ -27,8 +28,51 @@ pub struct Theme {
     pub title: Style,
 }
 
+/// Prototype knobs, flipped from the settings pane.
+pub static THEME: AtomicUsize = AtomicUsize::new(0);
+pub static ICONS: AtomicUsize = AtomicUsize::new(0);
+pub const THEMES: &[&str] = &[
+    "Cyan, reversed selection",
+    "Amber, soft selection",
+    "Violet, soft selection",
+    "Sky, soft selection",
+    "Sage, soft selection",
+    "Mono",
+];
+pub const ICON_SETS: &[&str] = &["Unicode", "Nerd Font", "Text tags", "None"];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LocKind {
+    Repo,
+    Worktree,
+    Folder,
+    Missing,
+}
+
+/// A location's icon in the chosen set, padded to a fixed width (empty for "None").
+pub fn icon(k: LocKind) -> &'static str {
+    let set: [&str; 4] = match ICONS.load(Ordering::Relaxed) {
+        0 => ["▣ ", "⎇ ", "▢ ", "⊘ "],
+        1 => ["\u{e702} ", "\u{e725} ", "\u{f07b} ", "\u{f05e} "],
+        2 => ["git  ", "wt   ", "dir  ", "gone "],
+        _ => ["", "", "", ""],
+    };
+    set[k as usize]
+}
+
+pub fn session_kind(s: &Session) -> LocKind {
+    match (&s.project, &s.branch, s.availability) {
+        (_, _, Availability::Orphaned) => LocKind::Missing,
+        (Some(_), Some(_), _) => LocKind::Worktree,
+        (Some(_), None, _) => LocKind::Repo,
+        _ => LocKind::Folder,
+    }
+}
+
 pub fn theme() -> Theme {
     let mono = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    let preset = THEME.load(Ordering::Relaxed);
+    let mono = mono || preset == 5;
     let c = |color: Color| {
         if mono {
             Style::new()
@@ -36,12 +80,26 @@ pub fn theme() -> Theme {
             Style::new().fg(color)
         }
     };
+    let (accent, hl) = match preset {
+        1 => (Color::Indexed(214), Color::Indexed(214)),
+        2 => (Color::Indexed(141), Color::Indexed(222)),
+        3 => (Color::Indexed(75), Color::Indexed(222)),
+        4 => (Color::Indexed(108), Color::Indexed(222)),
+        _ => (Color::Cyan, Color::Yellow),
+    };
+    let sel = if preset == 0 || mono {
+        Style::new().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::new()
+            .bg(Color::Indexed(237))
+            .add_modifier(Modifier::BOLD)
+    };
     Theme {
-        accent: c(Color::Cyan).add_modifier(Modifier::BOLD),
+        accent: c(accent).add_modifier(Modifier::BOLD),
         dim: Style::new().add_modifier(Modifier::DIM),
         warn: c(Color::Yellow),
-        hl: c(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        sel: Style::new().add_modifier(Modifier::REVERSED),
+        hl: c(hl).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        sel,
         key: Style::new().add_modifier(Modifier::BOLD),
         bar: if mono {
             Style::new().add_modifier(Modifier::REVERSED)
@@ -82,6 +140,80 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.help {
         help(f, app, area, &t);
     }
+    if app.settings_open {
+        settings(f, app, area, &t);
+    }
+}
+
+/// Prototype settings: sensible defaults made visible, plus the visual experiments.
+fn settings(f: &mut Frame, app: &App, area: Rect, t: &Theme) {
+    let on = |b: bool| if b { "on " } else { "off" };
+    let rows: Vec<(String, String)> = vec![
+        (
+            "Hide sessions in temp folders".into(),
+            on(app.hide_temp).into(),
+        ),
+        (
+            "Hide missing folders in the location list".into(),
+            on(app.hide_missing).into(),
+        ),
+        (
+            "List orphaned sessions after the rest".into(),
+            on(app.orphans_last).into(),
+        ),
+        (
+            "Accent".into(),
+            THEMES[THEME.load(Ordering::Relaxed)].into(),
+        ),
+        (
+            "Location icons".into(),
+            ICON_SETS[ICONS.load(Ordering::Relaxed)].into(),
+        ),
+    ];
+    let w = 72.min(area.width.saturating_sub(4));
+    let inner = w.saturating_sub(4) as usize;
+    let mut lines = vec![Line::raw("")];
+    for (n, (label, value)) in rows.iter().enumerate() {
+        let lw = inner.saturating_sub(26);
+        let st = if n == app.settings_sel {
+            t.sel
+        } else {
+            Style::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(text::pad(label, lw), st),
+            Span::styled(text::pad_left(value, 26), st.patch(t.accent)),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("Reads", t.dim));
+    for root in [
+        "~/.claude/projects",
+        "~/.codex/sessions",
+        "~/.codex/archived_sessions",
+    ] {
+        lines.push(Line::styled(format!("  {root}"), t.dim));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Typing is:temp shows temp sessions anyway.",
+        t.dim,
+    ));
+    lines.push(keys_line(
+        &[("↑↓", "move"), ("Enter/←→", "change"), ("Esc", "close")],
+        t,
+    ));
+    let r = centered(area, w, lines.len() as u16 + 2);
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .title(" Settings ")
+                .padding(ratatui::widgets::Padding::horizontal(1)),
+        ),
+        r,
+    );
 }
 
 /// Key hints for the current context. The footer and the help screen both read this.
@@ -213,7 +345,10 @@ pub fn preview_lines(app: &App, i: usize, w: usize, t: &Theme) -> Vec<Line<'stat
         meta.push_str(&format!(" · PR {}", prs.join(", ")));
     }
     out.push(Line::styled(text::trunc(&meta, w), t.dim));
-    out.push(Line::styled(text::trunc_left(&s.dir(), w), t.dim));
+    out.push(Line::styled(
+        text::trunc_left(&format!("{}{}", icon(session_kind(s)), s.dir()), w),
+        t.dim,
+    ));
     if let Some(b) = &s.branch {
         out.push(Line::styled(text::trunc(&format!("branch {b}"), w), t.dim));
     }

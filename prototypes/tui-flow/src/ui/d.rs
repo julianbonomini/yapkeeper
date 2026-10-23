@@ -85,6 +85,10 @@ fn input_line(app: &App, w: usize, t: &Theme) -> Line<'static> {
     if app.include_tools {
         right.push_str(" · +tools");
     }
+    let temp = app.temp_hidden();
+    if temp > 0 {
+        right = format!("{temp} in temp hidden · {right}");
+    }
     let used: usize = spans.iter().map(|s| s.width()).sum();
     if used + right.len() + 2 < w {
         spans.push(Span::raw(" ".repeat(w - used - right.len() - 1)));
@@ -128,7 +132,11 @@ fn results(f: &mut Frame, app: &mut App, area: Rect, t: &Theme) {
             if loc_w > 0 {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
-                    text::pad(&s.location_fit(loc_w), loc_w),
+                    {
+                        let ic = super::icon(super::session_kind(s));
+                        let lw = loc_w.saturating_sub(text::width(ic));
+                        text::pad(&format!("{ic}{}", s.location_fit(lw)), loc_w)
+                    },
                     t.dim,
                 ));
             }
@@ -152,18 +160,24 @@ fn suggestions(f: &mut Frame, app: &mut App, area: Rect, sugg: &[Sugg], t: &Them
     let heading = match app.completing().map(|c| c.0) {
         Some(Kind::Loc) => " Locations · projects with their worktrees, then folders",
         Some(Kind::Agent) => " Agents",
+        Some(Kind::Neg) => " Exclude",
         _ => " States",
     };
     let mut items = vec![ListItem::new(Line::styled(heading, t.dim))];
     for sg in sugg {
         let count = format!("{:>5} ", sg.count);
-        let indent = if sg.depth > 0 { "    ↳ " } else { " " };
-        let iw = text::width(indent);
+        let indent = if sg.depth > 0 { "    " } else { " " };
+        let ic = match sg.kind {
+            Some(k) => super::icon(k),
+            None => "",
+        };
+        let indent = format!("{indent}{ic}");
+        let iw = text::width(&indent);
         let label_w = (w / 3).max(16).min(w.saturating_sub(count.len() + iw));
         let detail_w = w.saturating_sub(iw + label_w + count.len() + 2);
         let style = if sg.depth > 0 { Style::new() } else { t.accent };
         items.push(ListItem::new(Line::from(vec![
-            Span::styled(indent, t.dim),
+            Span::styled(indent.clone(), t.dim),
             Span::styled(
                 text::pad(&text::trunc_left(&sg.label, label_w), label_w),
                 style,

@@ -14,13 +14,19 @@ Type to search everything. `Tab` browses locations (`@project` / `@project:workt
 
 ## Query language
 
-Words search conversations. Everything else is a filter, and filters combine with AND.
+Words search conversations, titles, and recaps. Everything else is a filter, and filters combine with AND.
 
 | Form | Meaning |
 |---|---|
 | `@where` | location: project, `project:worktree`, or any part of a path |
 | `#agent` | `#claude`, `#codex` |
-| `is state` / `is:state` | `orphaned`, `temp`, `git`, `folder`, `pr`, `recap`, `unavailable`, `hidden` |
-| `not X`, `!X`, `-X` | negate any filter: `not codex`, `!@scratch`, `-is:temp` |
+| `is:state` | `orphaned`, `temp`, `git`, `folder`, `pr`, `recap`, `unavailable`, `hidden` |
+| `!x` / `not:x` | exclude: `!codex`, `!temp`, `!@scratch`, `!is:pr`, `not:orphaned`; `!word` excludes sessions containing that word |
 
-`@`, `#`, `is`, and `not`/`!` each open a completion list. Hidden sessions appear only with `is hidden`.
+`@`, `#`, `is:`, `!`, and `not:` each open a completion list. A space never triggers anything, so `is pr` is plain text. Hidden sessions appear only with `is:hidden`.
+
+`^S` opens settings: hide temp-folder sessions (default on), hide missing folders from the location list (default on), list orphans last (default on), accent theme, and location icon set (Unicode, Nerd Font, text tags, none). Settings last only until you quit.
+
+## Later
+
+- Move the cursor inside the query (←/→, word jumps) so a filter in the middle can be edited without deleting what follows.

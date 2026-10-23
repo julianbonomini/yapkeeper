@@ -14,7 +14,7 @@ use yapkeeper_model::{
     ThreadKind, TitleKind, jsonl_files, read_jsonl_from,
 };
 
-const PARSER_VERSION: u32 = 1;
+const PARSER_VERSION: u32 = 2;
 
 const SESSION_INDEX: &str = "session_index.jsonl";
 
@@ -158,6 +158,10 @@ fn read_rollout_record(facts: &mut Vec<Fact>, record: &Value) {
                     input.as_str().unwrap_or("")
                 );
                 facts.extend(Message::new(Role::ToolCall, &call).map(Fact::Message));
+            }
+            Some("function_call_output" | "custom_tool_call_output") => {
+                let output = payload["output"].as_str().unwrap_or("");
+                facts.extend(Message::new(Role::ToolOutput, output).map(Fact::Message));
             }
             _ => {}
         },

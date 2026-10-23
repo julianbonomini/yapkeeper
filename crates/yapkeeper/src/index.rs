@@ -1,9 +1,12 @@
 //! The index: Yapkeeper's rebuildable SQLite copy of every session and its
-//! searchable text. It owns the schema and the refresh rule (which history
-//! files are opened, and from which byte), and keeps each file's digest as
-//! text it never looks inside.
+//! searchable text, and finds the sessions whose text matches a query. It
+//! owns the schema and the refresh rule (which history files are opened, and
+//! from which byte), keeps each file's digest as text it never looks inside,
+//! and hides how text is found fast: full-text tables, the trigram limit and
+//! which rows count as tool-level.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
@@ -13,15 +16,16 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior, params, params_from_iter};
 use yapkeeper_model::{
     Adapter, Assembled, FOLD_VERSION, Fact, RecordedGit, ResumeCommand, Role, Session,
     SourceDigest, assemble,
 };
 
+use crate::query::{self, Query};
 use crate::{IndexError, Listed, Listing, Location};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 // Source paths come from the filesystem, so they are stored as raw bytes.
 // Session paths and text come from JSON, so they are always UTF-8.
@@ -41,6 +45,7 @@ CREATE TABLE IF NOT EXISTS sources (
     thread TEXT
 );
 CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY,
     source_path BLOB NOT NULL,
     seq INTEGER NOT NULL,
     role TEXT NOT NULL,
@@ -48,6 +53,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_by_source ON messages (source_path);
 CREATE TABLE IF NOT EXISTS sessions (
+    row_id INTEGER PRIMARY KEY,
     provider TEXT NOT NULL,
     id TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -68,19 +74,49 @@ CREATE TABLE IF NOT EXISTS threads (
     thread TEXT NOT NULL,
     session_id TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS threads_by_thread ON threads (provider, thread);
+-- Folded by query::fold in Rust and matched case-sensitively, so a
+-- candidate set is never narrower than what Word::matches accepts.
+CREATE VIRTUAL TABLE IF NOT EXISTS message_text USING fts5(
+    text,
+    content = '',
+    contentless_delete = 1,
+    tokenize = 'trigram case_sensitive 1'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS session_text USING fts5(
+    title,
+    recap,
+    content = '',
+    contentless_delete = 1,
+    tokenize = 'trigram case_sensitive 1'
+);
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    DELETE FROM message_text WHERE rowid = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
+    DELETE FROM session_text WHERE rowid = old.row_id;
+END;
 "#;
 
 type Cause = Box<dyn Error + Send + Sync>;
 
+/// The search word bound as `?1`, quoted as one FTS5 phrase so that quotes,
+/// `OR`, `NEAR`, `*` and `:` in it are matched as text.
+const PHRASE: &str = r#"'"' || replace(?1, '"', '""') || '"'"#;
+
 /// Brings the index at `path` up to date with every source of `adapters`,
-/// opening only files that changed since the last call, and returns every
-/// session in it with its location read from the disk now.
-pub(crate) fn refresh(adapters: &[&dyn Adapter], path: &Path) -> Result<Listing, IndexError> {
+/// opening only files that changed since the last call, and returns its
+/// sessions that match `query`, with their locations read from the disk now.
+pub(crate) fn refresh(
+    adapters: &[&dyn Adapter],
+    path: &Path,
+    query: &Query,
+) -> Result<Listing, IndexError> {
     let indexed = open(path).and_then(|mut connection| {
         // Immediate, so two listings at once take turns instead of both
         // reading the same files and one failing to write.
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let listing = refresh_in(&transaction, adapters)?;
+        let listing = refresh_in(&transaction, adapters, query)?;
         transaction.commit()?;
         Ok(listing)
     });
@@ -177,7 +213,11 @@ struct Stat {
     mtime_ns: i64,
 }
 
-fn refresh_in(transaction: &Transaction, adapters: &[&dyn Adapter]) -> Result<Listing, Cause> {
+fn refresh_in(
+    transaction: &Transaction,
+    adapters: &[&dyn Adapter],
+    query: &Query,
+) -> Result<Listing, Cause> {
     let mut files_read = 0;
     let mut bytes_read = 0;
     let mut searched = Vec::new();
@@ -272,6 +312,8 @@ fn refresh_in(transaction: &Transaction, adapters: &[&dyn Adapter]) -> Result<Li
     for &adapter in adapters {
         sessions.extend(stored_sessions(transaction, adapter)?);
     }
+    let indexed = sessions.len();
+    retain_matching(transaction, query, &mut sessions)?;
     sessions.sort_by(|a, b| {
         b.last_active
             .cmp(&a.last_active)
@@ -286,6 +328,7 @@ fn refresh_in(transaction: &Transaction, adapters: &[&dyn Adapter]) -> Result<Li
                 session,
             })
             .collect(),
+        indexed,
         malformed_lines: malformed_lines as usize,
         searched,
         files_read,
@@ -344,6 +387,8 @@ fn store_messages(transaction: &Transaction, source: &Path, facts: &[Fact]) -> R
     )?;
     let mut statement = transaction
         .prepare("INSERT INTO messages (source_path, seq, role, text) VALUES (?1, ?2, ?3, ?4)")?;
+    let mut searchable =
+        transaction.prepare("INSERT INTO message_text (rowid, text) VALUES (?1, ?2)")?;
     let messages = facts.iter().filter_map(|fact| match fact {
         Fact::Message(message) => Some(message),
         _ => None,
@@ -353,8 +398,13 @@ fn store_messages(transaction: &Transaction, source: &Path, facts: &[Fact]) -> R
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::ToolCall => "tool_call",
+            Role::ToolOutput => "tool_output",
         };
         statement.execute(params![source, seq, role, message.text])?;
+        searchable.execute(params![
+            transaction.last_insert_rowid(),
+            query::fold(&message.text)
+        ])?;
     }
     Ok(())
 }
@@ -381,6 +431,8 @@ fn store_sessions(transaction: &Transaction, adapter: &dyn Adapter) -> Result<()
             resume_program, resume_args, resume_cwd)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )?;
+    let mut searchable = transaction
+        .prepare("INSERT INTO session_text (rowid, title, recap) VALUES (?1, ?2, ?3)")?;
     for session in sessions {
         let other_working_dirs: Vec<String> = session
             .other_working_dirs
@@ -403,11 +455,109 @@ fn store_sessions(transaction: &Transaction, adapter: &dyn Adapter) -> Result<()
             serde_json::to_string(&session.resume.args)?,
             session.resume.cwd.to_string_lossy(),
         ])?;
+        searchable.execute(params![
+            transaction.last_insert_rowid(),
+            query::fold(&session.title),
+            session.recap.as_deref().map(query::fold),
+        ])?;
     }
     let mut insert = transaction
         .prepare("INSERT INTO threads (provider, thread, session_id) VALUES (?1, ?2, ?3)")?;
     for (thread, session_id) in session_of {
         insert.execute(params![provider, thread, session_id])?;
+    }
+    Ok(())
+}
+
+/// A session as the search rows name it.
+#[derive(PartialEq, Eq, Hash)]
+struct SessionKey {
+    provider: String,
+    id: String,
+}
+
+impl SessionKey {
+    fn of(session: &Session) -> SessionKey {
+        SessionKey {
+            provider: session.provider.to_string(),
+            id: session.id.clone(),
+        }
+    }
+
+    /// From a search row whose first two columns are the provider and session id.
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionKey> {
+        Ok(SessionKey {
+            provider: row.get(0)?,
+            id: row.get(1)?,
+        })
+    }
+}
+
+/// Keeps the `sessions` that match every word of `query`, in their order:
+/// a session matches a word when its title, its recap or one of its
+/// messages in scope does.
+fn retain_matching(
+    transaction: &Transaction,
+    query: &Query,
+    sessions: &mut Vec<Session>,
+) -> Result<(), Cause> {
+    let mut words: Vec<_> = query.words().iter().collect();
+    // A longer word tends to be rarer, so fewer sessions are left for the rest.
+    words.sort_by_key(|word| Reverse(word.key().chars().count()));
+    // Tool-level text is tool calls, tool output and every subagent thread.
+    let scope = if query.tools() {
+        "true"
+    } else {
+        "messages.role IN ('user', 'assistant') AND threads.thread = threads.session_id"
+    };
+    for word in words {
+        let mut unmatched: HashSet<SessionKey> = sessions.iter().map(SessionKey::of).collect();
+        // Trigram rows hold three-character sequences, so a shorter word
+        // can't be looked up, and every row in scope is read instead.
+        // Bound as `?1` only in the SQL that looks it up.
+        let lookup = (word.key().chars().count() >= 3).then_some(word.key());
+        let (session_rows, message_rows, matching) = match lookup {
+            Some(_) => (
+                format!(
+                    "session_text JOIN sessions ON sessions.row_id = session_text.rowid
+                    WHERE session_text MATCH {PHRASE}"
+                ),
+                "message_text JOIN messages ON messages.id = message_text.rowid",
+                format!("AND message_text MATCH {PHRASE}"),
+            ),
+            None => ("sessions".to_string(), "messages", String::new()),
+        };
+        let mut statement = transaction.prepare(&format!(
+            "SELECT sessions.provider, sessions.id, sessions.title, sessions.recap
+            FROM {session_rows}"
+        ))?;
+        let mut rows = statement.query(params_from_iter(lookup))?;
+        while let Some(row) = rows.next()? {
+            let key = SessionKey::from_row(row)?;
+            let title: String = row.get(2)?;
+            let recap: Option<String> = row.get(3)?;
+            if unmatched.contains(&key)
+                && (word.matches(&title) || recap.is_some_and(|recap| word.matches(&recap)))
+            {
+                unmatched.remove(&key);
+            }
+        }
+        let mut statement = transaction.prepare(&format!(
+            "SELECT threads.provider, threads.session_id, messages.text
+            FROM {message_rows}
+            JOIN sources ON sources.path = messages.source_path
+            JOIN threads ON threads.provider = sources.provider
+                AND threads.thread = sources.thread
+            WHERE {scope} {matching}"
+        ))?;
+        let mut rows = statement.query(params_from_iter(lookup))?;
+        while let Some(row) = rows.next()? {
+            let key = SessionKey::from_row(row)?;
+            if unmatched.contains(&key) && word.matches(&row.get::<_, String>(2)?) {
+                unmatched.remove(&key);
+            }
+        }
+        sessions.retain(|session| !unmatched.contains(&SessionKey::of(session)));
     }
     Ok(())
 }
@@ -537,11 +687,16 @@ mod tests {
             version: Cell::new(1),
         };
         let index = tmp.path().join("index.sqlite");
-        refresh(&[&stub], &index).unwrap();
-        assert_eq!(refresh(&[&stub], &index).unwrap().files_read, 0);
+        refresh(&[&stub], &index, &Query::default()).unwrap();
+        assert_eq!(
+            refresh(&[&stub], &index, &Query::default())
+                .unwrap()
+                .files_read,
+            0
+        );
 
         stub.version.set(2);
-        let listing = refresh(&[&stub], &index).unwrap();
+        let listing = refresh(&[&stub], &index, &Query::default()).unwrap();
         assert_eq!(listing.files_read, 2);
         let titles: Vec<&str> = listing
             .sessions

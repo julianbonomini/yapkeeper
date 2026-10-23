@@ -14,7 +14,7 @@ use yapkeeper_model::{
     ThreadKind, TitleKind, jsonl_files, read_jsonl_from,
 };
 
-const PARSER_VERSION: u32 = 1;
+const PARSER_VERSION: u32 = 2;
 
 /// Claude Code's history under one configuration directory.
 pub struct ClaudeCode {
@@ -168,7 +168,7 @@ fn read_transcript_record(facts: &mut Vec<Fact>, record: &Value) {
 }
 
 /// A record's `message.content`, a string or an array of blocks, as messages.
-/// Thinking and tool results are left out.
+/// Thinking is left out; tool results are tool output.
 fn push_content(facts: &mut Vec<Fact>, role: Role, content: &Value) {
     match content {
         Value::String(text) => push_message(facts, role, text),
@@ -182,6 +182,20 @@ fn push_content(facts: &mut Vec<Fact>, role: Role, content: &Value) {
                         let name = block["name"].as_str().unwrap_or("tool");
                         let call = format!("{name} {}", block["input"]);
                         push_message(facts, Role::ToolCall, &call);
+                    }
+                    Some("tool_result") => {
+                        let output = match &block["content"] {
+                            Value::Array(parts) => parts
+                                .iter()
+                                .filter_map(|part| match part["type"].as_str() {
+                                    Some("text") => part["text"].as_str(),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            content => content.as_str().unwrap_or("").to_string(),
+                        };
+                        push_message(facts, Role::ToolOutput, &output);
                     }
                     _ => {}
                 }

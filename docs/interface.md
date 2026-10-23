@@ -36,8 +36,8 @@ Rules:
 - A space never opens a completion list. `is pr` is two search words, so any phrase stays searchable.
 - No space goes between `!` and what it negates: `!codex`, not `! codex`.
 - The query line colors filter tokens with the accent color and leaves search words plain, so the user can see how the query was read.
-- Matching is case-insensitive substring matching with smart case. Fuzzy matching was not tried.
-- Tool calls are searched only after `Ctrl+T`.
+- Matching is case-insensitive substring matching with smart case. Fuzzy matching was not tried. A word with an uppercase letter matches case; other words ignore case letter by letter, so the index and the check always agree.
+- Tool calls, tool output and subagent transcripts are searched only after `Ctrl+T`, or with `--tools` on the command line.
 - Hidden sessions appear only with `is:hidden`.
 
 ## Locations
@@ -119,7 +119,7 @@ For an orphaned session the dialog explains that the folder is gone and offers `
 
 ## Loading
 
-`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line.
+`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. Unlike the prototype below, it keeps tool output, capped like tool calls, so `--tools` can search it.
 
 The prototype reads every history file at launch, in parallel threads, without an index. On the real histories (866 files, 1.18 GB) it loaded 783 sessions in about 0.3 s with 55 MB peak memory on the user's Mac. It skips tool results, keeps tool calls as one-line summaries, caps messages at 4,000 characters, and drops injected context such as command caveats, `AGENTS.md` instructions, and environment blocks. Sessions with no user prompt (64) and Codex subagent sessions (19) are left out.
 
@@ -135,6 +135,7 @@ Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` wh
 | Command | stdout | stderr |
 |---|---|---|
 | `yapkeeper list` | One line per session, most recent first | No sessions found, malformed lines skipped |
+| `yapkeeper search [--tools] <words>…` | Sessions matching every word, one line each, as `list` | No sessions found, no sessions match (with a `--tools` hint), malformed lines skipped |
 | `yapkeeper paths` | `index` and `preferences`, each followed by its path in a space-aligned column | Nothing |
 | `yapkeeper rebuild` | Nothing | `yapkeeper: rebuilt the index at <path> (N sessions)` |
 

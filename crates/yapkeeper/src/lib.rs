@@ -1,13 +1,14 @@
 //! Sessions from every provider, merged and ordered, each with where it ran.
 //! Each provider's format stays inside its adapter; this crate knows where
 //! each one is rooted and where Yapkeeper keeps its own files, keeps the
-//! index of every session up to date, and reads each session's location
-//! from the disk when it is listed.
+//! index of every session up to date, finds sessions by what was said, and
+//! reads each session's location from the disk when it is listed.
 
 #![forbid(unsafe_code)]
 
 mod index;
 mod location;
+mod query;
 
 use std::error::Error;
 use std::fmt;
@@ -17,6 +18,7 @@ use yapkeeper_claude::ClaudeCode;
 use yapkeeper_codex::Codex;
 
 pub use location::*;
+pub use query::Query;
 pub use yapkeeper_model::*;
 
 /// Where each provider keeps its history.
@@ -80,6 +82,8 @@ impl DataDir {
 pub struct Listing {
     /// Most recent first.
     pub sessions: Vec<Listed>,
+    /// Every session in the index, whether or not the query kept it.
+    pub indexed: usize,
     /// Malformed complete lines in every indexed file, not just those read this call.
     pub malformed_lines: usize,
     /// Each provider's directory looked in, for the empty-state message.
@@ -126,9 +130,16 @@ impl Error for IndexError {
 /// read from the disk now. A missing, corrupt or old index is recreated.
 /// Fails only when the index can't be created or written.
 pub fn list(roots: &Roots, data: &DataDir) -> Result<Listing, IndexError> {
+    search(roots, data, &Query::default())
+}
+
+/// Brings the index up to date as `list` does, then returns `list`'s sessions
+/// that match `query`, in `list`'s order; the other fields are as `list`
+/// gives them. Fails only as `list` does.
+pub fn search(roots: &Roots, data: &DataDir, query: &Query) -> Result<Listing, IndexError> {
     let claude = ClaudeCode::at(roots.claude.clone());
     let codex = Codex::at(roots.codex.clone());
-    index::refresh(&[&claude, &codex], &data.index())
+    index::refresh(&[&claude, &codex], &data.index(), query)
 }
 
 /// Deletes the index and builds it again from every history file, then

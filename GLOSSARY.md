@@ -31,6 +31,12 @@ A session the user has excluded from ordinary Yapkeeper results. Hiding is rever
 **Subagent transcript**:
 A conversation recorded for an agent acting within another session. A fork or a message's parent link alone does not establish this relationship.
 
+**Search word**:
+A whitespace-separated piece of the query that is not a filter. A session matches it when its title, recap or a conversation message contains it; a word with an uppercase letter must match case.
+
+**Tool-level text**:
+Tool calls, tool output and subagent transcripts: text that belongs to a session but is not the person and the assistant talking. Searched only on request.
+
 **Adapter**:
 The provider-specific part of Yapkeeper that discovers a provider's history, reads it without modifying it by turning each record into facts, and builds the resume command. The shared model combines facts into sessions; the index and interface see only sessions.
 

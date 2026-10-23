@@ -218,7 +218,7 @@ fn subagent_transcripts_belong_to_their_session_instead_of_being_listed() {
 fn a_parent_uuid_chain_is_one_session_with_no_subagents() {
     let scan = scan_fixtures();
     let build = session(&scan, BUILD);
-    assert_eq!(build.messages.len(), 4);
+    assert_eq!(build.messages.len(), 5);
     assert_eq!(build.subagents, []);
 }
 
@@ -338,8 +338,56 @@ fn tool_calls_are_kept_apart_from_ordinary_messages() {
                 text: r#"Read {"file_path":"/synthetic/beta/build.log"}"#.to_string(),
             },
             Message {
+                role: Role::ToolOutput,
+                text: "Synthetic tool output.".to_string(),
+            },
+            Message {
                 role: Role::Assistant,
                 text: "The build fails because a file is missing.".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn tool_results_are_kept_as_tool_output_apart_from_ordinary_messages() {
+    let record = |content: serde_json::Value| {
+        serde_json::json!({
+            "type": "user",
+            "message": { "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": content }] },
+            "cwd": "/synthetic/temp",
+        })
+        .to_string()
+    };
+    let contents = format!(
+        "{}\n{}\n{}\n",
+        r#"{"type":"user","message":{"content":"A synthetic prompt"},"cwd":"/synthetic/temp"}"#,
+        record(serde_json::json!("<synthetic> output that looks injected")),
+        record(serde_json::json!([
+            { "type": "text", "text": "line one" },
+            { "type": "image" },
+            { "type": "text", "text": "line two" },
+        ])),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let id = "aaaaaaaa-0000-4000-8000-000000000012";
+    write_session(root.path(), id, &contents);
+
+    let scan = yapkeeper_model::scan(&ClaudeCode::at(root.path().to_path_buf()));
+    assert_eq!(
+        session(&scan, id).messages,
+        [
+            Message {
+                role: Role::User,
+                text: "A synthetic prompt".to_string(),
+            },
+            Message {
+                role: Role::ToolOutput,
+                text: "<synthetic> output that looks injected".to_string(),
+            },
+            Message {
+                role: Role::ToolOutput,
+                text: "line one\nline two".to_string(),
             },
         ]
     );

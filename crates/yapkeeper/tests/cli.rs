@@ -31,6 +31,18 @@ fn yapkeeper(args: &[&str], home: &Path, claude_config_dir: Option<&Path>) -> Ou
     command.output().unwrap()
 }
 
+/// Runs `yapkeeper` over both committed fixture histories.
+fn yapkeeper_over_fixtures(args: &[&str], home: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .args(args)
+        .env_clear()
+        .env("HOME", home)
+        .env("CLAUDE_CONFIG_DIR", FIXTURES)
+        .env("CODEX_HOME", CODEX_FIXTURES)
+        .output()
+        .unwrap()
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
@@ -124,14 +136,7 @@ fn list_with_no_history_says_where_it_looked_and_succeeds() {
 #[test]
 fn list_shows_claude_code_and_codex_sessions_together_in_aligned_columns() {
     let home = tempfile::tempdir().unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_yapkeeper"));
-    command
-        .arg("list")
-        .env_clear()
-        .env("HOME", home.path())
-        .env("CLAUDE_CONFIG_DIR", FIXTURES)
-        .env("CODEX_HOME", CODEX_FIXTURES);
-    let output = command.output().unwrap();
+    let output = yapkeeper_over_fixtures(&["list"], home.path());
     assert!(output.status.success(), "{}", stderr(&output));
 
     let stdout = stdout(&output);
@@ -512,16 +517,7 @@ fn help_shows_where_the_index_and_preferences_are_kept() {
 #[test]
 fn rebuild_reports_on_stderr_and_list_prints_the_same_afterwards() {
     let home = tempfile::tempdir().unwrap();
-    let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
-            .args(args)
-            .env_clear()
-            .env("HOME", home.path())
-            .env("CLAUDE_CONFIG_DIR", FIXTURES)
-            .env("CODEX_HOME", CODEX_FIXTURES)
-            .output()
-            .unwrap()
-    };
+    let run = |args: &[&str]| yapkeeper_over_fixtures(args, home.path());
     let before = run(&["list"]);
     assert!(before.status.success(), "{}", stderr(&before));
 
@@ -563,4 +559,180 @@ fn list_fails_naming_the_index_when_it_cannot_be_written() {
         stderr.lines().last(),
         Some("Check its permissions, or set XDG_DATA_HOME.")
     );
+}
+
+#[test]
+fn search_prints_a_session_whose_prompt_contains_the_word_in_any_case() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/synthetic/temp");
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000201",
+        "Retrying the upload",
+        cwd,
+        "",
+    );
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000202",
+        "Tidy the notes",
+        cwd,
+        "",
+    );
+
+    let output = yapkeeper(&["search", "retry"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(
+        stdout.starts_with("Retrying the upload  claude  "),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn search_with_an_uppercase_letter_matches_case() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/synthetic/temp");
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000203",
+        "Keep retrying the upload",
+        cwd,
+        "",
+    );
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000204",
+        "Retry the upload",
+        cwd,
+        "",
+    );
+
+    let output = yapkeeper(&["search", "Retry"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.starts_with("Retry the upload  claude  "), "{stdout}");
+}
+
+#[test]
+fn search_finds_text_only_in_a_tool_call_with_tools_before_or_after_the_words() {
+    let home = tempfile::tempdir().unwrap();
+    let tool_call = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/synthetic/zebra.log"}}]},"cwd":"/synthetic/temp"}"#;
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000205",
+        "Read the log",
+        Path::new("/synthetic/temp"),
+        &format!("{tool_call}\n"),
+    );
+
+    let without = yapkeeper(&["search", "zebra"], home.path(), None);
+    assert!(without.status.success(), "{}", stderr(&without));
+    assert_eq!(stdout(&without), "");
+
+    let before = yapkeeper(&["search", "--tools", "zebra"], home.path(), None);
+    assert!(before.status.success(), "{}", stderr(&before));
+    assert!(
+        stdout(&before).starts_with("Read the log  claude  "),
+        "{}",
+        stdout(&before)
+    );
+    let after = yapkeeper(&["search", "zebra", "--tools"], home.path(), None);
+    assert!(after.status.success(), "{}", stderr(&after));
+    assert_eq!(stdout(&after), stdout(&before));
+}
+
+#[test]
+fn search_with_no_words_prints_exactly_what_list_prints() {
+    let home = tempfile::tempdir().unwrap();
+    let list = yapkeeper_over_fixtures(&["list"], home.path());
+    assert!(list.status.success(), "{}", stderr(&list));
+    assert_eq!(stdout(&list).lines().count(), 7);
+    for args in [&["search"][..], &["search", ""]] {
+        let output = yapkeeper_over_fixtures(args, home.path());
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        assert_eq!(stdout(&output), stdout(&list), "{args:?}");
+    }
+}
+
+#[test]
+fn search_prints_its_matches_in_the_order_and_line_format_of_list() {
+    let home = tempfile::tempdir().unwrap();
+    let list = yapkeeper_over_fixtures(&["list"], home.path());
+    let output = yapkeeper_over_fixtures(&["search", "retry"], home.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let words = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let expected: Vec<String> = stdout(&list)
+        .lines()
+        .filter(|line| line.contains("retry"))
+        .map(words)
+        .collect();
+    let stdout = stdout(&output);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.iter().map(|line| words(line)).collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(expected.len(), 2, "{stdout}");
+    let provider_column = lines[0].find("  codex ").unwrap();
+    for line in &lines {
+        assert_eq!(line.find("  codex "), Some(provider_column), "{line:?}");
+    }
+}
+
+#[test]
+fn search_matching_nothing_says_so_on_stderr_and_succeeds() {
+    let home = tempfile::tempdir().unwrap();
+    let output = yapkeeper_over_fixtures(&["search", "no-such-word"], home.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        concat!(
+            "yapkeeper: no sessions match \"no-such-word\"\n",
+            "yapkeeper: --tools also searches tool calls, tool output and subagent transcripts\n",
+            "yapkeeper: skipped 1 malformed line\n",
+        )
+    );
+
+    let output = yapkeeper_over_fixtures(&["search", "--tools", "no-such-word"], home.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "yapkeeper: no sessions match \"no-such-word\"\nyapkeeper: skipped 1 malformed line\n"
+    );
+
+    let empty = tempfile::tempdir().unwrap();
+    let missing = empty.path().join("no-claude-here");
+    let output = yapkeeper(&["search", "anything"], empty.path(), Some(&missing));
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("no sessions found in"), "{stderr}");
+    assert!(!stderr.contains("match"), "{stderr}");
+}
+
+#[test]
+fn search_help_describes_words_case_tools_and_the_double_dash() {
+    let home = tempfile::tempdir().unwrap();
+    let output = yapkeeper(&["search", "--help"], home.path(), None);
+    assert!(output.status.success());
+    let help = stdout(&output);
+    for phrase in [
+        "every word must match",
+        "uppercase letter matches case",
+        "--tools",
+        "tool output",
+        "subagent transcripts",
+        "Put -- before a word that starts with -",
+    ] {
+        assert!(help.contains(phrase), "{phrase:?} is missing from {help}");
+    }
+
+    let output = yapkeeper(&["--help"], home.path(), None);
+    assert!(stdout(&output).contains("search"), "{}", stdout(&output));
 }

@@ -88,7 +88,8 @@ fn the_title_is_the_latest_thread_name_or_else_the_first_prompt() {
 }
 
 #[test]
-fn messages_come_from_response_items_without_echoes_injected_context_or_tool_output() {
+fn messages_come_from_response_items_without_echoes_or_injected_context_with_tool_output_kept_apart()
+ {
     let scan = scan_fixtures();
     let message = |role, text: &str| Message {
         role,
@@ -99,7 +100,9 @@ fn messages_come_from_response_items_without_echoes_injected_context_or_tool_out
         [
             message(Role::User, "Make the synthetic retry back off"),
             message(Role::ToolCall, r#"shell {"command":["ls"]}"#),
+            message(Role::ToolOutput, "synthetic.txt"),
             message(Role::ToolCall, "apply_patch *** Begin Patch"),
+            message(Role::ToolOutput, "Done"),
             message(Role::Assistant, "The synthetic retry now backs off."),
         ]
     );

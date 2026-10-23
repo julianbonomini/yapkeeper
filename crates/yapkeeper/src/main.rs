@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::SystemTime;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use yapkeeper::{Availability, DataDir, IndexError, Listed, Place, Roots, list, rebuild};
+use yapkeeper::{Availability, DataDir, IndexError, Listed, Place, Query, Roots, rebuild, search};
 
 /// Wide enough for most titles; what follows may wrap on an 80-column terminal.
 const MAX_TITLE_WIDTH: usize = 48;
@@ -37,10 +37,28 @@ enum Command {
     /// Each line shows a session's title, provider, age, an orphaned or unavailable
     /// label when one applies, and where it ran.
     List,
+    /// Find sessions by what was said
+    ///
+    /// Words match titles, messages and recaps as substrings; every word must
+    /// match. A word with an uppercase letter matches case. --tools also
+    /// searches tool calls, tool output and subagent transcripts. Put -- before
+    /// a word that starts with -.
+    Search(Search),
     /// Print where Yapkeeper keeps its index and preferences
     Paths,
     /// Delete the index and build it again from every history file
     Rebuild,
+}
+
+/// What to search for; the default finds every session, as `list` does.
+#[derive(Args, Default)]
+struct Search {
+    /// Also search tool calls, tool output and subagent transcripts
+    #[arg(long)]
+    tools: bool,
+    /// Words every listed session contains; none lists every session
+    #[arg(num_args = 0..)]
+    words: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -52,7 +70,8 @@ fn main() -> ExitCode {
         .get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     match cli.command {
-        Command::List => print_list(),
+        Command::List => print_sessions(&Search::default()),
+        Command::Search(search) => print_sessions(&search),
         Command::Paths => print_paths(),
         Command::Rebuild => print_rebuild(),
     }
@@ -129,18 +148,31 @@ fn print_rebuild() -> ExitCode {
     }
 }
 
-fn print_list() -> ExitCode {
+/// The sessions `search` finds, one line each, in `list`'s format.
+fn print_sessions(Search { tools, words }: &Search) -> ExitCode {
     let (roots, data) = match environment() {
         Ok(environment) => environment,
         Err(code) => return code,
     };
-    let listing = match list(&roots, &data) {
+    let words = words.join(" ");
+    let query = Query::parse(&words).including_tools(*tools);
+    let listing = match search(&roots, &data, &query) {
         Ok(listing) => listing,
         Err(error) => return index_failure(error),
     };
-    if listing.sessions.is_empty() {
+    if listing.indexed == 0 {
         for dir in &listing.searched {
             eprintln!("yapkeeper: no sessions found in {}", dir.display());
+        }
+    } else if listing.sessions.is_empty() {
+        eprintln!(
+            "yapkeeper: no sessions match \"{}\"",
+            without_controls(&words)
+        );
+        if !tools {
+            eprintln!(
+                "yapkeeper: --tools also searches tool calls, tool output and subagent transcripts"
+            );
         }
     }
     match listing.malformed_lines {

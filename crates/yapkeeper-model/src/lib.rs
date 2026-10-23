@@ -18,10 +18,10 @@ use serde_json::Value;
 
 pub use assemble::{Assembled, FOLD_VERSION, SourceDigest, assemble};
 
-// Caps keep memory small on long transcripts; a tool call's input matters
-// far less than what the person and the assistant said.
+// Caps keep memory small on long transcripts; a tool call's input and what
+// a tool gave back matter far less than what the person and the assistant said.
 const MAX_MESSAGE_BYTES: usize = 4_000;
-const MAX_TOOL_CALL_BYTES: usize = 300;
+const MAX_TOOL_BYTES: usize = 300;
 
 /// A provider's history, read without modifying it.
 pub trait Adapter {
@@ -218,8 +218,9 @@ pub struct Transcript {
     /// In transcript order, with injected context removed and long text capped.
     pub messages: Vec<Message>,
     /// Agents this session started, each with its own transcript. Their text
-    /// is tool-level: it belongs to the session but is not something the
-    /// person and the assistant said to each other.
+    /// is tool-level, like tool calls and tool output: it belongs to the
+    /// session but is not something the person and the assistant said to
+    /// each other, so it is searched only on request.
     pub subagents: Vec<SubagentTranscript>,
 }
 
@@ -256,7 +257,7 @@ impl Message {
         }
         let max_bytes = match role {
             Role::User | Role::Assistant => MAX_MESSAGE_BYTES,
-            Role::ToolCall => MAX_TOOL_CALL_BYTES,
+            Role::ToolCall | Role::ToolOutput => MAX_TOOL_BYTES,
         };
         let text = if text.len() <= max_bytes {
             text.to_string()
@@ -277,6 +278,8 @@ pub enum Role {
     Assistant,
     /// A tool the assistant called, kept apart from ordinary messages.
     ToolCall,
+    /// What a tool gave back, kept apart from ordinary messages.
+    ToolOutput,
 }
 
 /// The exact process to start to resume a session. Nothing in this crate runs it.

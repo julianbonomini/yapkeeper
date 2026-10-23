@@ -1,0 +1,3 @@
+{"type":"summary","summary":"Administrative summary","leafUuid":"e0000001"}
+{"type":"assistant","message":{"role":"assistant","content":"An assistant reply with no prompt."},"cwd":"/synthetic/gamma","sessionId":"55555555-5555-4555-8555-555555555555","timestamp":"2026-10-22T13:00:00.000Z","uuid":"e0000001","parentUuid":null,"isSidechain":false}
+{"type":"custom-title","customTitle":"Promptless session","sessionId":"55555555-5555-4555-8555-555555555555"}

@@ -25,5 +25,11 @@ A session the user has excluded from ordinary Yapkeeper results. Hiding is rever
 **Subagent transcript**:
 A conversation recorded for an agent acting within another session. A fork or a message's parent link alone does not establish this relationship.
 
+**Adapter**:
+The provider-specific part of Yapkeeper that discovers a provider's history, reads it without modifying it, and builds the resume command. The shared model, index and interface see only its sessions.
+
+**Title**:
+The name shown for a session: the one the user set, else the one the provider generated, else the first prompt the user typed. Injected context never counts as a prompt.
+
 **Preview**:
 The conversation text displayed for a selected session before resuming it.

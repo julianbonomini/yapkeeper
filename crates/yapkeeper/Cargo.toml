@@ -1,0 +1,16 @@
+[package]
+name = "yapkeeper"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+clap.workspace = true
+unicode-width.workspace = true
+yapkeeper-claude.workspace = true
+yapkeeper-model.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

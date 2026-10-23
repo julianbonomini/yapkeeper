@@ -1,5 +1,6 @@
 //! How the palette looks: its theme, its breakpoints and every line it
-//! draws, from the query line down to the footer, plus the too-small state.
+//! draws, from the query line, its filters in the accent, down to the
+//! completions or the results and the footer, plus the too-small state.
 //! The preview's lines are its own module's.
 
 mod preview;
@@ -15,8 +16,8 @@ use ratatui::widgets::{Block, BorderType, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::{Colour, Palette};
-use crate::line::{age, availability_label, fit, fit_left, one_line, place, without_controls};
-use crate::{Availability, Listed, Place};
+use crate::line::{age, availability_label, fit, fit_left, one_line, place};
+use crate::{Availability, Listed, Place, TokenKind};
 
 /// The smallest terminal the palette draws in; below it only says so.
 const MIN_WIDTH: u16 = 48;
@@ -101,7 +102,7 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
         Constraint::Length(1),
     ])
     .areas(inner);
-    let results = match area.width >= SPLIT_WIDTH {
+    let results = match area.width >= SPLIT_WIDTH && palette.completions.is_empty() {
         true => {
             let [results, preview] =
                 Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
@@ -116,7 +117,10 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
         Paragraph::new("─".repeat(usize::from(rule.width))).style(theme.dim),
         rule,
     );
-    rows(palette, &theme, frame, results);
+    match palette.completions.is_empty() {
+        true => rows(palette, &theme, frame, results),
+        false => completions(palette, &theme, frame, results),
+    }
     footer_line(palette, &theme, frame, footer);
 }
 
@@ -144,24 +148,87 @@ fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let room = width.saturating_sub(PROMPT.width() + count.width() + 1);
     // The cursor sits after what was typed, or at the placeholder's start.
     let (typed, typed_cells) = match palette.query.is_empty() {
-        true => (Span::styled(fit(PLACEHOLDER, room), theme.dim), 0),
-        false => {
-            // Spaces are kept as typed, so the cursor moves with each one.
-            let typed = fit_left(&without_controls(&palette.query), room);
-            let cells = typed.width();
-            (Span::raw(typed), cells)
-        }
+        true => (vec![Span::styled(fit(PLACEHOLDER, room), theme.dim)], 0),
+        false => typed_query(palette, theme, room),
     };
     let cursor_x = area.x + (PROMPT.width() + typed_cells) as u16;
-    let gap = width.saturating_sub(PROMPT.width() + typed.width() + count.width());
-    let line = Line::from(vec![
-        Span::styled(PROMPT, theme.accent),
-        typed,
-        Span::raw(" ".repeat(gap)),
-        Span::styled(count, theme.dim),
-    ]);
+    let typed_width: usize = typed.iter().map(Span::width).sum();
+    let gap = width.saturating_sub(PROMPT.width() + typed_width + count.width());
+    let mut spans = vec![Span::styled(PROMPT, theme.accent)];
+    spans.extend(typed);
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::styled(count, theme.dim));
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
     frame.set_cursor_position(Position::new(cursor_x, area.y));
+}
+
+/// The query as typed, in at most `cells` cells, keeping its end and
+/// starting with `…` when cut, and how many cells it takes. Each filter
+/// token is in the accent, as the query parser read it; words and the spaces
+/// between tokens stay plain, every space kept so the cursor moves with it.
+fn typed_query<'a>(palette: &Palette, theme: &Theme, cells: usize) -> (Vec<Span<'a>>, usize) {
+    let query = &palette.query;
+    let style_at = |at: usize| {
+        let token = palette
+            .parsed
+            .tokens()
+            .iter()
+            .find(|token| token.span.contains(&at));
+        match token {
+            Some(token) if token.kind != TokenKind::Word => theme.accent,
+            _ => Style::new(),
+        }
+    };
+    let chars: Vec<(char, Style)> = query
+        .char_indices()
+        .filter(|(_, c)| !c.is_control())
+        .map(|(at, c)| (c, style_at(at)))
+        .collect();
+    // Cut as `fit_left` cuts the plain text, keeping as many characters
+    // from the end.
+    let plain: String = chars.iter().map(|&(c, _)| c).collect();
+    let fitted = fit_left(&plain, cells);
+    // In no cells at all there is no room for the `…` either.
+    let ellipsis = fitted != plain && cells > 0;
+    let kept = &chars[chars.len() - (fitted.chars().count() - usize::from(ellipsis))..];
+    let mut spans: Vec<Span> = Vec::new();
+    for &(c, style) in kept {
+        match spans.last_mut() {
+            Some(span) if span.style == style => span.content.to_mut().push(c),
+            _ => spans.push(Span::styled(c.to_string(), style)),
+        }
+    }
+    if ellipsis {
+        spans.insert(0, Span::raw("…"));
+    }
+    let used = spans.iter().map(Span::width).sum();
+    (spans, used)
+}
+
+/// One line per way to finish the filter being typed: the token as it
+/// would read, in the accent, and how many sessions it lists.
+fn completions(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
+    let width = usize::from(area.width);
+    let items: Vec<ListItem> = palette
+        .completions
+        .iter()
+        .map(|completion| {
+            let count = completion.count.to_string();
+            // A space before the token and at least one before the count,
+            // which ends in the last cell, as ages do.
+            let token = fit(&completion.token, width.saturating_sub(2 + count.width()));
+            let gap = width.saturating_sub(1 + token.width() + count.width());
+            ListItem::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(token, theme.accent),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(count, theme.dim),
+            ]))
+        })
+        .collect();
+    let list = List::new(items).highlight_style(theme.selection);
+    frame.render_stateful_widget(list, area, &mut palette.completion);
 }
 
 /// One line per session, or what to try when there are none.
@@ -259,15 +326,25 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
         true => "quit",
         false => "clear",
     };
-    let hints = [
-        ("↑↓", "move"),
-        ("Esc", esc),
-        ("^U", "clear"),
-        ("^C", "quit"),
-    ];
+    let hints = match palette.completions.is_empty() {
+        true => [
+            Some(("↑↓", "move")),
+            Some(("Esc", esc)),
+            Some(("^U", "clear")),
+            palette.launch_token.as_ref().map(|_| ("^L", "here")),
+            Some(("^C", "quit")),
+        ],
+        false => [
+            Some(("↑↓", "choose")),
+            Some(("Tab", "insert")),
+            Some(("Esc", esc)),
+            palette.launch_token.as_ref().map(|_| ("^L", "here")),
+            Some(("^C", "quit")),
+        ],
+    };
     let mut spans = Vec::new();
     let mut used = 0;
-    for (key, label) in hints {
+    for (key, label) in hints.into_iter().flatten() {
         // A space before each hint and one more between hints.
         let cells = 1 + key.width() + 1 + label.width() + usize::from(used > 0);
         if used + cells > usize::from(area.width) {

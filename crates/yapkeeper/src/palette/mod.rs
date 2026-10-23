@@ -1,19 +1,20 @@
 //! The command palette: a query line searched live as the person types,
-//! the sessions it matches, a preview of the selected one and key hints,
-//! over a `Catalog` loaded once.
+//! the sessions it matches or the ways to finish the filter being typed, a
+//! preview of the selected session and key hints, over a `Catalog` loaded
+//! once.
 //! It owns every terminal decision (keys, layout, theme and the terminal's
 //! lifecycle) and never touches the index, the preferences or the disk.
 
 mod terminal;
 mod view;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
-use crate::{Catalog, LeftOut, Listed, Message, Query, line};
+use crate::{Catalog, Completion, LeftOut, Listed, Message, Query, line, location_token};
 
 pub use terminal::{Restore, run};
 
@@ -24,6 +25,8 @@ pub struct Palette<'c> {
     colour: Colour,
     /// Shown as `~` at the start of a folder's path.
     home: Option<PathBuf>,
+    /// The `@` token `Ctrl+L` adds: where the palette was launched.
+    launch_token: Option<String>,
     query: String,
     /// `query` as the last search read it.
     parsed: Query,
@@ -31,6 +34,10 @@ pub struct Palette<'c> {
     found: Vec<&'c Listed>,
     left_out: LeftOut,
     selection: ListState,
+    /// The ways to finish the filter at the end of `query`; while there are
+    /// any they take the results' place and the arrows move among them.
+    completions: Vec<Completion>,
+    completion: ListState,
     /// What was said in the selected session, for the preview.
     conversation: Vec<Message>,
     /// Why the last search, or the selected session's conversation, failed
@@ -65,18 +72,22 @@ impl Colour {
 }
 
 impl<'c> Palette<'c> {
-    /// The palette over `catalog`, drawn in `colour`. A search error is
-    /// shown in the footer rather than returned.
-    pub fn new(catalog: &'c Catalog, colour: Colour) -> Palette<'c> {
+    /// The palette over `catalog`, drawn in `colour`, launched from
+    /// `launch_dir`. A search error is shown in the footer rather than
+    /// returned.
+    pub fn new(catalog: &'c Catalog, colour: Colour, launch_dir: &Path) -> Palette<'c> {
         let mut palette = Palette {
             catalog,
             colour,
             home: line::home(),
+            launch_token: location_token(launch_dir),
             query: String::new(),
             parsed: Query::default(),
             found: Vec::new(),
             left_out: LeftOut::default(),
             selection: ListState::default(),
+            completions: Vec::new(),
+            completion: ListState::default(),
             conversation: Vec::new(),
             error: None,
         };
@@ -94,10 +105,17 @@ impl<'c> Palette<'c> {
         match key.code {
             KeyCode::Char('c') if ctrl => return Step::Quit,
             KeyCode::Char('u') if ctrl => self.set_query(String::new()),
+            KeyCode::Char('l') if ctrl => self.insert_launch_location(),
             KeyCode::Char('p') if ctrl => self.move_selection(Direction::Up),
             KeyCode::Char('n') if ctrl => self.move_selection(Direction::Down),
             KeyCode::Up => self.move_selection(Direction::Up),
             KeyCode::Down => self.move_selection(Direction::Down),
+            KeyCode::Tab | KeyCode::Enter => {
+                let chosen = self.completion.selected().map(|row| &self.completions[row]);
+                if let Some(chosen) = chosen {
+                    self.set_query(chosen.query.clone());
+                }
+            }
             KeyCode::Esc if self.query.is_empty() => return Step::Quit,
             KeyCode::Esc => self.set_query(String::new()),
             KeyCode::Backspace => {
@@ -122,7 +140,23 @@ impl<'c> Palette<'c> {
         if query != self.query {
             self.query = query;
             self.search();
+            self.completions = self.catalog.completions(&self.query);
+            let first = (!self.completions.is_empty()).then_some(0);
+            self.completion = ListState::default().with_selected(first);
         }
+    }
+
+    /// Adds the `@` token for where the palette was launched to the end of
+    /// the query; nothing when that place has no token.
+    fn insert_launch_location(&mut self) {
+        let Some(token) = &self.launch_token else {
+            return;
+        };
+        let query = match self.query.trim_end() {
+            "" => format!("{token} "),
+            typed => format!("{typed} {token} "),
+        };
+        self.set_query(query);
     }
 
     /// Searches the catalog for the query and selects the first row.
@@ -141,18 +175,17 @@ impl<'c> Palette<'c> {
         self.select(first);
     }
 
-    /// Moves the selection one row, stopping at the first and last rows.
+    /// Moves the selection one row, among the completions while there are
+    /// any, otherwise among the sessions, stopping at the first and last rows.
     fn move_selection(&mut self, direction: Direction) {
-        let Some(selected) = self.selection.selected() else {
-            return;
-        };
-        let last = self.found.len().saturating_sub(1);
-        let row = match direction {
-            Direction::Up => selected.saturating_sub(1),
-            Direction::Down => (selected + 1).min(last),
-        };
-        if row != selected {
-            self.select(Some(row));
+        if self.completions.is_empty() {
+            let row = direction.step(self.selection.selected(), self.found.len());
+            if row != self.selection.selected() {
+                self.select(row);
+            }
+        } else {
+            let row = direction.step(self.completion.selected(), self.completions.len());
+            self.completion.select(row);
         }
     }
 
@@ -180,4 +213,15 @@ impl<'c> Palette<'c> {
 enum Direction {
     Up,
     Down,
+}
+
+impl Direction {
+    /// The row one step from `selected` among `rows`, stopping at the first
+    /// and last; nothing when nothing is selected.
+    fn step(self, selected: Option<usize>, rows: usize) -> Option<usize> {
+        selected.map(|row| match self {
+            Direction::Up => row.saturating_sub(1),
+            Direction::Down => (row + 1).min(rows.saturating_sub(1)),
+        })
+    }
 }

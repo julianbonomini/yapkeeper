@@ -8,12 +8,14 @@
 //! as `@where`, `#provider` or `is:state` when it starts with one, otherwise
 //! as a bare provider name, then a bare state name, and otherwise as a word;
 //! a second `!` is just text. Sigils and names ignore case; words keep smart
-//! case.
+//! case. While the last token is a filter being typed, it offers the ways to
+//! finish it, each with how many sessions it lists.
 
 use std::borrow::Borrow;
 use std::ops::Range;
+use std::path::Path;
 
-use crate::{Availability, LeftOut, Listed, Place};
+use crate::{Availability, LeftOut, Listed, Location, Place, RecordedGit};
 
 /// What the person typed, read as the query language. A session must pass
 /// every filter and contain every search word, in its title, recap or
@@ -129,14 +131,7 @@ impl Query {
     pub fn parse(text: &str, providers: &[&'static str]) -> Query {
         let mut query = Query::default();
         for span in pieces(text) {
-            let piece = &text[span.clone()];
-            let (negated, rest) = match piece.strip_prefix('!') {
-                Some(rest) => (true, rest),
-                None => match strip_prefix_ignoring_case(piece, "not:") {
-                    Some(rest) => (true, rest),
-                    None => (false, piece),
-                },
-            };
+            let (negated, rest) = negation(&text[span.clone()]);
             let Parsed { kind, filter } = parse_rest(rest, negated, providers);
             match filter {
                 Some(filter) => query.conditions.push(Condition { filter, negated }),
@@ -260,13 +255,10 @@ enum Filter {
 impl Filter {
     fn admits(&self, listed: &Listed) -> bool {
         match self {
-            // `project:worktree` for a worktree, so `@project` finds every
-            // worktree too and `@project:worktree` only that one.
             Filter::Location(name) => {
                 let key = match &listed.location.place {
-                    Place::MainCheckout { project } => Some(project.clone()),
-                    Place::Worktree { project, worktree } => Some(format!("{project}:{worktree}")),
                     Place::Folder => None,
+                    place => Some(location_name(place, &listed.session.working_dir)),
                 };
                 key.is_some_and(|key| fold(&key).contains(name))
                     || fold(&listed.session.working_dir.to_string_lossy()).contains(name)
@@ -292,19 +284,12 @@ fn parse_rest(rest: &str, negated: bool, providers: &[&'static str]) -> Parsed {
         let name = fold(name);
         providers.iter().copied().find(|provider| *provider == name)
     };
-    // The name after a sigil, and the filter it makes.
-    let sigil = if let Some(name) = rest.strip_prefix('@') {
-        Some((name, Filter::Location(fold(name))))
-    } else if let Some(name) = rest.strip_prefix('#') {
-        Some((name, Filter::Provider(provider(name))))
-    } else {
-        strip_prefix_ignoring_case(rest, "is:")
-            .map(|name| (name, Filter::State(State::named(name))))
-    };
     let unfiltered = |kind| Parsed { kind, filter: None };
-    let filter = match sigil {
-        Some(("", _)) => return unfiltered(TokenKind::Incomplete),
-        Some((_, filter)) => filter,
+    let filter = match sigil(rest) {
+        Some((_, "")) => return unfiltered(TokenKind::Incomplete),
+        Some((Sigil::Location, name)) => Filter::Location(fold(name)),
+        Some((Sigil::Provider, name)) => Filter::Provider(provider(name)),
+        Some((Sigil::State, name)) => Filter::State(State::named(name)),
         None if rest.is_empty() => return unfiltered(TokenKind::Incomplete),
         None if !negated => return unfiltered(TokenKind::Word),
         None => match (provider(rest), State::named(rest)) {
@@ -321,6 +306,40 @@ fn parse_rest(rest: &str, negated: bool, providers: &[&'static str]) -> Parsed {
     Parsed {
         kind,
         filter: Some(filter),
+    }
+}
+
+/// What a token names after its `!` or `not:`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sigil {
+    /// `@`
+    Location,
+    /// `#`
+    Provider,
+    /// `is:`
+    State,
+}
+
+/// The sigil `rest` starts with, and the name after it.
+fn sigil(rest: &str) -> Option<(Sigil, &str)> {
+    if let Some(name) = rest.strip_prefix('@') {
+        Some((Sigil::Location, name))
+    } else if let Some(name) = rest.strip_prefix('#') {
+        Some((Sigil::Provider, name))
+    } else {
+        strip_prefix_ignoring_case(rest, "is:").map(|name| (Sigil::State, name))
+    }
+}
+
+/// `text` split after its `!` or `not:`, as typed: whether there was one,
+/// and the rest.
+fn negation(text: &str) -> (bool, &str) {
+    match text.strip_prefix('!') {
+        Some(rest) => (true, rest),
+        None => match strip_prefix_ignoring_case(text, "not:") {
+            Some(rest) => (true, rest),
+            None => (false, text),
+        },
     }
 }
 
@@ -436,4 +455,132 @@ impl Folded {
 /// this fold, so changing it means bumping the index's schema version.
 pub(crate) fn fold(text: &str) -> String {
     text.chars().flat_map(char::to_lowercase).collect()
+}
+
+/// The name `@` takes for a session at `place` in `working_dir`: the
+/// project, `project:worktree`, or for a folder its path. `@project` finds
+/// every worktree too, as a filter matches any part of the name.
+fn location_name(place: &Place, working_dir: &Path) -> String {
+    match place {
+        Place::MainCheckout { project } => project.clone(),
+        Place::Worktree { project, worktree } => format!("{project}:{worktree}"),
+        Place::Folder => working_dir.to_string_lossy().into_owned(),
+    }
+}
+
+/// The `@` token that finds sessions where `dir` is now: its project,
+/// `project:worktree`, or its path, read from the disk now. `None` when that
+/// name is empty or holds whitespace, which a token can't.
+pub fn location_token(dir: &Path) -> Option<String> {
+    let location = Location::of(dir, &RecordedGit::default());
+    let name = location_name(&location.place, dir);
+    fits_a_token(&name).then(|| format!("@{name}"))
+}
+
+/// Whether `name` can end a token: it isn't empty and holds no whitespace,
+/// which would split it.
+fn fits_a_token(name: &str) -> bool {
+    !name.is_empty() && !name.chars().any(char::is_whitespace)
+}
+
+/// One way to finish the filter being typed at the end of a query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// The finished token as it would read, such as `is:pr` or `!#codex`,
+    /// keeping its `!` or `not:` and sigil as typed.
+    pub token: String,
+    /// The whole query with the token finished and a space after it.
+    pub query: String,
+    /// How many sessions `token` alone lists, by the same defaults as a
+    /// search.
+    pub count: usize,
+}
+
+/// The ways to finish the last token of `text` when it starts with `@`,
+/// `#`, `is:`, `!` or `not:` and nothing follows it, in this order: for `@`,
+/// the locations of the sessions that token lists, most recent first, a
+/// worktree's project before the worktree; for `#`, the `providers`
+/// starting with what was typed after it; for `is:`, the states that do;
+/// for a bare `!` or `not:`, those providers then those states. Empty when
+/// `text` ends in whitespace or with a word, or when the only way to finish
+/// the token is the token as typed.
+pub(crate) fn completions(
+    text: &str,
+    providers: &[&'static str],
+    sessions: &[Listed],
+) -> Vec<Completion> {
+    let Some(last) = pieces(text).pop().filter(|span| span.end == text.len()) else {
+        return Vec::new();
+    };
+    let typed_token = &text[last.start..];
+    let (negated, rest) = negation(typed_token);
+    let named = sigil(rest);
+    let typed = named.map_or(rest, |(_, name)| name);
+    // What is kept as typed: everything up to the name being finished.
+    let head = &text[..text.len() - typed.len()];
+    let prefix = &text[last.start..head.len()];
+    let starting = |name: &&str| fold(name).starts_with(&fold(typed));
+    let matching_providers = || providers.iter().copied().filter(starting);
+    let states = || State::ALL.into_iter().map(State::name).filter(starting);
+    let names: Vec<String> = match named {
+        Some((Sigil::Provider, _)) => matching_providers().map(String::from).collect(),
+        Some((Sigil::State, _)) => states().map(String::from).collect(),
+        Some((Sigil::Location, _)) => locations(&format!("@{typed}"), providers, sessions),
+        None if negated => matching_providers()
+            .chain(states())
+            .map(String::from)
+            .collect(),
+        None => return Vec::new(),
+    };
+    let completions: Vec<Completion> = names
+        .into_iter()
+        .filter(|name| fits_a_token(name))
+        .map(|name| {
+            let token = format!("{prefix}{name}");
+            Completion {
+                count: listed_by(&token, providers, sessions).len(),
+                query: format!("{head}{name} "),
+                token,
+            }
+        })
+        .collect();
+    // A token typed out in full is searched as it stands, not offered back.
+    match completions.as_slice() {
+        [only] if fold(&only.token) == fold(typed_token) => Vec::new(),
+        _ => completions,
+    }
+}
+
+/// The names `@` takes for the sessions `location` lists, in its order, a
+/// worktree's project before the worktree, each once.
+fn locations(location: &str, providers: &[&'static str], sessions: &[Listed]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for listed in listed_by(location, providers, sessions) {
+        let place = &listed.location.place;
+        let project = match place {
+            Place::Worktree { project, .. } => Some(project.clone()),
+            _ => None,
+        };
+        for name in project
+            .into_iter()
+            .chain([location_name(place, &listed.session.working_dir)])
+        {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// The `sessions` that `text`, holding no search words, lists, in a
+/// search's order and by its defaults.
+fn listed_by<'s>(
+    text: &str,
+    providers: &[&'static str],
+    sessions: &'s [Listed],
+) -> Vec<&'s Listed> {
+    let mut found: Vec<&Listed> = sessions.iter().collect();
+    Query::parse(text, providers).select(&mut found);
+    found
 }

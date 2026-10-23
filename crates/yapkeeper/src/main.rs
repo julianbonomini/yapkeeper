@@ -139,7 +139,9 @@ fn open_palette() -> ExitCode {
         Ok(catalog) => catalog,
         Err(error) => return data_failure(error),
     };
-    match palette::run(Palette::new(&catalog, Colour::from_env())) {
+    // A launch folder that is gone has no location to offer `Ctrl+L`.
+    let launch_dir = std::env::current_dir().unwrap_or_default();
+    match palette::run(Palette::new(&catalog, Colour::from_env(), &launch_dir)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("yapkeeper: {error}");

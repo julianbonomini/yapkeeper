@@ -29,7 +29,7 @@ use yapkeeper_claude::ClaudeCode;
 use yapkeeper_codex::Codex;
 
 pub use location::*;
-pub use query::{Query, State, Token, TokenKind};
+pub use query::{Completion, Query, State, Token, TokenKind, location_token};
 pub use yapkeeper_model::*;
 
 /// Where each provider keeps its history.
@@ -328,6 +328,15 @@ impl Catalog {
     /// the index can no longer be read.
     pub fn conversation(&self, session: &Session) -> Result<Vec<Message>, DataError> {
         self.index.conversation(&SessionKey::of(session))
+    }
+
+    /// The ways to finish the filter at the end of `text`, with this
+    /// catalog's providers and each one's session count; empty unless the
+    /// last token starts with `@`, `#`, `is:`, `!` or `not:`, nothing
+    /// follows it, so a space never offers any, and it isn't already the only
+    /// way to finish it.
+    pub fn completions(&self, text: &str) -> Vec<Completion> {
+        query::completions(text, &self.providers, &self.sessions)
     }
 
     /// Every session in the index, whether or not a query keeps it.

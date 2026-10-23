@@ -1,6 +1,6 @@
 # Yapkeeper v1
 
-Status: Rust, Ratatui, and SQLite selected; UI design and implementation workflow selection remain open.
+Status: Rust, Ratatui, and SQLite selected; interface settled by prototype (see [interface.md](interface.md)); implementation workflow selection remains open.
 
 ## Purpose
 
@@ -33,17 +33,17 @@ Proposed measurement targets are a usable cached launch within 200 ms and search
 
 Proposed refresh behavior: show cached results first, scan changed histories in the background on launch, refresh periodically while open, and provide a manual refresh action. The interval, process lifetime, cancellation behavior, and handling of a source change during indexing still need validation. A full archive parse must not be required on each launch.
 
-## UI prototype questions
+## Interface
 
-The prototype should answer these questions with synthetic sessions:
+The prototype settled the interface; [interface.md](interface.md) records the decisions and open questions. Answers to the questions the prototype was built for:
 
-- Does a global recent-session list with location filters work better than grouped project/worktree/folder browsing? Both must allow global search.
-- What session and location information is needed to distinguish similar conversations quickly?
-- Which conversation passages help the user recognize a session? A proposed starting point is the opening prompt and latest exchange while browsing, and a matching passage while searching.
-- How should the user find hidden sessions and distinguish orphaned, unavailable, and resumable sessions?
-- Can the dominant flow remain useful at 80 by 24 cells and in a 60-column tmux split? A narrow terminal needs a single-pane list/detail flow.
+- Global list or grouped browsing: a global command palette. Locations are filters typed into the query (`@project`, `@project:worktree`, `@path`), with a location list on `Tab`. Grouped project/worktree/folder browsing in a sidebar was tried and rejected.
+- Distinguishing similar sessions: title, location (`project › worktree` or path) with a kind icon, age, and an `orphaned` or `unavailable` label on the row; provider, message count, PRs, and full directory in the preview.
+- Recognizing a session: the provider recap when present, then matching passages while searching, then the opening prompt and latest exchange.
+- Hidden, orphaned, and unavailable sessions: found with `is:hidden`, `is:orphaned`, and `is:unavailable`. Orphans sort after live sessions by default and say so in the row and preview.
+- Narrow terminals: the preview drops below 80 columns and `→` opens the conversation; below 48×12 the palette shows a "terminal too small" message. Not yet reviewed on real data.
 
-The list and preview should occupy stable space. Use flat separators and avoid nested borders or repeated status markers. Keyboard navigation, terminal restoration, width-aware text handling, and a plain CLI mode are implementation requirements to validate.
+The list and preview should occupy stable space. Use flat separators and avoid nested borders or repeated status markers. Keyboard navigation, terminal restoration, width-aware text handling, and a plain CLI mode remain implementation requirements.
 
 ## Implementation and reuse
 
@@ -71,7 +71,7 @@ Construct provider arguments as an argument array with an explicit process worki
 
 The local planning item is `yapkeeper-v1`, using the Codex planning harness. Shared starter workflows are installed; no ready implementation goal or tickets have been created.
 
-Next work is a Rust/Ratatui UI prototype to settle the interaction model before slicing the implementation goal into tickets. Avoid maintaining a second Wayfinder decision map unless the planning grows beyond what this workspace can track.
+The UI prototype is done (see [interface.md](interface.md)). Next work is slicing the implementation goal into tickets. Avoid maintaining a second Wayfinder decision map unless the planning grows beyond what this workspace can track.
 
 Both workflows use Codex with GPT-6.1 Sol, high reasoning, and Fast mode. Reviews use fresh Codex steps; Claude remains an optional adversarial second opinion. Terminal UI work must use `tui-design`; use `emil-design-eng` only when its interaction-polish principles help within terminal constraints.
 

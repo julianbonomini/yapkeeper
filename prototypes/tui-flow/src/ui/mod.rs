@@ -29,8 +29,8 @@ pub struct Theme {
 }
 
 /// Prototype knobs, flipped from the settings pane.
-pub static THEME: AtomicUsize = AtomicUsize::new(0);
-pub static ICONS: AtomicUsize = AtomicUsize::new(0);
+pub static THEME: AtomicUsize = AtomicUsize::new(4);
+pub static ICONS: AtomicUsize = AtomicUsize::new(1);
 pub const THEMES: &[&str] = &[
     "Cyan, reversed selection",
     "Amber, soft selection",

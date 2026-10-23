@@ -1,5 +1,6 @@
 //! The index: Yapkeeper's rebuildable SQLite copy of every session and its
-//! searchable text, and finds the sessions whose text matches a query. It
+//! searchable text, and finds the sessions whose text contains every word
+//! of a query and none of its excluded words. It
 //! owns the schema and the refresh rule (which history files are opened, and
 //! from which byte), keeps each file's digest as text it never looks inside,
 //! and hides how text is found fast: full-text tables, the trigram limit and
@@ -22,7 +23,7 @@ use yapkeeper_model::{
     SourceDigest, assemble,
 };
 
-use crate::query::{self, Query};
+use crate::query::{self, Query, Word};
 use crate::{IndexError, Listed, Listing, Location};
 
 const SCHEMA_VERSION: i64 = 2;
@@ -106,7 +107,8 @@ const PHRASE: &str = r#"'"' || replace(?1, '"', '""') || '"'"#;
 
 /// Brings the index at `path` up to date with every source of `adapters`,
 /// opening only files that changed since the last call, and returns its
-/// sessions that match `query`, with their locations read from the disk now.
+/// sessions that match `query`'s words, in no particular order, with their
+/// locations read from the disk now.
 pub(crate) fn refresh(
     adapters: &[&dyn Adapter],
     path: &Path,
@@ -314,12 +316,6 @@ fn refresh_in(
     }
     let indexed = sessions.len();
     retain_matching(transaction, query, &mut sessions)?;
-    sessions.sort_by(|a, b| {
-        b.last_active
-            .cmp(&a.last_active)
-            .then_with(|| a.provider.cmp(b.provider))
-            .then_with(|| a.id.cmp(&b.id))
-    });
     Ok(Listing {
         sessions: sessions
             .into_iter()
@@ -493,9 +489,9 @@ impl SessionKey {
     }
 }
 
-/// Keeps the `sessions` that match every word of `query`, in their order:
-/// a session matches a word when its title, its recap or one of its
-/// messages in scope does.
+/// Keeps the `sessions` that match every word of `query` and none of its
+/// excluded words, in their order: a session matches a word when its title,
+/// its recap or one of its messages in scope does.
 fn retain_matching(
     transaction: &Transaction,
     query: &Query,
@@ -511,55 +507,74 @@ fn retain_matching(
         "messages.role IN ('user', 'assistant') AND threads.thread = threads.session_id"
     };
     for word in words {
-        let mut unmatched: HashSet<SessionKey> = sessions.iter().map(SessionKey::of).collect();
-        // Trigram rows hold three-character sequences, so a shorter word
-        // can't be looked up, and every row in scope is read instead.
-        // Bound as `?1` only in the SQL that looks it up.
-        let lookup = (word.key().chars().count() >= 3).then_some(word.key());
-        let (session_rows, message_rows, matching) = match lookup {
-            Some(_) => (
-                format!(
-                    "session_text JOIN sessions ON sessions.row_id = session_text.rowid
-                    WHERE session_text MATCH {PHRASE}"
-                ),
-                "message_text JOIN messages ON messages.id = message_text.rowid",
-                format!("AND message_text MATCH {PHRASE}"),
-            ),
-            None => ("sessions".to_string(), "messages", String::new()),
-        };
-        let mut statement = transaction.prepare(&format!(
-            "SELECT sessions.provider, sessions.id, sessions.title, sessions.recap
-            FROM {session_rows}"
-        ))?;
-        let mut rows = statement.query(params_from_iter(lookup))?;
-        while let Some(row) = rows.next()? {
-            let key = SessionKey::from_row(row)?;
-            let title: String = row.get(2)?;
-            let recap: Option<String> = row.get(3)?;
-            if unmatched.contains(&key)
-                && (word.matches(&title) || recap.is_some_and(|recap| word.matches(&recap)))
-            {
-                unmatched.remove(&key);
-            }
-        }
-        let mut statement = transaction.prepare(&format!(
-            "SELECT threads.provider, threads.session_id, messages.text
-            FROM {message_rows}
-            JOIN sources ON sources.path = messages.source_path
-            JOIN threads ON threads.provider = sources.provider
-                AND threads.thread = sources.thread
-            WHERE {scope} {matching}"
-        ))?;
-        let mut rows = statement.query(params_from_iter(lookup))?;
-        while let Some(row) = rows.next()? {
-            let key = SessionKey::from_row(row)?;
-            if unmatched.contains(&key) && word.matches(&row.get::<_, String>(2)?) {
-                unmatched.remove(&key);
-            }
-        }
-        sessions.retain(|session| !unmatched.contains(&SessionKey::of(session)));
+        let matched = sessions_matching(transaction, word, scope, sessions)?;
+        sessions.retain(|session| matched.contains(&SessionKey::of(session)));
+    }
+    for word in query.excluded_words() {
+        let matched = sessions_matching(transaction, word, scope, sessions)?;
+        sessions.retain(|session| !matched.contains(&SessionKey::of(session)));
     }
     Ok(())
+}
+
+/// Which of `sessions` match `word` in their title, recap or a message
+/// that `scope`, an SQL condition on `messages` and `threads`, admits.
+fn sessions_matching(
+    transaction: &Transaction,
+    word: &Word,
+    scope: &str,
+    sessions: &[Session],
+) -> Result<HashSet<SessionKey>, Cause> {
+    let mut unmatched: HashSet<SessionKey> = sessions.iter().map(SessionKey::of).collect();
+    let mut matched = HashSet::new();
+    // Trigram rows hold three-character sequences, so a shorter word
+    // can't be looked up, and every row in scope is read instead.
+    // Bound as `?1` only in the SQL that looks it up.
+    let lookup = (word.key().chars().count() >= 3).then_some(word.key());
+    let (session_rows, message_rows, match_clause) = match lookup {
+        Some(_) => (
+            format!(
+                "session_text JOIN sessions ON sessions.row_id = session_text.rowid
+                WHERE session_text MATCH {PHRASE}"
+            ),
+            "message_text JOIN messages ON messages.id = message_text.rowid",
+            format!("AND message_text MATCH {PHRASE}"),
+        ),
+        None => ("sessions".to_string(), "messages", String::new()),
+    };
+    let mut statement = transaction.prepare(&format!(
+        "SELECT sessions.provider, sessions.id, sessions.title, sessions.recap
+        FROM {session_rows}"
+    ))?;
+    let mut rows = statement.query(params_from_iter(lookup))?;
+    while let Some(row) = rows.next()? {
+        let key = SessionKey::from_row(row)?;
+        let title: String = row.get(2)?;
+        let recap: Option<String> = row.get(3)?;
+        if unmatched.contains(&key)
+            && (word.matches(&title) || recap.is_some_and(|recap| word.matches(&recap)))
+        {
+            unmatched.remove(&key);
+            matched.insert(key);
+        }
+    }
+    let mut statement = transaction.prepare(&format!(
+        "SELECT threads.provider, threads.session_id, messages.text
+        FROM {message_rows}
+        JOIN sources ON sources.path = messages.source_path
+        JOIN threads ON threads.provider = sources.provider
+            AND threads.thread = sources.thread
+        WHERE {scope} {match_clause}"
+    ))?;
+    let mut rows = statement.query(params_from_iter(lookup))?;
+    while let Some(row) = rows.next()? {
+        let key = SessionKey::from_row(row)?;
+        if unmatched.contains(&key) && word.matches(&row.get::<_, String>(2)?) {
+            unmatched.remove(&key);
+            matched.insert(key);
+        }
+    }
+    Ok(matched)
 }
 
 /// `adapter`'s sessions as the index stores them.

@@ -11,7 +11,10 @@ use std::time::SystemTime;
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use yapkeeper::{Availability, DataDir, IndexError, Listed, Place, Query, Roots, rebuild, search};
+use yapkeeper::{
+    Availability, DataDir, IndexError, Listed, Place, Query, Roots, State, TokenKind, rebuild,
+    search,
+};
 
 /// Wide enough for most titles; what follows may wrap on an 80-column terminal.
 const MAX_TITLE_WIDTH: usize = 48;
@@ -35,14 +38,26 @@ enum Command {
     /// List Claude Code and Codex sessions, most recent first
     ///
     /// Each line shows a session's title, provider, age, an orphaned or unavailable
-    /// label when one applies, and where it ran.
+    /// label when one applies, and where it ran. Sessions in temp folders are left
+    /// out; yapkeeper search is:temp lists them. Orphaned sessions come after the
+    /// rest, each group most recent first.
     List,
-    /// Find sessions by what was said
+    /// Find sessions by what was said, where they ran and their state
     ///
     /// Words match titles, messages and recaps as substrings; every word must
     /// match. A word with an uppercase letter matches case. --tools also
     /// searches tool calls, tool output and subagent transcripts. Put -- before
     /// a word that starts with -.
+    ///
+    /// Filters must all match too. @where matches a project, project:worktree or
+    /// any part of the path. #provider matches #claude or #codex. is:state matches
+    /// is:orphaned, is:temp, is:git, is:folder, is:pr, is:recap, is:unavailable or
+    /// is:hidden. !x or not:x excludes a filter, a provider or state named bare
+    /// (!codex, !temp) or a word (!flaky); quote ! for the shell, as in '!codex'.
+    /// A space ends a filter, so "is pr" is two words.
+    ///
+    /// Sessions in temp folders are left out unless the query has is:temp.
+    /// Orphaned sessions come after the rest, each group most recent first.
     Search(Search),
     /// Print where Yapkeeper keeps its index and preferences
     Paths,
@@ -56,9 +71,9 @@ struct Search {
     /// Also search tool calls, tool output and subagent transcripts
     #[arg(long)]
     tools: bool,
-    /// Words every listed session contains; none lists every session
+    /// Words and filters every listed session matches
     #[arg(num_args = 0..)]
-    words: Vec<String>,
+    query: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -149,13 +164,14 @@ fn print_rebuild() -> ExitCode {
 }
 
 /// The sessions `search` finds, one line each, in `list`'s format.
-fn print_sessions(Search { tools, words }: &Search) -> ExitCode {
+fn print_sessions(Search { tools, query }: &Search) -> ExitCode {
     let (roots, data) = match environment() {
         Ok(environment) => environment,
         Err(code) => return code,
     };
-    let words = words.join(" ");
-    let query = Query::parse(&words).including_tools(*tools);
+    let text = query.join(" ");
+    let providers = roots.providers();
+    let query = Query::parse(&text, &providers).including_tools(*tools);
     let listing = match search(&roots, &data, &query) {
         Ok(listing) => listing,
         Err(error) => return index_failure(error),
@@ -164,12 +180,28 @@ fn print_sessions(Search { tools, words }: &Search) -> ExitCode {
         for dir in &listing.searched {
             eprintln!("yapkeeper: no sessions found in {}", dir.display());
         }
+    } else if listing.sessions.is_empty()
+        && query
+            .tokens()
+            .iter()
+            .all(|token| token.kind == TokenKind::Incomplete)
+    {
+        // A query that asks nothing can only have lost everything to the
+        // temp default.
+        eprintln!(
+            "yapkeeper: no sessions outside temp folders; yapkeeper search is:temp lists them"
+        );
     } else if listing.sessions.is_empty() {
         eprintln!(
             "yapkeeper: no sessions match \"{}\"",
-            without_controls(&words)
+            without_controls(&text)
         );
-        if !tools {
+        // `--tools` only finds more sessions for a word they must contain.
+        let has_words = query
+            .tokens()
+            .iter()
+            .any(|token| token.kind == TokenKind::Word && !token.negated);
+        if !tools && has_words {
             eprintln!(
                 "yapkeeper: --tools also searches tool calls, tool output and subagent transcripts"
             );
@@ -226,6 +258,21 @@ fn print_sessions(Search { tools, words }: &Search) -> ExitCode {
         .is_err()
         {
             break;
+        }
+    }
+    // After the results, so the fix is the last thing read.
+    for token in query.tokens() {
+        let piece = without_controls(&text[token.span.clone()]);
+        match token.kind {
+            TokenKind::Provider(None) => eprintln!(
+                "yapkeeper: \"{piece}\" names no provider ({})",
+                providers.join(", ")
+            ),
+            TokenKind::State(None) => eprintln!(
+                "yapkeeper: \"{piece}\" names no state ({})",
+                State::ALL.map(State::name).join(", ")
+            ),
+            _ => {}
         }
     }
     ExitCode::SUCCESS

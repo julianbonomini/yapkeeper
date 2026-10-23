@@ -8,9 +8,9 @@ use std::path::Path;
 
 #[cfg(unix)]
 use support::Locked;
-use support::{main_checkout, repo_with_worktree};
+use support::{main_checkout, repo_with_worktree, temp_dir};
 use tempfile::TempDir;
-use yapkeeper::{Availability, DataDir, Location, Place, RecordedGit, Roots, list};
+use yapkeeper::{Availability, DataDir, Location, Place, Query, RecordedGit, Roots, search};
 
 mod support;
 
@@ -67,9 +67,13 @@ impl Histories {
         .unwrap();
     }
 
-    /// The location of the only session listed.
+    /// The location of the only session listed. Every session here is in a
+    /// temp folder, so `is:temp` finds them all.
     fn location(&self) -> Location {
-        let listing = list(&self.roots(), &DataDir::at(self.dir.path().join("data"))).unwrap();
+        let roots = self.roots();
+        let query = Query::parse("is:temp", &roots.providers());
+        let data = DataDir::at(self.dir.path().join("data"));
+        let listing = search(&roots, &data, &query).unwrap();
         let [listed] = listing.sessions.as_slice() else {
             panic!("expected one session, got {}", listing.sessions.len());
         };
@@ -79,7 +83,7 @@ impl Histories {
 
 #[test]
 fn a_session_in_a_main_checkout_is_named_after_its_folder() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let repo = main_checkout(tmp.path());
     let histories = Histories::new();
     histories.claude_session(&repo.join("src"), None);
@@ -96,7 +100,7 @@ fn a_session_in_a_main_checkout_is_named_after_its_folder() {
 
 #[test]
 fn a_session_in_a_linked_worktree_is_grouped_under_its_main_checkouts_project() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let (_, worktree) = repo_with_worktree(tmp.path());
     let histories = Histories::new();
     histories.claude_session(&worktree, None);
@@ -114,7 +118,7 @@ fn a_session_in_a_linked_worktree_is_grouped_under_its_main_checkouts_project() 
 
 #[test]
 fn a_session_outside_any_repo_is_a_folder() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let folder = tmp.path().join("notes");
     fs::create_dir(&folder).unwrap();
     let histories = Histories::new();
@@ -127,7 +131,7 @@ fn a_session_outside_any_repo_is_a_folder() {
 
 #[test]
 fn deleting_a_directory_after_it_was_listed_makes_its_session_orphaned() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let (_, worktree) = repo_with_worktree(tmp.path());
     let histories = Histories::new();
     histories.claude_session(&worktree, None);
@@ -140,7 +144,7 @@ fn deleting_a_directory_after_it_was_listed_makes_its_session_orphaned() {
 #[cfg(unix)]
 #[test]
 fn a_session_under_a_directory_it_may_not_enter_is_unavailable_not_orphaned() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let locked = tmp.path().join("locked");
     fs::create_dir_all(locked.join("inner")).unwrap();
     let histories = Histories::new();
@@ -156,7 +160,7 @@ fn a_session_under_a_directory_it_may_not_enter_is_unavailable_not_orphaned() {
 #[cfg(unix)]
 #[test]
 fn a_session_in_a_directory_it_may_not_read_is_unavailable_not_orphaned() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let locked = tmp.path().join("locked");
     fs::create_dir(&locked).unwrap();
     let histories = Histories::new();
@@ -187,7 +191,7 @@ fn only_directories_under_a_system_temp_folder_are_temp() {
 
 #[test]
 fn an_orphaned_codex_session_takes_its_project_from_the_recorded_remote() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let histories = Histories::new();
     histories.codex_session(
         &tmp.path().join("gone/billing-retry"),
@@ -207,7 +211,7 @@ fn an_orphaned_codex_session_takes_its_project_from_the_recorded_remote() {
 
 #[test]
 fn an_orphaned_claude_session_takes_its_worktree_from_a_branch_matching_its_folder() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let repo = main_checkout(tmp.path());
     let gone = repo.join("billing-retry");
     let histories = Histories::new();
@@ -234,7 +238,7 @@ fn an_orphaned_claude_session_takes_its_worktree_from_a_branch_matching_its_fold
 
 #[test]
 fn an_orphaned_session_with_nothing_to_infer_from_falls_back_to_its_folder() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let histories = Histories::new();
     histories.claude_session(&tmp.path().join("gone/plain"), None);
 
@@ -250,7 +254,7 @@ fn an_orphaned_session_in_a_worktree_folder_layout_takes_its_names_from_the_path
         ".tool/worktrees/acme-api/billing-retry",
         "acme-api/.claude/worktrees/billing-retry/src",
     ] {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = temp_dir();
         let histories = Histories::new();
         histories.claude_session(&tmp.path().join(layout), None);
 
@@ -265,4 +269,36 @@ fn an_orphaned_session_in_a_worktree_folder_layout_takes_its_names_from_the_path
             "{layout}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn is_unavailable_finds_a_session_whose_directory_it_may_not_enter() {
+    let histories = Histories::new();
+    let tmp = temp_dir();
+    let locked = tmp.path().join("locked");
+    fs::create_dir_all(locked.join("inner")).unwrap();
+    let open = tmp.path().join("open");
+    fs::create_dir(&open).unwrap();
+    histories.claude_session(&locked.join("inner"), None);
+    histories.codex_session(&open, "{}");
+    let locked = Locked::new(&locked);
+    if !locked.denies_access() {
+        return;
+    }
+
+    let roots = histories.roots();
+    let query = Query::parse("is:temp is:unavailable", &roots.providers());
+    let listing = search(
+        &roots,
+        &DataDir::at(histories.dir.path().join("data")),
+        &query,
+    )
+    .unwrap();
+    let providers: Vec<&str> = listing
+        .sessions
+        .iter()
+        .map(|listed| listed.session.provider)
+        .collect();
+    assert_eq!(providers, ["claude"]);
 }

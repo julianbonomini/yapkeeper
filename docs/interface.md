@@ -134,8 +134,8 @@ Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` wh
 
 | Command | stdout | stderr |
 |---|---|---|
-| `yapkeeper list` | One line per session, most recent first | No sessions found, malformed lines skipped |
-| `yapkeeper search [--tools] <words>…` | Sessions matching every word, one line each, as `list` | No sessions found, no sessions match (with a `--tools` hint), malformed lines skipped |
+| `yapkeeper list` | One line per session outside temp folders, orphaned last, each group most recent first | No sessions found, no sessions outside temp folders (with the `is:temp` hint), malformed lines skipped |
+| `yapkeeper search [--tools] <query>…` | Sessions matching every word and filter of the query language, one line each, as `list` | No sessions found, no sessions match (with a `--tools` hint when the query has words), no sessions outside temp folders (with the `is:temp` hint), unknown provider or state names (with the valid names), malformed lines skipped |
 | `yapkeeper paths` | `index` and `preferences`, each followed by its path in a space-aligned column | Nothing |
 | `yapkeeper rebuild` | Nothing | `yapkeeper: rebuilt the index at <path> (N sessions)` |
 

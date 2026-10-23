@@ -8,6 +8,21 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use tempfile::TempDir;
+use yapkeeper::{Location, RecordedGit};
+
+/// A fresh tempdir, checked to sit under a system temp folder: sessions in
+/// it are temp, so the tests find them with `is:temp`.
+pub fn temp_dir() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        Location::of(dir.path(), &RecordedGit::default()).temp,
+        "{} is not under a system temp folder; unset TMPDIR or point it at /tmp",
+        dir.path().display()
+    );
+    dir
+}
+
 /// Runs `git` in `dir` with an identity of its own, so the tests don't depend
 /// on the machine's Git configuration.
 fn git(dir: &Path, args: &[&str]) {

@@ -8,7 +8,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use yapkeeper::{Availability, DataDir, Listing, Location, Roots, Session, list, rebuild};
+use yapkeeper::{
+    Availability, DataDir, Listing, Location, Query, Roots, Session, list, rebuild, search,
+};
 
 /// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and data directory, each empty.
 struct Histories {
@@ -300,14 +302,20 @@ fn deleting_a_working_directory_orphans_its_session_without_reading_history() {
     let dir = histories.dir.path().join("work");
     fs::create_dir(&dir).unwrap();
     histories.claude_session(id, "A synthetic prompt", &dir.display().to_string());
-    let listing = histories.list();
+    // The directory is in a temp folder, so `is:temp` keeps its session.
+    let in_temp = || {
+        let roots = histories.roots();
+        let query = Query::parse("is:temp", &roots.providers());
+        search(&roots, &histories.data(), &query).unwrap()
+    };
+    let listing = in_temp();
     let [listed] = listing.sessions.as_slice() else {
         panic!("expected one session");
     };
     assert_eq!(listed.location.availability, Availability::Available);
 
     fs::remove_dir(&dir).unwrap();
-    let listing = histories.list();
+    let listing = in_temp();
     assert_eq!(listing.files_read, 0);
     let [listed] = listing.sessions.as_slice() else {
         panic!("expected one session");

@@ -9,7 +9,7 @@ use std::process::{Command, Output};
 
 #[cfg(unix)]
 use support::Locked;
-use support::repo_with_worktree;
+use support::{repo_with_worktree, temp_dir};
 
 mod support;
 
@@ -277,7 +277,7 @@ fn list_cuts_long_titles_to_48_cells_and_lines_up_the_columns() {
 
 #[test]
 fn list_shows_the_home_directory_as_a_tilde() {
-    let home = tempfile::tempdir().unwrap();
+    let home = temp_dir();
     write_home_session(
         home.path(),
         "aaaaaaaa-0000-4000-8000-000000000020",
@@ -286,7 +286,7 @@ fn list_shows_the_home_directory_as_a_tilde() {
         "",
     );
 
-    let output = yapkeeper(&["list"], home.path(), None);
+    let output = yapkeeper(&["search", "is:temp"], home.path(), None);
     assert!(output.status.success(), "{}", stderr(&output));
     let stdout = stdout(&output);
     assert!(stdout.ends_with("  ~/code\n"), "{stdout:?}");
@@ -320,7 +320,7 @@ fn line_titled<'a>(stdout: &'a str, title: &str) -> &'a str {
 #[test]
 fn list_shows_a_worktree_as_project_and_worktree_and_a_main_checkout_as_project() {
     let home = tempfile::tempdir().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let (repo, worktree) = repo_with_worktree(tmp.path());
     write_home_session(
         home.path(),
@@ -337,7 +337,7 @@ fn list_shows_a_worktree_as_project_and_worktree_and_a_main_checkout_as_project(
         "",
     );
 
-    let output = yapkeeper(&["list"], home.path(), None);
+    let output = yapkeeper(&["search", "is:temp"], home.path(), None);
     assert!(output.status.success(), "{}", stderr(&output));
     let stdout = stdout(&output);
     for (title, location) in [
@@ -359,7 +359,7 @@ fn list_shows_a_worktree_as_project_and_worktree_and_a_main_checkout_as_project(
 #[test]
 fn list_labels_a_session_whose_directory_is_gone_as_orphaned() {
     let home = tempfile::tempdir().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let gone = tmp.path().join("gone");
     write_home_session(
         home.path(),
@@ -369,7 +369,7 @@ fn list_labels_a_session_whose_directory_is_gone_as_orphaned() {
         "",
     );
 
-    let output = yapkeeper(&["list"], home.path(), None);
+    let output = yapkeeper(&["search", "is:temp"], home.path(), None);
     assert!(output.status.success(), "{}", stderr(&output));
     let stdout = stdout(&output);
     let line = line_titled(&stdout, "Work that was deleted");
@@ -384,7 +384,7 @@ fn list_labels_a_session_whose_directory_is_gone_as_orphaned() {
 #[test]
 fn list_labels_a_session_whose_directory_it_may_not_enter_as_unavailable() {
     let home = tempfile::tempdir().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let locked = tmp.path().join("locked");
     fs::create_dir_all(locked.join("inner")).unwrap();
     write_home_session(
@@ -399,7 +399,7 @@ fn list_labels_a_session_whose_directory_it_may_not_enter_as_unavailable() {
         return;
     }
 
-    let output = yapkeeper(&["list"], home.path(), None);
+    let output = yapkeeper(&["search", "is:temp"], home.path(), None);
     assert!(output.status.success(), "{}", stderr(&output));
     let stdout = stdout(&output);
     let line = line_titled(&stdout, "Work behind a locked door");
@@ -410,7 +410,7 @@ fn list_labels_a_session_whose_directory_it_may_not_enter_as_unavailable() {
 #[test]
 fn list_leaves_out_the_label_column_when_every_session_is_available() {
     let home = tempfile::tempdir().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_dir();
     let (repo, _) = repo_with_worktree(tmp.path());
     let folder = tmp.path().join("notes");
     fs::create_dir(&folder).unwrap();
@@ -429,7 +429,7 @@ fn list_leaves_out_the_label_column_when_every_session_is_available() {
         "",
     );
 
-    let output = yapkeeper(&["list"], home.path(), None);
+    let output = yapkeeper(&["search", "is:temp"], home.path(), None);
     assert!(output.status.success(), "{}", stderr(&output));
     let stdout = stdout(&output);
     let folder = folder.display().to_string();
@@ -729,10 +729,167 @@ fn search_help_describes_words_case_tools_and_the_double_dash() {
         "tool output",
         "subagent transcripts",
         "Put -- before a word that starts with -",
+        "@where",
+        "#provider",
+        "is:state",
+        "not:x",
+        "quote ! for the shell",
+        "left out unless the query has is:temp",
+        "Orphaned sessions come after the rest",
     ] {
         assert!(help.contains(phrase), "{phrase:?} is missing from {help}");
     }
 
     let output = yapkeeper(&["--help"], home.path(), None);
     assert!(stdout(&output).contains("search"), "{}", stdout(&output));
+}
+
+#[test]
+fn search_names_the_valid_choices_for_an_unknown_provider_or_state_and_succeeds() {
+    let home = tempfile::tempdir().unwrap();
+    let output = yapkeeper_over_fixtures(&["search", "#pi", "is:bogus"], home.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    let stderr = stderr(&output);
+    for hint in [
+        "yapkeeper: \"#pi\" names no provider (claude, codex)\n",
+        "yapkeeper: \"is:bogus\" names no state (orphaned, temp, git, folder, pr, recap, unavailable, hidden)\n",
+    ] {
+        assert!(stderr.contains(hint), "{hint:?} is missing from {stderr}");
+    }
+    // No word to find in tool-level text, so `--tools` can't help.
+    assert!(!stderr.contains("--tools"), "{stderr}");
+}
+
+#[test]
+fn list_leaves_out_temp_sessions_and_search_is_temp_prints_them() {
+    let home = tempfile::tempdir().unwrap();
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000206",
+        "Try it out",
+        Path::new("/tmp/yapkeeper-synthetic-scratch"),
+        "",
+    );
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000207",
+        "Keep this",
+        Path::new("/synthetic/kept"),
+        "",
+    );
+
+    let list = yapkeeper(&["list"], home.path(), None);
+    assert!(list.status.success(), "{}", stderr(&list));
+    let stdout_of_list = stdout(&list);
+    assert_eq!(stdout_of_list.lines().count(), 1, "{stdout_of_list}");
+    assert!(
+        stdout_of_list.starts_with("Keep this  "),
+        "{stdout_of_list}"
+    );
+
+    let temp = yapkeeper(&["search", "is:temp"], home.path(), None);
+    assert!(temp.status.success(), "{}", stderr(&temp));
+    let stdout = stdout(&temp);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(
+        stdout.starts_with("Try it out  claude  ")
+            && stdout.ends_with("  orphaned  /tmp/yapkeeper-synthetic-scratch\n"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn search_by_provider_prints_only_that_providers_lines_in_the_format_of_list() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = Path::new("/synthetic/kept");
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000208",
+        "Retry the claude upload",
+        cwd,
+        "",
+    );
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000209",
+        "Tidy the notes",
+        cwd,
+        "",
+    );
+    // Claude Code from `$HOME/.claude`, Codex from the committed fixtures.
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+            .args(args)
+            .env_clear()
+            .env("HOME", home.path())
+            .env("CODEX_HOME", CODEX_FIXTURES)
+            .output()
+            .unwrap()
+    };
+    let words = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let list = run(&["list"]);
+    assert!(list.status.success(), "{}", stderr(&list));
+    let list = stdout(&list);
+
+    let output = run(&["search", "!codex", "retry"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout_of_search = stdout(&output);
+    assert_eq!(stdout_of_search.lines().count(), 1, "{stdout_of_search}");
+    assert!(
+        stdout_of_search.starts_with("Retry the claude upload  claude  ")
+            && stdout_of_search.ends_with("  orphaned  /synthetic/kept\n"),
+        "{stdout_of_search}"
+    );
+
+    let output = run(&["search", "#claude"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let expected: Vec<String> = list
+        .lines()
+        .filter(|line| words(line).contains(" claude "))
+        .map(words)
+        .collect();
+    assert_eq!(expected.len(), 2, "{list}");
+    let found: Vec<String> = stdout(&output).lines().map(words).collect();
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn list_with_only_temp_sessions_says_how_to_list_them() {
+    let home = temp_dir();
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000210",
+        "Work in a temp folder",
+        &home.path().join("scratch"),
+        "",
+    );
+
+    let output = yapkeeper(&["list"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "yapkeeper: no sessions outside temp folders; yapkeeper search is:temp lists them\n"
+    );
+}
+
+#[test]
+fn search_with_only_an_unfinished_filter_over_temp_sessions_says_how_to_list_them() {
+    let home = temp_dir();
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000211",
+        "Work in a temp folder",
+        &home.path().join("scratch"),
+        "",
+    );
+
+    let output = yapkeeper(&["search", "@"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "yapkeeper: no sessions outside temp folders; yapkeeper search is:temp lists them\n"
+    );
 }

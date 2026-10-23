@@ -1,8 +1,9 @@
 //! Sessions from every provider, merged and ordered, each with where it ran.
 //! Each provider's format stays inside its adapter; this crate knows where
 //! each one is rooted and where Yapkeeper keeps its own files, keeps the
-//! index of every session up to date, finds sessions by what was said, and
-//! reads each session's location from the disk when it is listed.
+//! index of every session up to date, finds sessions by what was said and
+//! by the query language's filters, and reads each session's location from
+//! the disk when it is listed.
 
 #![forbid(unsafe_code)]
 
@@ -18,7 +19,7 @@ use yapkeeper_claude::ClaudeCode;
 use yapkeeper_codex::Codex;
 
 pub use location::*;
-pub use query::Query;
+pub use query::{Query, State, Token, TokenKind};
 pub use yapkeeper_model::*;
 
 /// Where each provider keeps its history.
@@ -36,6 +37,23 @@ impl Roots {
             codex: yapkeeper_codex::home_dir()?,
         })
     }
+
+    /// The provider name of each adapter `search` reads, in search order,
+    /// such as `["claude", "codex"]`. Opens nothing.
+    pub fn providers(&self) -> Vec<&'static str> {
+        adapters(self)
+            .iter()
+            .map(|adapter| adapter.provider())
+            .collect()
+    }
+}
+
+/// An adapter for each provider, reading from `roots`.
+fn adapters(roots: &Roots) -> [Box<dyn Adapter>; 2] {
+    [
+        Box::new(ClaudeCode::at(roots.claude.clone())),
+        Box::new(Codex::at(roots.codex.clone())),
+    ]
 }
 
 /// Where Yapkeeper keeps its own files: `$XDG_DATA_HOME/yapkeeper` when that
@@ -80,7 +98,7 @@ impl DataDir {
 /// Sessions from every provider, with what was skipped, where it looked and
 /// what it read.
 pub struct Listing {
-    /// Most recent first.
+    /// Orphaned last; each group most recent first.
     pub sessions: Vec<Listed>,
     /// Every session in the index, whether or not the query kept it.
     pub indexed: usize,
@@ -125,21 +143,27 @@ impl Error for IndexError {
 }
 
 /// Brings the index up to date, opening only history files that changed
-/// since the last call, then returns every session in it, most recent
-/// `last_active` first (ties by provider, then id), each with its location
+/// since the last call, then returns every session in it outside temp
+/// folders and not hidden, in `search`'s order, each with its location
 /// read from the disk now. A missing, corrupt or old index is recreated.
 /// Fails only when the index can't be created or written.
 pub fn list(roots: &Roots, data: &DataDir) -> Result<Listing, IndexError> {
     search(roots, data, &Query::default())
 }
 
-/// Brings the index up to date as `list` does, then returns `list`'s sessions
-/// that match `query`, in `list`'s order; the other fields are as `list`
-/// gives them. Fails only as `list` does.
+/// Brings the index up to date as `list` does, then returns the sessions
+/// that match every token of `query`. Temp sessions are left out unless
+/// the query has a non-negated `is:temp`, and hidden ones unless it has
+/// `is:hidden`, which matches nothing until hides exist. Orphaned sessions
+/// come after the rest, each group most recent `last_active` first, ties
+/// by provider then id. The other fields are as `list` gives them. Fails
+/// only as `list` does.
 pub fn search(roots: &Roots, data: &DataDir, query: &Query) -> Result<Listing, IndexError> {
-    let claude = ClaudeCode::at(roots.claude.clone());
-    let codex = Codex::at(roots.codex.clone());
-    index::refresh(&[&claude, &codex], &data.index(), query)
+    let adapters = adapters(roots);
+    let adapters: Vec<&dyn Adapter> = adapters.iter().map(Box::as_ref).collect();
+    let mut listing = index::refresh(&adapters, &data.index(), query)?;
+    query.select(&mut listing.sessions);
+    Ok(listing)
 }
 
 /// Deletes the index and builds it again from every history file, then

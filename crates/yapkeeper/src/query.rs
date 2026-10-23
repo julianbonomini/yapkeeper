@@ -12,7 +12,7 @@
 
 use std::ops::Range;
 
-use crate::{Availability, Listed, Place};
+use crate::{Availability, LeftOut, Listed, Place};
 
 /// What the person typed, read as the query language. A session must pass
 /// every filter and contain every search word, in its title, recap or
@@ -110,8 +110,7 @@ impl State {
             State::Folder => location.place == Place::Folder,
             State::Pr => !listed.session.linked_prs.is_empty(),
             State::Recap => listed.session.recap.is_some(),
-            // Until hides exist, no session is hidden.
-            State::Hidden => false,
+            State::Hidden => listed.hidden,
         }
     }
 
@@ -137,7 +136,7 @@ impl Query {
                     None => (false, piece),
                 },
             };
-            let Reading { kind, filter } = read(rest, negated, providers);
+            let Parsed { kind, filter } = parse_rest(rest, negated, providers);
             match filter {
                 Some(filter) => query.conditions.push(Condition { filter, negated }),
                 None if kind != TokenKind::Word => {}
@@ -182,17 +181,26 @@ impl Query {
     /// then orders them: orphaned last, each group most recent
     /// `last_active` first, ties by provider then id. Temp sessions are
     /// left out unless the query has a non-negated `is:temp`, and hidden
-    /// ones unless it has `is:hidden`.
-    pub(crate) fn select(&self, sessions: &mut Vec<Listed>) {
-        let temp_asked = self.conditions.iter().any(|condition| {
-            !condition.negated && condition.filter == Filter::State(Some(State::Temp))
-        });
+    /// ones unless it has `is:hidden`; returns which of the two defaults
+    /// left out a session every filter admits.
+    pub(crate) fn select(&self, sessions: &mut Vec<Listed>) -> LeftOut {
+        let asked = |state| {
+            self.conditions.iter().any(|condition| {
+                !condition.negated && condition.filter == Filter::State(Some(state))
+            })
+        };
+        let (temp_asked, hidden_asked) = (asked(State::Temp), asked(State::Hidden));
+        let mut left_out = LeftOut::default();
         sessions.retain(|listed| {
-            (temp_asked || !State::Temp.of(listed))
-                && self
-                    .conditions
-                    .iter()
-                    .all(|condition| condition.filter.admits(listed) != condition.negated)
+            let admitted = self
+                .conditions
+                .iter()
+                .all(|condition| condition.filter.admits(listed) != condition.negated);
+            let temp = !temp_asked && State::Temp.of(listed);
+            let hidden = !hidden_asked && State::Hidden.of(listed);
+            left_out.temp |= admitted && temp;
+            left_out.hidden |= admitted && hidden;
+            admitted && !temp && !hidden
         });
         sessions.sort_by(|a, b| {
             State::Orphaned
@@ -202,6 +210,7 @@ impl Query {
                 .then_with(|| a.session.provider.cmp(b.session.provider))
                 .then_with(|| a.session.id.cmp(&b.session.id))
         });
+        left_out
     }
 }
 
@@ -244,7 +253,7 @@ impl Filter {
 }
 
 /// What the rest of a token, after any `!` or `not:`, was read as.
-struct Reading {
+struct Parsed {
     kind: TokenKind,
     /// What the token asks of a session; `None` for a word or an
     /// incomplete token.
@@ -253,7 +262,7 @@ struct Reading {
 
 /// What `rest` is read as. A bare provider or state name is a filter only
 /// when `negated`; otherwise it is a word.
-fn read(rest: &str, negated: bool, providers: &[&'static str]) -> Reading {
+fn parse_rest(rest: &str, negated: bool, providers: &[&'static str]) -> Parsed {
     let provider = |name: &str| {
         let name = fold(name);
         providers.iter().copied().find(|provider| *provider == name)
@@ -267,7 +276,7 @@ fn read(rest: &str, negated: bool, providers: &[&'static str]) -> Reading {
         strip_prefix_ignoring_case(rest, "is:")
             .map(|name| (name, Filter::State(State::named(name))))
     };
-    let unfiltered = |kind| Reading { kind, filter: None };
+    let unfiltered = |kind| Parsed { kind, filter: None };
     let filter = match sigil {
         Some(("", _)) => return unfiltered(TokenKind::Incomplete),
         Some((_, filter)) => filter,
@@ -284,7 +293,7 @@ fn read(rest: &str, negated: bool, providers: &[&'static str]) -> Reading {
         Filter::Provider(provider) => TokenKind::Provider(provider),
         Filter::State(state) => TokenKind::State(state),
     };
-    Reading {
+    Parsed {
         kind,
         filter: Some(filter),
     }

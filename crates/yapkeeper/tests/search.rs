@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use yapkeeper::{DataDir, Listing, Query, Roots, rebuild, search};
+use yapkeeper::{DataDir, Listed, Listing, Query, Roots, hide, rebuild, search, unhide};
 
 /// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and data directory, each empty.
 struct Histories {
@@ -529,14 +529,80 @@ fn is_recap_finds_sessions_with_a_recap() {
     assert_eq!(histories.found("is:recap"), [A]);
 }
 
+/// The ids of `listed`, as `hide` and `unhide` give them back.
+fn ids_of(listed: &[Listed]) -> Vec<String> {
+    listed
+        .iter()
+        .map(|listed| listed.session.id.clone())
+        .collect()
+}
+
 #[test]
-fn is_hidden_finds_nothing_until_sessions_can_be_hidden() {
+fn a_hidden_session_is_found_only_with_is_hidden() {
     let histories = Histories::new();
     histories.claude(A, &[prompt("Plan the release")]);
     histories.codex(CODEX, json!({}), &[codex_prompt("Plan the rollout")]);
 
+    // Both sessions ran in a directory that no longer exists.
+    let hidden = hide(&histories.roots(), &histories.data(), A).unwrap();
+    assert_eq!(ids_of(&hidden), [A]);
+    assert!(hidden[0].hidden);
+
+    assert_eq!(histories.found(""), [CODEX]);
+    assert!(histories.found("release").is_empty());
+    assert_eq!(histories.found("is:hidden"), [A]);
+    assert_eq!(histories.found("is:hidden release"), [A]);
+    assert_eq!(histories.found("!is:hidden"), [CODEX]);
+    assert_eq!(histories.found("not:hidden"), [CODEX]);
+}
+
+#[test]
+fn unhiding_brings_a_session_back() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Plan the release")]);
+    histories.claude(B, &[prompt("Plan the rollout")]);
+    hide(&histories.roots(), &histories.data(), A).unwrap();
+    // Hiding twice is the same as hiding once.
+    hide(&histories.roots(), &histories.data(), A).unwrap();
+
+    let shown = unhide(&histories.roots(), &histories.data(), A).unwrap();
+    assert_eq!(ids_of(&shown), [A]);
+    assert!(!shown[0].hidden);
+    assert_eq!(sorted(histories.found("")), [A, B]);
     assert!(histories.found("is:hidden").is_empty());
-    assert_eq!(sorted(histories.found("!is:hidden")), [A, CODEX]);
+}
+
+#[test]
+fn hides_survive_deleting_or_rebuilding_the_index() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Plan the release")]);
+    histories.claude(B, &[prompt("Plan the rollout")]);
+    hide(&histories.roots(), &histories.data(), A).unwrap();
+
+    rebuild(&histories.roots(), &histories.data()).unwrap();
+    assert_eq!(histories.found(""), [B]);
+    fs::remove_file(histories.data().index()).unwrap();
+    assert_eq!(histories.found(""), [B]);
+    assert_eq!(histories.found("is:hidden"), [A]);
+}
+
+#[test]
+fn an_unknown_id_hides_and_unhides_nothing() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Plan the release")]);
+
+    let unknown = "aaaaaaaa-0000-4000-8000-000000000399";
+    assert!(
+        hide(&histories.roots(), &histories.data(), unknown)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        unhide(&histories.roots(), &histories.data(), unknown)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(histories.found(""), [A]);
 }
 
 #[test]

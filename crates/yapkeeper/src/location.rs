@@ -23,7 +23,7 @@ const TEMP_FOLDERS: [&str; 4] = [
 pub struct Location {
     pub place: Place,
     pub availability: Availability,
-    /// Under `/tmp`, `/private/tmp`, `/var/folders` or `/private/var/folders`.
+    /// Under one of the system temp folders.
     pub temp: bool,
 }
 

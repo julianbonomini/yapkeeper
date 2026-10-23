@@ -26,9 +26,9 @@ Words search conversation text, titles, and provider recaps. Every other token i
 | Form | Meaning | Examples |
 |---|---|---|
 | `@where` | Location: project, `project:worktree`, or any part of a path | `@acme-api`, `@acme-api:billing-retry`, `@scratch` |
-| `#agent` | Provider | `#claude`, `#codex` |
+| `#provider` | Provider | `#claude`, `#codex` |
 | `is:state` | Session state | `is:orphaned`, `is:temp`, `is:git`, `is:folder`, `is:pr`, `is:recap`, `is:unavailable`, `is:hidden` |
-| `!x`, `not:x` | Exclude a filter, an agent or state by name, or a word | `!codex`, `!temp`, `!@scratch`, `!is:pr`, `not:orphaned`, `!flaky` |
+| `!x`, `not:x` | Exclude a filter, a provider or state by name, or a word | `!codex`, `!temp`, `!@scratch`, `!is:pr`, `not:orphaned`, `!flaky` |
 
 Rules:
 
@@ -134,12 +134,14 @@ Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` wh
 
 | Command | stdout | stderr |
 |---|---|---|
-| `yapkeeper list` | One line per session outside temp folders, orphaned last, each group most recent first | No sessions found, no sessions outside temp folders (with the `is:temp` hint), malformed lines skipped |
-| `yapkeeper search [--tools] <query>…` | Sessions matching every word and filter of the query language, one line each, as `list` | No sessions found, no sessions match (with a `--tools` hint when the query has words), no sessions outside temp folders (with the `is:temp` hint), unknown provider or state names (with the valid names), malformed lines skipped |
+| `yapkeeper list [--ids]` | One line per session outside temp folders and not hidden, orphaned last, each group most recent first; `--ids` starts each line with the session's id | No sessions found, no sessions outside temp folders (with the `is:temp` hint) or every session hidden (with the `is:hidden` hint), malformed lines skipped |
+| `yapkeeper search [--ids] [--tools] <query>…` | Sessions matching every word and filter of the query language, one line each, as `list` | No sessions found, no sessions match (with a `--tools` hint when the query has words), no sessions outside temp folders (with the `is:temp` hint) or every session hidden (with the `is:hidden` hint), unknown provider or state names (with the valid names), malformed lines skipped |
 | `yapkeeper paths` | `index` and `preferences`, each followed by its path in a space-aligned column | Nothing |
 | `yapkeeper rebuild` | Nothing | `yapkeeper: rebuilt the index at <path> (N sessions)` |
+| `yapkeeper hide <id>` | Nothing | `yapkeeper: hid "<title>"; yapkeeper search is:hidden lists it`, or, exiting 1, no session has the id (with the `list --ids` hint) |
+| `yapkeeper unhide <id>` | Nothing | `yapkeeper: unhid "<title>"`, or the same error as `hide` |
 
-When the index can't be written, any command that uses it exits 1. Its stderr ends with `Check its permissions, or set XDG_DATA_HOME.`
+When the index can't be written or the preferences can't be read or written, any command that uses them exits 1. Its stderr ends with `Check its permissions, or set XDG_DATA_HOME.` Hiding a session that is already hidden, or unhiding one that is shown, succeeds and changes nothing.
 
 The help footer names where histories are read from and the paths this environment resolves for the index and preferences.
 

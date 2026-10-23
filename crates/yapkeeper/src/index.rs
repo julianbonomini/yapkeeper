@@ -24,7 +24,7 @@ use yapkeeper_model::{
 };
 
 use crate::query::{self, Query, Word};
-use crate::{IndexError, Listed, Listing, Location};
+use crate::{Cause, DataError, DataFile, LeftOut, Listed, Listing, Location, SessionKey};
 
 const SCHEMA_VERSION: i64 = 2;
 
@@ -99,8 +99,6 @@ CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
 END;
 "#;
 
-type Cause = Box<dyn Error + Send + Sync>;
-
 /// The search word bound as `?1`, quoted as one FTS5 phrase so that quotes,
 /// `OR`, `NEAR`, `*` and `:` in it are matched as text.
 const PHRASE: &str = r#"'"' || replace(?1, '"', '""') || '"'"#;
@@ -113,7 +111,7 @@ pub(crate) fn refresh(
     adapters: &[&dyn Adapter],
     path: &Path,
     query: &Query,
-) -> Result<Listing, IndexError> {
+) -> Result<Listing, DataError> {
     let indexed = open(path).and_then(|mut connection| {
         // Immediate, so two listings at once take turns instead of both
         // reading the same files and one failing to write.
@@ -122,17 +120,19 @@ pub(crate) fn refresh(
         transaction.commit()?;
         Ok(listing)
     });
-    indexed.map_err(|source| IndexError {
+    indexed.map_err(|source| DataError {
         path: path.to_path_buf(),
+        file: DataFile::Index,
         source,
     })
 }
 
 /// Deletes the index at `path` and its SQLite companion files. Succeeds
 /// when there is nothing to delete.
-pub(crate) fn delete(path: &Path) -> Result<(), IndexError> {
-    remove(path).map_err(|error| IndexError {
+pub(crate) fn delete(path: &Path) -> Result<(), DataError> {
+    remove(path).map_err(|error| DataError {
         path: path.to_path_buf(),
+        file: DataFile::Index,
         source: error.into(),
     })
 }
@@ -322,6 +322,8 @@ fn refresh_in(
             .map(|session| Listed {
                 location: Location::of(&session.working_dir, &session.recorded_git),
                 session,
+                // Hides live in the preferences, which the index never reads.
+                hidden: false,
             })
             .collect(),
         indexed,
@@ -329,6 +331,8 @@ fn refresh_in(
         searched,
         files_read,
         bytes_read,
+        // Only the query's selection knows what its defaults leave out.
+        left_out: LeftOut::default(),
     })
 }
 
@@ -465,28 +469,12 @@ fn store_sessions(transaction: &Transaction, adapter: &dyn Adapter) -> Result<()
     Ok(())
 }
 
-/// A session as the search rows name it.
-#[derive(PartialEq, Eq, Hash)]
-struct SessionKey {
-    provider: String,
-    id: String,
-}
-
-impl SessionKey {
-    fn of(session: &Session) -> SessionKey {
-        SessionKey {
-            provider: session.provider.to_string(),
-            id: session.id.clone(),
-        }
-    }
-
-    /// From a search row whose first two columns are the provider and session id.
-    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionKey> {
-        Ok(SessionKey {
-            provider: row.get(0)?,
-            id: row.get(1)?,
-        })
-    }
+/// The session a search row names in its first two columns, provider then id.
+fn key_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionKey> {
+    Ok(SessionKey {
+        provider: row.get(0)?,
+        id: row.get(1)?,
+    })
 }
 
 /// Keeps the `sessions` that match every word of `query` and none of its
@@ -548,7 +536,7 @@ fn sessions_matching(
     ))?;
     let mut rows = statement.query(params_from_iter(lookup))?;
     while let Some(row) = rows.next()? {
-        let key = SessionKey::from_row(row)?;
+        let key = key_from_row(row)?;
         let title: String = row.get(2)?;
         let recap: Option<String> = row.get(3)?;
         if unmatched.contains(&key)
@@ -568,7 +556,7 @@ fn sessions_matching(
     ))?;
     let mut rows = statement.query(params_from_iter(lookup))?;
     while let Some(row) = rows.next()? {
-        let key = SessionKey::from_row(row)?;
+        let key = key_from_row(row)?;
         if unmatched.contains(&key) && word.matches(&row.get::<_, String>(2)?) {
             unmatched.remove(&key);
             matched.insert(key);

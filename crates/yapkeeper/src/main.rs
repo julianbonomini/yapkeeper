@@ -12,8 +12,8 @@ use std::time::SystemTime;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use yapkeeper::{
-    Availability, DataDir, IndexError, Listed, Place, Query, Roots, State, TokenKind, rebuild,
-    search,
+    Availability, DataDir, DataError, Listed, Place, Query, Roots, State, TokenKind, hide, rebuild,
+    search, unhide,
 };
 
 /// Wide enough for most titles; what follows may wrap on an 80-column terminal.
@@ -39,9 +39,9 @@ enum Command {
     ///
     /// Each line shows a session's title, provider, age, an orphaned or unavailable
     /// label when one applies, and where it ran. Sessions in temp folders are left
-    /// out; yapkeeper search is:temp lists them. Orphaned sessions come after the
-    /// rest, each group most recent first.
-    List,
+    /// out, as are hidden ones; yapkeeper search is:temp and is:hidden list them.
+    /// Orphaned sessions come after the rest, each group most recent first.
+    List(Columns),
     /// Find sessions by what was said, where they ran and their state
     ///
     /// Words match titles, messages and recaps as substrings; every word must
@@ -56,24 +56,48 @@ enum Command {
     /// (!codex, !temp) or a word (!flaky); quote ! for the shell, as in '!codex'.
     /// A space ends a filter, so "is pr" is two words.
     ///
-    /// Sessions in temp folders are left out unless the query has is:temp.
-    /// Orphaned sessions come after the rest, each group most recent first.
+    /// Sessions in temp folders are left out unless the query has is:temp, and
+    /// hidden ones unless it has is:hidden. Orphaned sessions come after the
+    /// rest, each group most recent first.
     Search(Search),
+    /// Hide a session from list and search; search is:hidden still lists it
+    ///
+    /// The hide is kept in the preferences, so rebuilding the index keeps it.
+    /// The provider's history is never touched.
+    Hide(Id),
+    /// List a hidden session again
+    Unhide(Id),
     /// Print where Yapkeeper keeps its index and preferences
     Paths,
     /// Delete the index and build it again from every history file
     Rebuild,
 }
 
+/// What each line shows beyond the default columns.
+#[derive(Args, Default)]
+struct Columns {
+    /// Start each line with the session's id, as hide and unhide take it
+    #[arg(long)]
+    ids: bool,
+}
+
 /// What to search for; the default finds every session, as `list` does.
 #[derive(Args, Default)]
 struct Search {
+    #[command(flatten)]
+    columns: Columns,
     /// Also search tool calls, tool output and subagent transcripts
     #[arg(long)]
     tools: bool,
     /// Words and filters every listed session matches
     #[arg(num_args = 0..)]
     query: Vec<String>,
+}
+
+#[derive(Args)]
+struct Id {
+    /// The session's id, from yapkeeper list --ids
+    id: String,
 }
 
 fn main() -> ExitCode {
@@ -85,8 +109,13 @@ fn main() -> ExitCode {
         .get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     match cli.command {
-        Command::List => print_sessions(&Search::default()),
+        Command::List(columns) => print_sessions(&Search {
+            columns,
+            ..Search::default()
+        }),
         Command::Search(search) => print_sessions(&search),
+        Command::Hide(Id { id }) => print_hidden(&id, hide),
+        Command::Unhide(Id { id }) => print_hidden(&id, unhide),
         Command::Paths => print_paths(),
         Command::Rebuild => print_rebuild(),
     }
@@ -134,8 +163,9 @@ fn environment() -> Result<(Roots, DataDir), ExitCode> {
     }
 }
 
-/// Says why the index failed and how to fix it, and gives the exit code.
-fn index_failure(error: IndexError) -> ExitCode {
+/// Says why the index or preferences failed and how to fix it, and gives
+/// the exit code.
+fn data_failure(error: DataError) -> ExitCode {
     eprintln!("yapkeeper: {error}");
     eprintln!("Check its permissions, or set XDG_DATA_HOME.");
     ExitCode::from(EXIT_FAILURE)
@@ -159,12 +189,50 @@ fn print_rebuild() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Err(error) => index_failure(error),
+        Err(error) => data_failure(error),
     }
 }
 
+/// Runs `hide` or `unhide` on `id`, confirming each session it changed on
+/// stderr so stdout stays empty for scripts. An id no session has is an error.
+fn print_hidden(
+    id: &str,
+    set: fn(&Roots, &DataDir, &str) -> Result<Vec<Listed>, DataError>,
+) -> ExitCode {
+    let (roots, data) = match environment() {
+        Ok(environment) => environment,
+        Err(code) => return code,
+    };
+    let sessions = match set(&roots, &data, id) {
+        Ok(sessions) => sessions,
+        Err(error) => return data_failure(error),
+    };
+    if sessions.is_empty() {
+        eprintln!(
+            "yapkeeper: no session has the id \"{}\"",
+            without_controls(id)
+        );
+        eprintln!("yapkeeper list --ids shows each session's id");
+        return ExitCode::from(EXIT_FAILURE);
+    }
+    for listed in &sessions {
+        let title = fit_title(&one_line(&listed.session.title));
+        match listed.hidden {
+            true => eprintln!("yapkeeper: hid \"{title}\"; yapkeeper search is:hidden lists it"),
+            false => eprintln!("yapkeeper: unhid \"{title}\""),
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 /// The sessions `search` finds, one line each, in `list`'s format.
-fn print_sessions(Search { tools, query }: &Search) -> ExitCode {
+fn print_sessions(
+    Search {
+        columns,
+        tools,
+        query,
+    }: &Search,
+) -> ExitCode {
     let (roots, data) = match environment() {
         Ok(environment) => environment,
         Err(code) => return code,
@@ -174,7 +242,7 @@ fn print_sessions(Search { tools, query }: &Search) -> ExitCode {
     let query = Query::parse(&text, &providers).including_tools(*tools);
     let listing = match search(&roots, &data, &query) {
         Ok(listing) => listing,
-        Err(error) => return index_failure(error),
+        Err(error) => return data_failure(error),
     };
     if listing.indexed == 0 {
         for dir in &listing.searched {
@@ -187,10 +255,16 @@ fn print_sessions(Search { tools, query }: &Search) -> ExitCode {
             .all(|token| token.kind == TokenKind::Incomplete)
     {
         // A query that asks nothing can only have lost everything to the
-        // temp default.
-        eprintln!(
-            "yapkeeper: no sessions outside temp folders; yapkeeper search is:temp lists them"
-        );
+        // temp and hidden defaults.
+        let hint = match (listing.left_out.temp, listing.left_out.hidden) {
+            (true, true) => {
+                "every session is hidden or in a temp folder; \
+                 yapkeeper search is:temp or is:hidden lists them"
+            }
+            (false, true) => "every session is hidden; yapkeeper search is:hidden lists them",
+            _ => "no sessions outside temp folders; yapkeeper search is:temp lists them",
+        };
+        eprintln!("yapkeeper: {hint}");
     } else if listing.sessions.is_empty() {
         eprintln!(
             "yapkeeper: no sessions match \"{}\"",
@@ -234,6 +308,12 @@ fn print_sessions(Search { tools, query }: &Search) -> ExitCode {
         .map(|listed| state_label(listed.location.availability).width())
         .max()
         .unwrap_or(0);
+    let id_width = listing
+        .sessions
+        .iter()
+        .map(|listed| listed.session.id.width())
+        .max()
+        .unwrap_or(0);
     let mut stdout = io::stdout().lock();
     for (listed, title) in listing.sessions.iter().zip(&titles) {
         let session = &listed.session;
@@ -250,10 +330,15 @@ fn print_sessions(Search { tools, query }: &Search) -> ExitCode {
             ),
         };
         let location = without_controls(&location_text(listed, home.as_deref()));
+        // First, so `cut -d' ' -f1` gives the id whatever the title holds.
+        let id = match columns.ids {
+            true => format!("{:<id_width$}  ", without_controls(&session.id)),
+            false => String::new(),
+        };
         // A closed pipe, as with `| head`, just ends the listing.
         if writeln!(
             stdout,
-            "{title}{padding}  {provider:<provider_width$}  {age:>3}  {state}{location}"
+            "{id}{title}{padding}  {provider:<provider_width$}  {age:>3}  {state}{location}"
         )
         .is_err()
         {

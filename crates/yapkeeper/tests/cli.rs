@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 #[cfg(unix)]
@@ -891,5 +891,136 @@ fn search_with_only_an_unfinished_filter_over_temp_sessions_says_how_to_list_the
     assert_eq!(
         stderr(&output),
         "yapkeeper: no sessions outside temp folders; yapkeeper search is:temp lists them\n"
+    );
+}
+
+/// Every file under `dir` with its contents and modification time.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+    let mut files = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                let modified = fs::metadata(&path).unwrap().modified().unwrap();
+                files.push((path.clone(), fs::read(&path).unwrap(), modified));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+const LAUNCH_CHECKLIST: &str = "11111111-1111-4111-8111-111111111111";
+
+#[test]
+fn hide_leaves_a_session_out_until_unhide_and_never_touches_the_histories() {
+    let home = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| yapkeeper_over_fixtures(args, home.path());
+    let before = (
+        snapshot(Path::new(FIXTURES)),
+        snapshot(Path::new(CODEX_FIXTURES)),
+    );
+    let listed = stdout(&run(&["list"]));
+    assert!(line_titled(&listed, "Launch checklist").contains("claude"));
+
+    let output = run(&["hide", LAUNCH_CHECKLIST]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "yapkeeper: hid \"Launch checklist\"; yapkeeper search is:hidden lists it\n"
+    );
+    let without = stdout(&run(&["list"]));
+    assert!(!without.contains("Launch checklist"), "{without}");
+    assert_eq!(without.lines().count(), listed.lines().count() - 1);
+    assert!(!stdout(&run(&["search", "launch"])).contains("Launch checklist"));
+    let hidden = stdout(&run(&["search", "is:hidden"]));
+    assert_eq!(hidden.lines().count(), 1, "{hidden}");
+    assert!(hidden.starts_with("Launch checklist"), "{hidden}");
+
+    let output = run(&["unhide", LAUNCH_CHECKLIST]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "yapkeeper: unhid \"Launch checklist\"\n");
+    assert_eq!(stdout(&run(&["list"])), listed);
+
+    let after = (
+        snapshot(Path::new(FIXTURES)),
+        snapshot(Path::new(CODEX_FIXTURES)),
+    );
+    assert!(before == after, "hide or unhide changed a history file");
+}
+
+#[test]
+fn hide_with_an_unknown_id_fails_and_says_where_ids_are_shown() {
+    let home = tempfile::tempdir().unwrap();
+    for command in ["hide", "unhide"] {
+        let output = yapkeeper_over_fixtures(&[command, "no-such-session"], home.path());
+        assert_eq!(output.status.code(), Some(1), "{command}");
+        assert_eq!(stdout(&output), "");
+        assert_eq!(
+            stderr(&output),
+            "yapkeeper: no session has the id \"no-such-session\"\n\
+             yapkeeper list --ids shows each session's id\n"
+        );
+    }
+}
+
+#[test]
+fn ids_puts_each_sessions_id_first_and_leaves_the_rest_of_the_line_as_it_was() {
+    let home = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| yapkeeper_over_fixtures(args, home.path());
+    let plain = stdout(&run(&["list"]));
+    for args in [&["list", "--ids"][..], &["search", "--ids"]] {
+        let with_ids = stdout(&run(args));
+        assert_eq!(with_ids.lines().count(), plain.lines().count(), "{args:?}");
+        for (line, plain) in with_ids.lines().zip(plain.lines()) {
+            let (id, rest) = line.split_once("  ").unwrap();
+            assert_eq!(id.len(), 36, "{line:?}");
+            assert_eq!(rest, plain, "{args:?}");
+        }
+    }
+    let launch = stdout(&run(&["search", "--ids", "launch"]));
+    assert!(launch.starts_with(&format!("{LAUNCH_CHECKLIST}  Launch checklist")));
+}
+
+#[test]
+fn list_with_every_session_hidden_or_temp_says_which_queries_list_them() {
+    let home = temp_dir();
+    let hidden = "aaaaaaaa-0000-4000-8000-000000000212";
+    write_home_session(
+        home.path(),
+        hidden,
+        "Work that is hidden",
+        Path::new("/synthetic/gone"),
+        "",
+    );
+    let run = |args: &[&str]| yapkeeper(args, home.path(), None);
+    assert!(run(&["hide", hidden]).status.success());
+
+    let output = run(&["list"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "yapkeeper: every session is hidden; yapkeeper search is:hidden lists them\n"
+    );
+
+    write_home_session(
+        home.path(),
+        "aaaaaaaa-0000-4000-8000-000000000213",
+        "Work in a temp folder",
+        &home.path().join("scratch"),
+        "",
+    );
+    let output = run(&["list"]);
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "yapkeeper: every session is hidden or in a temp folder; \
+         yapkeeper search is:temp or is:hidden lists them\n"
     );
 }

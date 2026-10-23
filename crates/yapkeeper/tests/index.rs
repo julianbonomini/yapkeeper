@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use yapkeeper::{
-    Availability, DataDir, Listing, Location, Query, Roots, Session, list, rebuild, search,
+    Availability, DataDir, Listing, Location, Query, Roots, Session, hide, list, rebuild, search,
 };
 
 /// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and data directory, each empty.
@@ -390,13 +390,44 @@ fn rebuilding_leaves_the_preferences_untouched() {
         "A synthetic prompt",
         "/synthetic/one",
     );
-    histories.list();
+    hide(
+        &histories.roots(),
+        &histories.data(),
+        "aaaaaaaa-0000-4000-8000-000000000112",
+    )
+    .unwrap();
     let prefs = histories.data().prefs();
-    let contents = b"synthetic preferences, not a real database";
-    fs::write(&prefs, contents).unwrap();
+    let contents = fs::read(&prefs).unwrap();
 
     rebuild(&histories.roots(), &histories.data()).unwrap();
     assert_eq!(fs::read(&prefs).unwrap(), contents);
+}
+
+#[test]
+fn preferences_filled_with_garbage_fail_the_listing_and_are_kept() {
+    let histories = Histories::new();
+    histories.claude_session(
+        "aaaaaaaa-0000-4000-8000-000000000114",
+        "A synthetic prompt",
+        "/synthetic/one",
+    );
+    let prefs = histories.data().prefs();
+    fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    let contents = "synthetic garbage, not a database ".repeat(200);
+    fs::write(&prefs, &contents).unwrap();
+
+    let Err(error) = list(&histories.roots(), &histories.data()) else {
+        panic!("a listing over unreadable preferences should fail");
+    };
+    assert_eq!(error.path, prefs);
+    assert!(
+        error.to_string().starts_with(&format!(
+            "can't use the preferences at {}: ",
+            prefs.display()
+        )),
+        "{error}"
+    );
+    assert_eq!(fs::read_to_string(&prefs).unwrap(), contents);
 }
 
 #[test]

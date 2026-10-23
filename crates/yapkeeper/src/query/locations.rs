@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 use super::{Ending, fits_a_token, listed_by, location_name};
-use crate::{Availability, Listed, Place, SessionKey};
+use crate::{Availability, Listed, Place, SessionKey, Settings};
 
 /// One row of the location list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,16 +80,18 @@ impl Spot<'_> {
 /// The location list's rows for `@typed`, in order: each project, then its
 /// worktrees, then the plain folders; each group missing last, then most
 /// recent first, ties by name. Rows, paths and `missing` come from the
-/// sessions a bare `@` lists; `typed` only picks which rows are kept, and
-/// while it is empty the missing ones are left out.
+/// sessions a bare `@` lists, by `settings`; `typed` only picks which rows
+/// are kept, and while it is empty and hide-missing is on the missing ones
+/// are left out.
 pub(super) fn rows(
     typed: &str,
     providers: &[&'static str],
     sessions: &[Rc<Listed>],
+    settings: Settings,
 ) -> Vec<Ending> {
     let mut projects: Vec<Project> = Vec::new();
     let mut folders: Vec<Spot> = Vec::new();
-    for listed in listed_by("@", providers, sessions) {
+    for listed in listed_by("@", providers, sessions, settings) {
         let place = &listed.location.place;
         let name = location_name(place, &listed.session.working_dir);
         let group = match place {
@@ -111,7 +113,7 @@ pub(super) fn rows(
         group.push(listed);
     }
 
-    let shown: HashSet<SessionKey> = listed_by(&format!("@{typed}"), providers, sessions)
+    let shown: HashSet<SessionKey> = listed_by(&format!("@{typed}"), providers, sessions, settings)
         .into_iter()
         .map(|listed| SessionKey::of(&listed.session))
         .collect();
@@ -120,7 +122,7 @@ pub(super) fn rows(
             && sessions
                 .iter()
                 .any(|listed| shown.contains(&SessionKey::of(&listed.session)))
-            && !(typed.is_empty() && missing(sessions))
+            && !(settings.hide_missing && typed.is_empty() && missing(sessions))
     };
 
     projects.sort_by_cached_key(|project| (rank(&project.sessions()), project.project.clone()));

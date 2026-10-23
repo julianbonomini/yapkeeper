@@ -19,7 +19,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::{Availability, LeftOut, Listed, Location, Place, RecordedGit};
+use crate::{Availability, LeftOut, Listed, Location, Place, RecordedGit, Settings};
 
 pub use locations::{LocationRow, LocationRowKind};
 
@@ -34,6 +34,8 @@ pub struct Query {
     excluded_words: Vec<Word>,
     conditions: Vec<Condition>,
     tools: bool,
+    /// Which defaults `select` applies.
+    settings: Settings,
 }
 
 /// One whitespace-separated piece of a query and what it was read as.
@@ -133,7 +135,8 @@ impl Query {
     /// Reads `text` as the query language; `providers` are the names
     /// `#name`, `!name` and `not:name` may name. Never fails; empty or
     /// all-space text is `Query::default()`, which every session outside
-    /// temp folders and not hidden matches.
+    /// temp folders and not hidden matches. It always follows the documented
+    /// defaults, whatever the user's settings; `Catalog::parse` follows them.
     pub fn parse(text: &str, providers: &[&'static str]) -> Query {
         let mut query = Query::default();
         for span in pieces(text) {
@@ -152,6 +155,11 @@ impl Query {
             });
         }
         query
+    }
+
+    /// The same query, selecting by `settings`.
+    pub(crate) fn following(self, settings: Settings) -> Query {
+        Query { settings, ..self }
     }
 
     /// The same query, also searching tool calls, tool output and subagent
@@ -205,8 +213,9 @@ impl Query {
     /// then orders them: orphaned last, each group most recent
     /// `last_active` first, ties by provider then id. Temp sessions are
     /// left out unless the query has a non-negated `is:temp`, and hidden
-    /// ones unless it has `is:hidden`; returns which of the two defaults
-    /// left out a session every filter admits.
+    /// ones unless it has `is:hidden`; returns how many sessions every
+    /// filter admits each default left out. The query's settings can turn
+    /// off leaving temp sessions out and listing orphaned ones last.
     pub(crate) fn select<L: Borrow<Listed>>(&self, sessions: &mut Vec<L>) -> LeftOut {
         let asked = |state| {
             self.conditions.iter().any(|condition| {
@@ -221,17 +230,17 @@ impl Query {
                 .conditions
                 .iter()
                 .all(|condition| condition.filter.admits(listed) != condition.negated);
-            let temp = !temp_asked && State::Temp.of(listed);
+            let temp = self.settings.hide_temp && !temp_asked && State::Temp.of(listed);
             let hidden = !hidden_asked && State::Hidden.of(listed);
-            left_out.temp |= admitted && temp;
-            left_out.hidden |= admitted && hidden;
+            left_out.temp += usize::from(admitted && temp);
+            left_out.hidden += usize::from(admitted && hidden);
             admitted && !temp && !hidden
         });
+        let orphaned = |listed: &Listed| self.settings.orphans_last && State::Orphaned.of(listed);
         sessions.sort_by(|a, b| {
             let (a, b) = (a.borrow(), b.borrow());
-            State::Orphaned
-                .of(a)
-                .cmp(&State::Orphaned.of(b))
+            orphaned(a)
+                .cmp(&orphaned(b))
                 .then_with(|| b.session.last_active.cmp(&a.session.last_active))
                 .then_with(|| a.session.provider.cmp(b.session.provider))
                 .then_with(|| a.session.id.cmp(&b.session.id))
@@ -497,8 +506,8 @@ pub struct Completion {
     pub token: String,
     /// The whole query with the token finished and a space after it.
     pub query: String,
-    /// How many sessions `token` alone lists, by the same defaults as a
-    /// search.
+    /// How many sessions `token` alone lists, by the same defaults and
+    /// settings as a search.
     pub count: usize,
     /// The row the location list shows for this way to finish an `@`
     /// token; `None` for every completion not after `@`.
@@ -511,16 +520,18 @@ pub struct Completion {
 /// worktrees after it, then the plain folders. Each group is ordered most
 /// recent first, and missing places come last. A row is kept when a session
 /// that the typed `@` token lists ran there. Missing places are left out
-/// while nothing follows the `@`. After `#`, it is the `providers` starting
-/// with what was typed after it; after `is:`, the states that do; after a
-/// bare `!` or `not:`, those providers then those states. Empty unless the
-/// last token starts with `@`, `#`, `is:`, `!` or `not:` and nothing follows
-/// it, so a space never offers any, and empty when the token typed is
-/// already the only way to finish it.
+/// while nothing follows the `@` and `settings.hide_missing` is on. After
+/// `#`, it is the `providers` starting with what was typed after it; after
+/// `is:`, the states that do; after a bare `!` or `not:`, those providers
+/// then those states. Empty unless the last token starts with `@`, `#`,
+/// `is:`, `!` or `not:` and nothing follows it, so a space never offers any,
+/// and empty when the token typed is already the only way to finish it.
+/// Counts and rows follow `settings`.
 pub(crate) fn completions(
     text: &str,
     providers: &[&'static str],
     sessions: &[Rc<Listed>],
+    settings: Settings,
 ) -> Vec<Completion> {
     let Some(last) = pieces(text).pop().filter(|span| span.end == text.len()) else {
         return Vec::new();
@@ -542,7 +553,7 @@ pub(crate) fn completions(
     let endings: Vec<Ending> = match named {
         Some((Sigil::Provider, _)) => matching_providers().map(plain).collect(),
         Some((Sigil::State, _)) => states().map(plain).collect(),
-        Some((Sigil::Location, _)) => locations::rows(typed, providers, sessions),
+        Some((Sigil::Location, _)) => locations::rows(typed, providers, sessions, settings),
         None if negated => matching_providers().chain(states()).map(plain).collect(),
         None => return Vec::new(),
     };
@@ -552,7 +563,7 @@ pub(crate) fn completions(
         .map(|Ending { name, location }| {
             let token = format!("{prefix}{name}");
             Completion {
-                count: listed_by(&token, providers, sessions).len(),
+                count: listed_by(&token, providers, sessions, settings).len(),
                 query: format!("{head}{name} "),
                 token,
                 location,
@@ -574,13 +585,16 @@ struct Ending {
 }
 
 /// The `sessions` that `text`, holding no search words, lists, in a
-/// search's order and by its defaults.
+/// search's order and by its defaults as `settings` set them.
 fn listed_by<'s>(
     text: &str,
     providers: &[&'static str],
     sessions: &'s [Rc<Listed>],
+    settings: Settings,
 ) -> Vec<&'s Listed> {
     let mut found: Vec<&Listed> = sessions.iter().map(Rc::as_ref).collect();
-    Query::parse(text, providers).select(&mut found);
+    Query::parse(text, providers)
+        .following(settings)
+        .select(&mut found);
     found
 }

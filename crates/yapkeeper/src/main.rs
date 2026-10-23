@@ -369,7 +369,7 @@ fn print_sessions(
     {
         // A query that asks nothing can only have lost everything to the
         // temp and hidden defaults.
-        let hint = match (listing.left_out.temp, listing.left_out.hidden) {
+        let hint = match (listing.left_out.temp > 0, listing.left_out.hidden > 0) {
             (true, true) => {
                 "every session is hidden or in a temp folder; \
                  yapkeeper search is:temp or is:hidden lists them"

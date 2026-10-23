@@ -1,12 +1,13 @@
 //! The command palette: a query line searched live as the person types,
 //! the sessions it matches or the ways to finish the filter being typed, a
 //! preview of the selected session and key hints, over a `Catalog` loaded
-//! once; or, in their place, the selected session's whole conversation.
-//! It owns every terminal decision (keys, layout, theme and the terminal's
-//! lifecycle) and reaches the index and the preferences only through the
-//! catalog.
+//! once; or, in their place, the selected session's whole conversation or
+//! a settings screen. It owns every terminal decision (keys, layout, theme
+//! and the terminal's lifecycle) and reaches the index and the preferences,
+//! settings included, only through the catalog.
 
 mod reading;
+mod settings;
 mod terminal;
 mod view;
 
@@ -19,7 +20,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
 use self::reading::Reading;
-use crate::{Catalog, Completion, LeftOut, Listed, Message, Query, line, location_token};
+use self::settings::SettingsScreen;
+use crate::{Catalog, Completion, LeftOut, Listed, Message, Query, Settings, line, location_token};
 
 pub use terminal::{Restore, run};
 
@@ -52,6 +54,9 @@ pub struct Palette {
     /// While the selected session's whole conversation is open, in place of
     /// the query, the results and the preview, which stay as they were.
     reading: Option<Reading>,
+    /// While the settings are open, in place of the query, the results and
+    /// the preview, which stay as they were.
+    settings: Option<SettingsScreen>,
     /// Why the last search, or the selected session's conversation, failed
     /// to read; cleared by the next search that succeeds. After a failed
     /// search the rows are the last ones that didn't fail.
@@ -87,19 +92,20 @@ pub enum Step {
     Quit,
 }
 
-/// `Sage` accent with a grey selection bar, or `Mono` with no colour at all.
+/// `Accent` draws in the accent the settings choose; `Mono` draws no colour
+/// whatever they choose, as `NO_COLOR` asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Colour {
-    Sage,
+    Accent,
     Mono,
 }
 
 impl Colour {
-    /// `Mono` when `NO_COLOR` is set to a non-empty value, otherwise `Sage`.
+    /// `Mono` when `NO_COLOR` is set to a non-empty value, otherwise `Accent`.
     pub fn from_env() -> Colour {
         match std::env::var_os("NO_COLOR") {
             Some(value) if !value.is_empty() => Colour::Mono,
-            _ => Colour::Sage,
+            _ => Colour::Accent,
         }
     }
 }
@@ -124,6 +130,7 @@ impl Palette {
             completion: ListState::default(),
             conversation: Vec::new(),
             reading: None,
+            settings: None,
             error: None,
             toast: None,
         };
@@ -138,6 +145,19 @@ impl Palette {
             return Step::Continue;
         }
         let ctrl = key.modifiers == KeyModifiers::CONTROL;
+        if let Some(screen) = &mut self.settings {
+            match key.code {
+                KeyCode::Char('c') if ctrl => return Step::Quit,
+                KeyCode::Char('s') if ctrl => self.settings = None,
+                KeyCode::Esc => self.settings = None,
+                _ => {
+                    if let Some(changed) = screen.handle(key, self.catalog.settings()) {
+                        self.change_settings(changed);
+                    }
+                }
+            }
+            return Step::Continue;
+        }
         if let Some(reading) = &mut self.reading {
             match key.code {
                 KeyCode::Char('c') if ctrl => return Step::Quit,
@@ -152,6 +172,7 @@ impl Palette {
             KeyCode::Char('l') if ctrl => self.insert_launch_location(),
             KeyCode::Char('x') if ctrl => self.toggle_hidden(now),
             KeyCode::Char('t') if ctrl => self.toggle_tools(now),
+            KeyCode::Char('s') if ctrl => self.settings = Some(SettingsScreen::new()),
             KeyCode::Char('p') if ctrl => self.move_selection(Direction::Up),
             KeyCode::Char('n') if ctrl => self.move_selection(Direction::Down),
             KeyCode::Up => self.move_selection(Direction::Up),
@@ -198,11 +219,26 @@ impl Palette {
     fn set_query(&mut self, query: String) {
         if query != self.query {
             self.query = query;
-            self.search(0);
-            self.completions = self.catalog.completions(&self.query);
-            let first = (!self.completions.is_empty()).then_some(0);
-            self.completion = ListState::default().with_selected(first);
+            self.reapply();
         }
+    }
+
+    /// Saves `settings` and shows what they change at once; a failure to
+    /// save them is shown in the footer and changes nothing.
+    fn change_settings(&mut self, settings: Settings) {
+        match self.catalog.set_settings(settings) {
+            Ok(()) => self.reapply(),
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    /// Searches for the query again from the first row and works out the
+    /// ways to finish it, as after the query or the settings change.
+    fn reapply(&mut self) {
+        self.search(0);
+        self.completions = self.catalog.completions(&self.query);
+        let first = (!self.completions.is_empty()).then_some(0);
+        self.completion = ListState::default().with_selected(first);
     }
 
     /// Adds the `@` token for where the palette was launched to the end of

@@ -10,7 +10,7 @@ use std::process::{Command, Output};
 #[cfg(unix)]
 use support::Locked;
 use support::{repo_with_worktree, temp_dir};
-use yapkeeper::{Roots, State};
+use yapkeeper::{Catalog, DataDir, Roots, Settings, State};
 
 mod support;
 
@@ -1111,4 +1111,37 @@ fn list_with_every_session_hidden_or_temp_says_which_queries_list_them() {
         "yapkeeper: every session is hidden or in a temp folder; \
          yapkeeper search is:temp or is:hidden lists them\n"
     );
+}
+
+#[test]
+fn list_keeps_the_documented_defaults_whatever_the_palette_is_set_to() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = temp_dir();
+    write_home_session(home.path(), "a1", "Live work", Path::new("/usr"), "");
+    write_home_session(home.path(), "a2", "Scratch work", scratch.path(), "");
+    let orphaned = r#"{"type":"user","message":{"content":"Orphaned work"},"cwd":"/synthetic/gone","timestamp":"2026-10-21T10:00:00Z"}"#;
+    let project = home.path().join(".claude/projects/-synthetic-temp");
+    fs::write(project.join("a3.jsonl"), format!("{orphaned}\n")).unwrap();
+    let roots = Roots {
+        claude: home.path().join(".claude"),
+        codex: home.path().join(".codex"),
+    };
+    let data = DataDir::at(home.path().join(".local/share/yapkeeper"));
+    let mut catalog = Catalog::open(&roots, &data).unwrap();
+    catalog
+        .set_settings(Settings {
+            hide_temp: false,
+            orphans_last: false,
+            ..Settings::default()
+        })
+        .unwrap();
+
+    let output = yapkeeper(&["list"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    let titles: Vec<&str> = stdout
+        .lines()
+        .map(|line| line.split("  ").next().unwrap())
+        .collect();
+    assert_eq!(titles, ["Live work", "Orphaned work"], "{stdout}");
 }

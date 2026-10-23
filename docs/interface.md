@@ -9,7 +9,7 @@ The palette fills the terminal inside a single rounded border. From top to botto
 1. The query line, with the match count on the right (`2 / 783`).
 2. A rule.
 3. Results on the left (48%) and the preview on the right (52%) when the palette is at least 80 columns wide. Below that width the preview is dropped and `→` opens the conversation.
-4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action. Under the results the hints include `Tab locations`; while a completion list is open, `Tab insert`.
+4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action. Under the results the hints include `Tab locations` and `^S settings`; while a completion list is open, `Tab insert`.
 
 There is no permanent location sidebar. The query line handles locations (see below).
 
@@ -94,6 +94,22 @@ Recaps cost nothing extra: Claude Code writes `away_summary` records into its se
 
 Terminals cannot report whether a Nerd Font is installed, so the icon set has to stay a setting with a Unicode fallback. `NO_COLOR` switches to the monochrome theme. Selection must remain visible without color (reversed or bold).
 
+The settings screen takes the place of the query line, the results and the preview, inside the same border. It has one row per setting, with its value on the right in the accent:
+
+| Row | Values, in the order `→` steps through them |
+|---|---|
+| Hide temp-folder sessions | `on`, `off` |
+| Hide missing folders in locations | `on`, `off` |
+| List orphans last | `on`, `off` |
+| Accent | Sage (108, grey bar 237), Cyan (the terminal's cyan, reversed selection), Amber (214), Violet (141), Sky (75), Mono; each but Cyan and Mono has the grey bar |
+| Location icons | Nerd Font, Unicode (`▣ ⎇ ▢ ⊘`), Text tags (`git wt dir gone`), None; each shows its four icons so the user can check their font |
+
+Below the rows, `index` and `preferences` name the two files' paths, cut from the left when they don't fit. `↑` `↓` or `Ctrl+P` `Ctrl+N` move between rows, `→` or `Enter` picks the next value, `←` the previous, `Esc` or `Ctrl+S` goes back to the palette, and `Ctrl+C` quits. Other keys do nothing, so typing never reaches the query. Each change is saved to `prefs.sqlite` and shows at once; the palette searches again from the first row. When it can't be saved, the footer says so and the setting stays as it was.
+
+While temp sessions are hidden, the query line shows `N temp hidden ·` before the match count: how many sessions the query matched that are left out for being in a temp folder. It is dropped first when the query needs the room. Under `NO_COLOR` the accent row reads, for example, `Amber · off: NO_COLOR`: the choice is kept but nothing is drawn in color. With the icon set None, the icon and the space after it are left out, so the text starts where the icon would.
+
+Settings change the palette only; `yapkeeper list` and `search` always use these defaults, so scripts get the same answer whatever the palette is set to.
+
 ## Keys
 
 | Key | Action |
@@ -132,7 +148,7 @@ The prototype reads every history file at launch, in parallel threads, without a
 Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` when `XDG_DATA_HOME` is unset or relative:
 
 - `index.sqlite`, the index: rebuildable, and safe to delete at any time.
-- `prefs.sqlite`, the preferences, such as hides. Rebuilding the index never touches it.
+- `prefs.sqlite`, the preferences: hides and settings. Rebuilding the index never touches it. Opening it with an older Yapkeeper than the one that last wrote it fails rather than losing them.
 
 ## Command line
 

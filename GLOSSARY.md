@@ -50,7 +50,10 @@ The provider-specific part of Yapkeeper that names the directory a provider's hi
 Yapkeeper's rebuildable copy of every session and its searchable text, in `index.sqlite`. Deleting it loses nothing; the next listing builds it again.
 
 **Preferences**:
-The user's own choices, such as hidden sessions, in `prefs.sqlite`, kept apart from the index so rebuilding never loses them.
+The user's own choices, hidden sessions and settings, in `prefs.sqlite`, kept apart from the index so rebuilding never loses them.
+
+**Settings**:
+The preferences set with `Ctrl+S` that change what the palette lists and how it looks: hiding temp sessions, hiding missing folders, listing orphans last, the accent and the location icons. The command line ignores them.
 
 **Title**:
 The name shown for a session: the one the user set, else the one the provider generated, else the first prompt the user typed. Injected context never counts as a prompt.

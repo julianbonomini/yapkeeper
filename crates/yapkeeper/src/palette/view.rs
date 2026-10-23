@@ -1,10 +1,12 @@
 //! How the palette looks: its theme, its breakpoints and every line it
 //! draws, from the query line, its filters in the accent, down to the
-//! completions or the results and the footer, plus the too-small state.
-//! The preview's lines and the whole conversation's are their own modules'.
+//! completions or the results and the footer, plus the too-small state,
+//! and how each accent and icon set looks. The preview's lines, the whole
+//! conversation's and the settings screen's are their own modules'.
 
 mod preview;
 mod reading;
+mod settings;
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -20,7 +22,10 @@ use super::{Colour, Confirmation, Palette};
 use crate::line::{
     age, availability_label, directory, fit, fit_left, one_line, place, without_controls, wrap,
 };
-use crate::{Availability, Listed, LocationRow, LocationRowKind, Place, Query, Role, TokenKind};
+use crate::{
+    Accent, Availability, IconSet, Listed, LocationRow, LocationRowKind, Place, Query, Role,
+    TokenKind,
+};
 
 /// The smallest terminal the palette draws in; below it only says so.
 const MIN_WIDTH: u16 = 48;
@@ -33,6 +38,9 @@ const SPLIT_WIDTH: u16 = 80;
 const PROMPT: &str = " › ";
 const PLACEHOLDER: &str = "search everything · @where #provider is:state";
 
+/// Cells the query line keeps for the query before it shows the temp count.
+const QUERY_ROOM: usize = 20;
+
 /// How far a worktree's row sits in from its project's.
 const WORKTREE_INDENT: usize = 3;
 
@@ -42,11 +50,51 @@ const SEPARATOR: &str = " · ";
 /// Wide enough for every age up to `99w`, so ages line up.
 const AGE_CELLS: usize = 3;
 
-// Nerd Font icons for where a session ran.
-const REPO_ICON: &str = "\u{f401}";
-const WORKTREE_ICON: &str = "\u{e725}";
-const FOLDER_ICON: &str = "\u{f07b}";
-const MISSING_ICON: &str = "\u{f127}";
+/// What a location icon marks: the kind of place a session ran in, or a
+/// place that is missing.
+#[derive(Clone, Copy)]
+enum Mark {
+    Repo,
+    Worktree,
+    Folder,
+    Missing,
+}
+
+impl Mark {
+    /// Every mark, in the order the settings screen samples them.
+    const ALL: [Mark; 4] = [Mark::Repo, Mark::Worktree, Mark::Folder, Mark::Missing];
+
+    /// This mark's icon in `set` with the space after it, so text after an
+    /// icon starts where the icon would when `set` is `None`.
+    fn icon(self, set: IconSet) -> &'static str {
+        match (set, self) {
+            (IconSet::NerdFont, Mark::Repo) => "\u{f401} ",
+            (IconSet::NerdFont, Mark::Worktree) => "\u{e725} ",
+            (IconSet::NerdFont, Mark::Folder) => "\u{f07b} ",
+            (IconSet::NerdFont, Mark::Missing) => "\u{f127} ",
+            (IconSet::Unicode, Mark::Repo) => "▣ ",
+            (IconSet::Unicode, Mark::Worktree) => "⎇ ",
+            (IconSet::Unicode, Mark::Folder) => "▢ ",
+            (IconSet::Unicode, Mark::Missing) => "⊘ ",
+            // As wide as the widest, so labels after them line up.
+            (IconSet::TextTags, Mark::Repo) => "git  ",
+            (IconSet::TextTags, Mark::Worktree) => "wt   ",
+            (IconSet::TextTags, Mark::Folder) => "dir  ",
+            (IconSet::TextTags, Mark::Missing) => "gone ",
+            (IconSet::None, _) => "",
+        }
+    }
+}
+
+/// Every icon in `set`, without their spaces, apart by one; empty for `None`.
+fn sample(set: IconSet) -> String {
+    let icons: Vec<&str> = Mark::ALL
+        .iter()
+        .map(|mark| mark.icon(set).trim_end())
+        .filter(|icon| !icon.is_empty())
+        .collect();
+    icons.join(" ")
+}
 
 /// What each part of the palette means, as a style.
 struct Theme {
@@ -62,32 +110,43 @@ struct Theme {
 }
 
 impl Theme {
-    fn of(colour: Colour) -> Theme {
-        let dim = Style::new().add_modifier(Modifier::DIM);
+    /// The theme in `accent`, or with no colour at all when either `colour`
+    /// or `accent` is `Mono`.
+    fn of(colour: Colour, accent: Accent) -> Theme {
         let bold = Style::new().add_modifier(Modifier::BOLD);
-        match colour {
-            Colour::Sage => Theme {
-                accent: bold.fg(Color::Indexed(108)),
-                selection: bold.bg(Color::Indexed(237)),
-                dim,
-                title: bold,
-                highlight: bold
-                    .fg(Color::Indexed(108))
-                    .add_modifier(Modifier::UNDERLINED),
-                label: Style::new().fg(Color::Yellow),
-                key: bold,
-            },
-            // Meaning survives without colour: the selection is reversed
-            // and labels are words.
-            Colour::Mono => Theme {
-                accent: bold,
-                selection: Style::new().add_modifier(Modifier::REVERSED),
-                dim,
-                title: bold,
-                highlight: bold.add_modifier(Modifier::UNDERLINED),
-                label: bold,
-                key: bold,
-            },
+        let grey_bar = bold.bg(Color::Indexed(237));
+        let (fg, selection) = match (colour, accent) {
+            (Colour::Mono, _) | (_, Accent::Mono) => return Theme::mono(),
+            (Colour::Accent, Accent::Sage) => (Color::Indexed(108), grey_bar),
+            // Cyan keeps the prototype's reversed selection.
+            (Colour::Accent, Accent::Cyan) => {
+                (Color::Cyan, Style::new().add_modifier(Modifier::REVERSED))
+            }
+            (Colour::Accent, Accent::Amber) => (Color::Indexed(214), grey_bar),
+            (Colour::Accent, Accent::Violet) => (Color::Indexed(141), grey_bar),
+            (Colour::Accent, Accent::Sky) => (Color::Indexed(75), grey_bar),
+        };
+        Theme {
+            accent: bold.fg(fg),
+            selection,
+            highlight: bold.fg(fg).add_modifier(Modifier::UNDERLINED),
+            label: Style::new().fg(Color::Yellow),
+            ..Theme::mono()
+        }
+    }
+
+    /// Meaning survives without colour: the selection is reversed and
+    /// labels are words.
+    fn mono() -> Theme {
+        let bold = Style::new().add_modifier(Modifier::BOLD);
+        Theme {
+            accent: bold,
+            selection: Style::new().add_modifier(Modifier::REVERSED),
+            dim: Style::new().add_modifier(Modifier::DIM),
+            title: bold,
+            highlight: bold.add_modifier(Modifier::UNDERLINED),
+            label: bold,
+            key: bold,
         }
     }
 }
@@ -98,7 +157,7 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
         too_small(frame, area);
         return;
     }
-    let theme = Theme::of(palette.colour);
+    let theme = Theme::of(palette.colour, palette.catalog.settings().accent);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(theme.dim);
@@ -118,6 +177,10 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
         rule,
     );
     footer_line(palette, &theme, frame, footer);
+    if palette.settings.is_some() {
+        settings::render(palette, &theme, frame, top, body);
+        return;
+    }
     if reading {
         reading::render(palette, &theme, frame, top, body);
         return;
@@ -155,8 +218,9 @@ fn too_small(frame: &mut Frame, area: Rect) {
 }
 
 /// The prompt, the query with the cursor after it, and the match count on
-/// the right, followed by `+tools` in the accent while searches read tool
-/// calls.
+/// the right, after how many temp sessions the query left out while that
+/// leaves the query `QUERY_ROOM` cells, and followed by `+tools` in the
+/// accent while searches read tool calls.
 fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let mut count = vec![Span::styled(
         format!("{} / {}", palette.found.len(), palette.catalog.indexed()),
@@ -166,8 +230,15 @@ fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
         count.push(Span::styled(SEPARATOR, theme.dim));
         count.push(Span::styled("+tools", theme.accent));
     }
-    let count_cells: usize = count.iter().map(Span::width).sum();
     let width = usize::from(area.width);
+    let temp = format!("{} temp hidden{SEPARATOR}", palette.left_out.temp);
+    let count_cells: usize = count.iter().map(Span::width).sum();
+    // The query keeps its room first; the temp count goes before it would.
+    let room_for_temp = PROMPT.width() + 1 + QUERY_ROOM + temp.width() + count_cells <= width;
+    if palette.left_out.temp > 0 && room_for_temp {
+        count.insert(0, Span::styled(temp, theme.dim));
+    }
+    let count_cells: usize = count.iter().map(Span::width).sum();
     // One space keeps the query off the count.
     let room = width.saturating_sub(PROMPT.width() + count_cells + 1);
     // The cursor sits after what was typed, or at the placeholder's start.
@@ -236,13 +307,15 @@ fn typed_query<'a>(palette: &Palette, theme: &Theme, cells: usize) -> (Vec<Span<
 fn completions(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let width = usize::from(area.width);
     let home = palette.home.as_deref();
+    let icons = palette.catalog.settings().icons;
     let items: Vec<ListItem> = palette
         .completions
         .iter()
         .map(|completion| {
             let count = completion.count.to_string();
             if let Some(row) = &completion.location {
-                return ListItem::new(location_row(row, &count, home, theme, width));
+                let icon = location_icon(row, icons);
+                return ListItem::new(location_row(row, icon, &count, home, theme, width));
             }
             // A space before the token and at least one before the count,
             // which ends in the last cell, as ages do.
@@ -269,11 +342,12 @@ enum Tail<'r> {
 }
 
 /// ` icon label  kind · tail  count`, `width` cells wide, a worktree
-/// indented under its project: the label keeps its column, the kind words
-/// are never cut, what follows them gives way, and the count ends in the
-/// last cell.
+/// indented under its project, `icon` holding its own space: the label
+/// keeps its column, the kind words are never cut, what follows them gives
+/// way, and the count ends in the last cell.
 fn location_row<'a>(
     row: &LocationRow,
+    icon: &'static str,
     count: &str,
     home: Option<&Path>,
     theme: &Theme,
@@ -315,10 +389,9 @@ fn location_row<'a>(
         ),
         LocationRowKind::Folder { .. } => ("folder".to_string(), None),
     };
-    // A space before the icon and one after it, then the label's column,
-    // two spaces before the detail and at least two before the count, so the
-    // columns read apart.
-    let detail_at = 1 + 2 + label_cells + 2;
+    // A space before the icon, then the label's column, two spaces before
+    // the detail and at least two before the count, so the columns read apart.
+    let detail_at = 1 + icon.width() + label_cells + 2;
     let detail_cells = width.saturating_sub(detail_at + 2 + count.width());
     let kind = fit(&kind, detail_cells);
     let tail_cells = detail_cells.saturating_sub(kind.width() + SEPARATOR.width());
@@ -337,7 +410,7 @@ fn location_row<'a>(
     let mut detail = kind.width();
     let mut spans = vec![
         Span::raw(" ".repeat(1 + indent)),
-        Span::styled(format!("{} ", location_icon(row)), theme.dim),
+        Span::styled(icon, theme.dim),
         Span::raw(label),
         Span::raw(" ".repeat(label_gap)),
         Span::styled(kind, kind_style),
@@ -352,15 +425,16 @@ fn location_row<'a>(
     Line::from(spans)
 }
 
-/// The icon for the kind of place a location-list row stands for, or for a
-/// missing one.
-fn location_icon(row: &LocationRow) -> &'static str {
-    match (&row.kind, row.missing) {
-        (_, true) => MISSING_ICON,
-        (LocationRowKind::Project { .. }, false) => REPO_ICON,
-        (LocationRowKind::Worktree { .. }, false) => WORKTREE_ICON,
-        (LocationRowKind::Folder { .. }, false) => FOLDER_ICON,
-    }
+/// The icon in `set`, with its space, for the kind of place a location-list
+/// row stands for, or for a missing one.
+fn location_icon(row: &LocationRow, set: IconSet) -> &'static str {
+    let mark = match (&row.kind, row.missing) {
+        (_, true) => Mark::Missing,
+        (LocationRowKind::Project { .. }, false) => Mark::Repo,
+        (LocationRowKind::Worktree { .. }, false) => Mark::Worktree,
+        (LocationRowKind::Folder { .. }, false) => Mark::Folder,
+    };
+    mark.icon(set)
 }
 
 /// One line per session, or what to try when there are none.
@@ -371,10 +445,10 @@ fn rows(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     }
     if palette.found.is_empty() {
         let mut lines = vec![Line::from(" No sessions match.")];
-        if palette.left_out.temp {
+        if palette.left_out.temp > 0 {
             lines.push(Line::styled(" is:temp shows temp sessions", theme.dim));
         }
-        if palette.left_out.hidden {
+        if palette.left_out.hidden > 0 {
             lines.push(Line::styled(" is:hidden shows hidden ones", theme.dim));
         }
         let has_words = palette
@@ -391,10 +465,11 @@ fn rows(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let now = SystemTime::now();
     let width = usize::from(area.width);
     let home = palette.home.as_deref();
+    let icons = palette.catalog.settings().icons;
     let items: Vec<ListItem> = palette
         .found
         .iter()
-        .map(|listed| ListItem::new(row(listed, home, theme, width, now)))
+        .map(|listed| ListItem::new(row(listed, home, icons, theme, width, now)))
         .collect();
     let list = List::new(items).highlight_style(theme.selection);
     frame.render_stateful_widget(list, area, &mut palette.selection);
@@ -405,6 +480,7 @@ fn rows(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
 fn row<'a>(
     listed: &Listed,
     home: Option<&Path>,
+    icons: IconSet,
     theme: &Theme,
     width: usize,
     now: SystemTime,
@@ -419,39 +495,49 @@ fn row<'a>(
     let title_cells = width.saturating_sub(1 + label.width() + 1 + location_cells + 1 + AGE_CELLS);
     let title = fit(&one_line(&listed.session.title), title_cells);
     let title_gap = title_cells.saturating_sub(title.width());
-    let (icon, place_text) = location(listed, home, location_cells.saturating_sub(2));
-    let location_gap = location_cells.saturating_sub(2 + place_text.width());
+    let (icon, place_text) = location(listed, home, icons, location_cells);
+    let location_gap = location_cells.saturating_sub(icon.width() + place_text.width());
     let age = age(listed.session.last_active, now);
     Line::from(vec![
         Span::raw(" "),
         Span::raw(title),
         Span::styled(label, theme.label),
         Span::raw(" ".repeat(title_gap + 1)),
-        Span::styled(format!("{icon} {place_text}"), theme.dim),
+        Span::styled(format!("{icon}{place_text}"), theme.dim),
         Span::raw(" ".repeat(location_gap + 1)),
         Span::styled(format!("{age:>AGE_CELLS$}"), theme.dim),
     ])
 }
 
-/// The icon for where `listed` ran, and its place fitted to `cells`: a path
-/// keeps its end, a project name its start.
-fn location(listed: &Listed, home: Option<&Path>, cells: usize) -> (&'static str, String) {
+/// The icon in `set` for where `listed` ran, with its space, and its place
+/// fitted to the rest of `cells`: a path keeps its end, a project name its
+/// start.
+fn location(
+    listed: &Listed,
+    home: Option<&Path>,
+    set: IconSet,
+    cells: usize,
+) -> (&'static str, String) {
+    let icon = icon(listed, set);
     let text = place(listed, home);
+    let cells = cells.saturating_sub(icon.width());
     let text = match listed.location.place {
         Place::Folder => fit_left(&text, cells),
         _ => fit(&text, cells),
     };
-    (icon(listed), text)
+    (icon, text)
 }
 
-/// The icon for the kind of place `listed` ran in, or for a missing folder.
-fn icon(listed: &Listed) -> &'static str {
-    match (&listed.location.place, listed.location.availability) {
-        (_, Availability::Orphaned) => MISSING_ICON,
-        (Place::MainCheckout { .. }, _) => REPO_ICON,
-        (Place::Worktree { .. }, _) => WORKTREE_ICON,
-        (Place::Folder, _) => FOLDER_ICON,
-    }
+/// The icon in `set`, with its space, for the kind of place `listed` ran
+/// in, or for a missing folder.
+fn icon(listed: &Listed, set: IconSet) -> &'static str {
+    let mark = match (&listed.location.place, listed.location.availability) {
+        (_, Availability::Orphaned) => Mark::Missing,
+        (Place::MainCheckout { .. }, _) => Mark::Repo,
+        (Place::Worktree { .. }, _) => Mark::Worktree,
+        (Place::Folder, _) => Mark::Folder,
+    };
+    mark.icon(set)
 }
 
 /// Key hints, dropped whole from the right when they don't fit, or in
@@ -476,15 +562,26 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
         Some(listed) if listed.hidden => "unhide",
         _ => "hide",
     };
-    let hints = match (palette.reading.is_some(), palette.completions.is_empty()) {
-        (true, _) => vec![
+    let open = (
+        palette.settings.is_some(),
+        palette.reading.is_some(),
+        palette.completions.is_empty(),
+    );
+    let hints = match open {
+        (true, _, _) => vec![
+            Some(("↑↓", "move")),
+            Some(("←→", "change")),
+            Some(("Esc", "back")),
+            Some(("^C", "quit")),
+        ],
+        (false, true, _) => vec![
             Some(("↑↓", "scroll")),
             Some(("n N", "match")),
             Some(("PgDn", "page")),
             Some(("Esc", "back")),
             Some(("^C", "quit")),
         ],
-        (false, true) => vec![
+        (false, false, true) => vec![
             Some(("↑↓", "move")),
             Some(("Tab", "locations")),
             Some(("Esc", esc)),
@@ -492,9 +589,10 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
             palette.launch_token.as_ref().map(|_| ("^L", "here")),
             Some(("^X", hide)),
             Some(("^T", "tools")),
+            Some(("^S", "settings")),
             Some(("^C", "quit")),
         ],
-        (false, false) => vec![
+        (false, false, false) => vec![
             Some(("↑↓", "choose")),
             Some(("Tab", "insert")),
             Some(("Esc", esc)),

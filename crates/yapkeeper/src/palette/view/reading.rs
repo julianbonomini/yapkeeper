@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use super::{Drawn, Text, Theme, location};
 use crate::line::{age, availability_label, fit, one_line};
 use crate::palette::Palette;
-use crate::{Listed, Query, Role};
+use crate::{IconSet, Listed, Query, Role};
 
 /// Draws the title and where the session ran into `heading`, and the part
 /// of its conversation the reading position shows into `body`.
@@ -80,7 +80,9 @@ pub(super) fn render(
         None => String::new(),
     };
     let home = palette.home.as_deref();
-    let lines = heading_lines(&listed, home, &found, theme, usize::from(heading.width));
+    let icons = palette.catalog.settings().icons;
+    let width = usize::from(heading.width);
+    let lines = heading_lines(&listed, home, icons, &found, theme, width);
     frame.render_widget(Paragraph::new(lines), heading);
 }
 
@@ -89,6 +91,7 @@ pub(super) fn render(
 fn heading_lines(
     listed: &Listed,
     home: Option<&Path>,
+    icons: IconSet,
     found: &str,
     theme: &Theme,
     width: usize,
@@ -110,8 +113,8 @@ fn heading_lines(
         session.provider,
         age(session.last_active, SystemTime::now())
     );
-    let place_cells = width.saturating_sub(ran.width() + 2 + label.width());
-    let (icon, place) = location(listed, home, place_cells);
+    let place_cells = width.saturating_sub(ran.width() + label.width());
+    let (icon, place) = location(listed, home, icons, place_cells);
     vec![
         Line::from(vec![
             Span::styled(format!(" {title}"), theme.title),
@@ -119,7 +122,7 @@ fn heading_lines(
             Span::styled(found.to_string(), theme.dim),
         ]),
         Line::from(vec![
-            Span::styled(format!("{ran}{icon} {place}"), theme.dim),
+            Span::styled(format!("{ran}{icon}{place}"), theme.dim),
             Span::styled(label, theme.label),
         ]),
     ]

@@ -3,9 +3,10 @@
 //! each one is rooted and where Yapkeeper keeps its own files, keeps the
 //! index of every session up to date, finds sessions by what was said and
 //! by the query language's filters, reads each session's location from
-//! the disk when it is listed, and keeps the user's hides apart from the
-//! index. A `Catalog` loads all of that once so it can be searched many
-//! times and record hides, as the `palette` does while the person types;
+//! the disk when it is listed, and keeps the user's hides and settings apart
+//! from the index. A `Catalog` loads all of that once so it can be searched
+//! many times, by the settings, and record hides and settings, as the
+//! `palette` does while the person types;
 //! `line` holds how a session reads as one line of terminal text, for the
 //! palette and the CLI.
 
@@ -17,6 +18,7 @@ mod location;
 pub mod palette;
 mod prefs;
 mod query;
+mod settings;
 
 use prefs::Choice;
 
@@ -34,6 +36,7 @@ pub use location::*;
 pub use query::{
     Completion, LocationRow, LocationRowKind, Query, State, Token, TokenKind, location_token,
 };
+pub use settings::*;
 pub use yapkeeper_model::*;
 
 /// Where each provider keeps its history.
@@ -91,6 +94,7 @@ fn adapters(roots: &Roots) -> [Box<dyn Adapter>; 2] {
 
 /// Where Yapkeeper keeps its own files: `$XDG_DATA_HOME/yapkeeper` when that
 /// is set and absolute, otherwise `$HOME/.local/share/yapkeeper`. Creates nothing.
+#[derive(Clone)]
 pub struct DataDir {
     dir: PathBuf,
 }
@@ -122,7 +126,8 @@ impl DataDir {
         self.dir.join("index.sqlite")
     }
 
-    /// `<dir>/prefs.sqlite`, the user's hides; never touched by the index.
+    /// `<dir>/prefs.sqlite`, the user's hides and settings; never touched by
+    /// the index.
     pub fn prefs(&self) -> PathBuf {
         self.dir.join("prefs.sqlite")
     }
@@ -143,16 +148,17 @@ pub struct Listing {
     pub files_read: usize,
     /// History bytes read during this call; only the new bytes of a file that grew.
     pub bytes_read: u64,
-    /// Which defaults left out a session the query otherwise matched.
+    /// How many sessions the query otherwise matched each default left out.
     pub left_out: LeftOut,
 }
 
-/// The defaults that left sessions out of a listing: temp sessions unless
-/// the query has `is:temp`, and hidden ones unless it has `is:hidden`.
+/// How many sessions every filter admitted that each default left out: temp
+/// sessions unless the query has `is:temp` (none while `hide_temp` is off),
+/// and hidden ones unless it has `is:hidden`. A session can count in both.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LeftOut {
-    pub temp: bool,
-    pub hidden: bool,
+    pub temp: usize,
+    pub hidden: usize,
 }
 
 /// A session with its location and whether it is hidden, as of this listing.
@@ -263,14 +269,17 @@ fn listing(catalog: &Catalog, query: &Query) -> Result<Listing, DataError> {
 
 /// Every indexed session as of `Catalog::open`, with its location and
 /// whether it is hidden, ready to be searched many times without
-/// refreshing the index or rereading the disk, and to record hides.
+/// refreshing the index or rereading the disk, and to record hides and
+/// settings.
 pub struct Catalog {
     index: index::Index,
     /// Every session in the index, in no particular order; shared with what
     /// each search finds, so a search holds no borrow of the catalog.
     sessions: Vec<Rc<Listed>>,
-    /// Where `set_hidden` records its choices.
-    prefs: PathBuf,
+    /// The settings `parse` and `completions` follow.
+    settings: Settings,
+    /// Where the index and the preferences live.
+    data: DataDir,
     providers: Vec<&'static str>,
     malformed_lines: usize,
     searched: Vec<PathBuf>,
@@ -286,23 +295,25 @@ pub struct Found {
 }
 
 impl Catalog {
-    /// Brings the index up to date as `list` does, then reads the hides and
-    /// every session's location from the disk once. Fails only as `list` does.
+    /// Brings the index up to date as `list` does, then reads the hides, the
+    /// settings and every session's location from the disk once. Fails only
+    /// as `list` does.
     pub fn open(roots: &Roots, data: &DataDir) -> Result<Catalog, DataError> {
         let refreshed = refresh(roots, data)?;
-        let hides = prefs::hides(&data.prefs())?;
+        let prefs = prefs::read(&data.prefs())?;
         let sessions = refreshed
             .sessions
             .into_iter()
             .map(|session| {
-                let hidden = hides.contains(&session);
+                let hidden = prefs.hides.contains(&session);
                 Rc::new(listed(session, hidden))
             })
             .collect();
         Ok(Catalog {
             index: refreshed.index,
             sessions,
-            prefs: data.prefs(),
+            settings: prefs.settings,
+            data: data.clone(),
             providers: roots.providers(),
             malformed_lines: refreshed.malformed_lines,
             searched: refreshed.searched,
@@ -311,9 +322,12 @@ impl Catalog {
         })
     }
 
-    /// `text` read as the query language, with this catalog's providers.
+    /// `text` read as the query language, with this catalog's providers,
+    /// following its settings: temp sessions are left out only while
+    /// `hide_temp` is on, and orphaned ones come last only while
+    /// `orphans_last` is on. `Query::parse` always follows the defaults.
     pub fn parse(&self, text: &str) -> Query {
-        Query::parse(text, &self.providers)
+        Query::parse(text, &self.providers).following(self.settings)
     }
 
     /// The sessions matching `query`, with the same rules and order as
@@ -349,12 +363,13 @@ impl Catalog {
     /// its worktrees after it, then the plain folders. Each group is ordered
     /// most recent first, and missing places come last. A row is kept when a
     /// session that the typed `@` token lists ran there. Missing places are
-    /// left out while nothing follows the `@`. Empty unless the last token
-    /// starts with `@`, `#`, `is:`, `!` or `not:` and nothing follows it, so
-    /// a space never offers any, and empty when the token typed is already
-    /// the only way to finish it.
+    /// left out while nothing follows the `@` and `hide_missing` is on.
+    /// Empty unless the last token starts with `@`, `#`, `is:`, `!` or
+    /// `not:` and nothing follows it, so a space never offers any, and empty
+    /// when the token typed is already the only way to finish it. Counts and
+    /// rows follow this catalog's settings, as `parse` does.
     pub fn completions(&self, text: &str) -> Vec<Completion> {
-        query::completions(text, &self.providers, &self.sessions)
+        query::completions(text, &self.providers, &self.sessions, self.settings)
     }
 
     /// Hides `session`, so that only `is:hidden` finds it, or shows it
@@ -365,7 +380,7 @@ impl Catalog {
             true => Choice::Hide,
             false => Choice::Unhide,
         };
-        prefs::record(&self.prefs, std::slice::from_ref(session), choice)?;
+        prefs::record(&self.data.prefs(), std::slice::from_ref(session), choice)?;
         let key = SessionKey::of(session);
         for listed in &mut self.sessions {
             if SessionKey::of(&listed.session) == key {
@@ -375,6 +390,27 @@ impl Catalog {
                 });
             }
         }
+        Ok(())
+    }
+
+    /// The settings recorded in prefs.sqlite when this catalog opened, as
+    /// changed since; defaults for any not recorded.
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// Where this catalog's index and preferences live.
+    pub fn data_dir(&self) -> &DataDir {
+        &self.data
+    }
+
+    /// Records `settings` in prefs.sqlite, which is created when missing or
+    /// upgraded with its hides kept, and makes later `parse` and
+    /// `completions` follow them. Fails, changing nothing, when the
+    /// preferences can't be written.
+    pub fn set_settings(&mut self, settings: Settings) -> Result<(), DataError> {
+        prefs::record_settings(&self.data.prefs(), &settings)?;
+        self.settings = settings;
         Ok(())
     }
 

@@ -13,6 +13,7 @@ yapkeeper-codex.workspace = true
 yapkeeper-model.workspace = true
 
 [dev-dependencies]
+jiff.workspace = true
 tempfile.workspace = true
 
 [lints]

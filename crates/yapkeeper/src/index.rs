@@ -103,6 +103,12 @@ END;
 /// `OR`, `NEAR`, `*` and `:` in it are matched as text.
 const PHRASE: &str = r#"'"' || replace(?1, '"', '""') || '"'"#;
 
+/// Messages that aren't tool-level: what the person and the assistant
+/// said in the session's own thread. Tool calls, tool output and every
+/// subagent thread are tool-level.
+const CONVERSATION: &str =
+    "messages.role IN ('user', 'assistant') AND threads.thread = threads.session_id";
+
 /// Brings the index at `path` up to date with every source of `adapters`,
 /// opening only files that changed since the last call, and returns its
 /// sessions that match `query`'s words, in no particular order, with their
@@ -487,12 +493,7 @@ fn retain_matching(
     let mut words: Vec<_> = query.words().iter().collect();
     // A longer word tends to be rarer, so fewer sessions are left for the rest.
     words.sort_by_key(|word| Reverse(word.key().chars().count()));
-    // Tool-level text is tool calls, tool output and every subagent thread.
-    let scope = if query.tools() {
-        "true"
-    } else {
-        "messages.role IN ('user', 'assistant') AND threads.thread = threads.session_id"
-    };
+    let scope = if query.tools() { "true" } else { CONVERSATION };
     for word in words {
         let matched = sessions_matching(transaction, word, scope, sessions)?;
         sessions.retain(|session| matched.contains(&SessionKey::of(session)));

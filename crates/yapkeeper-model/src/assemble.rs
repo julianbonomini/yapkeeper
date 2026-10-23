@@ -149,7 +149,9 @@ impl SourceDigest {
 #[derive(Debug, Default)]
 pub struct Assembled {
     pub sessions: Vec<Session>,
-    /// Thread id → the id of the session it belongs to (a session maps to itself).
+    /// Thread id → the id of the session it belongs to (a session maps to
+    /// itself). With `SourceDigest::thread`, it says which session a file's
+    /// messages belong to; a thread missing here was left out.
     pub session_of: HashMap<String, String>,
 }
 

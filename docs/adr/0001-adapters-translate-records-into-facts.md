@@ -12,11 +12,15 @@ Adapters keep no state. `Adapter::read(path, from)` turns each complete record f
 
 The model (`yapkeeper-model`) owns every fold rule: which title wins, that a file's first identity counts, which time is a session's activity, and how a subagent chain reaches its session. `SourceDigest` carries one file's fold between runs, and `assemble` turns a provider's digests into sessions. `FOLD_VERSION` names the rules.
 
+`assemble` also says which session each thread belongs to (`Assembled::session_of`). The model never holds message text. The index stores each file's messages under the thread that file records and is the only code that attaches them to sessions. It also decides which messages are tool-level: tool calls, tool output and every thread that is not the session's own.
+
 The index stores each file's identity (device and inode), size, mtime, offset, parser version, fold version and digest. It treats the digest as opaque text. A file whose identity, parser version or fold version changed, which shrank below its offset, or whose digest won't decode, is read again from the start.
 
 ## Rejected
 
 Each adapter carrying its own serialised parse state, which the index stores and hands back on the next read. Every adapter would repeat the same resumption code with its own state type. That state's layout would leak into the index, which stores it. The adapter's result would also mix a cumulative part with only the messages that were new since the last read, which is hard to describe.
+
+A second, in-memory path in the model (`scan`) that read every file from 0 and attached messages to sessions itself. Production didn't run it, so tests that drove it checked a copy of the rules rather than the rules. Adapter tests drive `Adapter::read`, and `list` and `search` over fixture roots, instead.
 
 ## Consequences
 

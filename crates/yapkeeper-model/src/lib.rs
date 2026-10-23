@@ -1,13 +1,15 @@
 //! The session model every provider adapter feeds, the contract an adapter
-//! fulfils, the fold rules that turn an adapter's facts into sessions, and
-//! the JSONL reading rules adapters share. Nothing here knows how any
-//! provider stores its history.
+//! fulfils, the fold rules that turn an adapter's facts into sessions
+//! (including which session each thread belongs to), and the JSONL reading
+//! rules adapters share. It never holds a session's messages: they stay in
+//! each `Reading`'s facts, and `Assembled::session_of` says which session the
+//! thread that recorded them belongs to. Nothing here knows how any provider
+//! stores its history.
 
 #![forbid(unsafe_code)]
 
 mod assemble;
 
-use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -102,79 +104,6 @@ pub enum TitleKind {
     Generated,
 }
 
-/// Every source of `adapter` read from 0 in memory, folded by the same rules
-/// as the index.
-pub fn scan(adapter: &dyn Adapter) -> Scan {
-    let mut sources = adapter.sources();
-    // `assemble` breaks title ties by path order.
-    sources.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
-    let mut digests = Vec::new();
-    let mut messages = Vec::new();
-    let mut malformed_lines = 0;
-    for path in &sources {
-        let Ok(modified) = fs::metadata(path).and_then(|metadata| metadata.modified()) else {
-            continue;
-        };
-        let reading = adapter.read(path, 0);
-        malformed_lines += reading.malformed_lines;
-        let mut digest = SourceDigest::default();
-        digest.absorb(&reading.facts, modified);
-        messages.push(
-            reading
-                .facts
-                .into_iter()
-                .filter_map(|fact| match fact {
-                    Fact::Message(message) => Some(message),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-        );
-        digests.push(digest);
-    }
-    let Assembled {
-        sessions,
-        session_of,
-    } = assemble(adapter, &digests);
-    let mut transcripts: Vec<Transcript> = sessions
-        .into_iter()
-        .map(|session| Transcript {
-            session,
-            messages: Vec::new(),
-            subagents: Vec::new(),
-        })
-        .collect();
-    let position: HashMap<String, usize> = transcripts
-        .iter()
-        .enumerate()
-        .map(|(index, transcript)| (transcript.session.id.clone(), index))
-        .collect();
-    for (digest, messages) in digests.iter().zip(messages) {
-        let Some(thread) = digest.thread() else {
-            continue;
-        };
-        let Some(&index) = session_of.get(thread).and_then(|id| position.get(id)) else {
-            continue;
-        };
-        let transcript = &mut transcripts[index];
-        if thread == transcript.session.id {
-            transcript.messages.extend(messages);
-        } else {
-            transcript.subagents.push(SubagentTranscript { messages });
-        }
-    }
-    Scan {
-        transcripts,
-        malformed_lines,
-    }
-}
-
-/// One adapter's history read whole, in memory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Scan {
-    pub transcripts: Vec<Transcript>,
-    pub malformed_lines: usize,
-}
-
 /// A conversation recorded by a provider, ready to show and resume, without its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
@@ -199,26 +128,6 @@ pub struct Session {
     /// Agents this session started, through any chain of subagents.
     pub subagent_count: usize,
     pub resume: ResumeCommand,
-}
-
-/// A session with everything it said.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Transcript {
-    pub session: Session,
-    /// In transcript order, with injected context removed and long text capped.
-    pub messages: Vec<Message>,
-    /// Agents this session started, each with its own transcript. Their text
-    /// is tool-level, like tool calls and tool output: it belongs to the
-    /// session but is not something the person and the assistant said to
-    /// each other, so it is searched only on request.
-    pub subagents: Vec<SubagentTranscript>,
-}
-
-/// What one subagent of a session said and did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubagentTranscript {
-    /// Read by the same rules as a session's messages.
-    pub messages: Vec<Message>,
 }
 
 /// Git facts the provider recorded when the session ran. They may no longer

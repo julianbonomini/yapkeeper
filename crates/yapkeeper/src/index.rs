@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior, params, params_from_iter};
 use yapkeeper_model::{
-    Adapter, Assembled, FOLD_VERSION, Fact, RecordedGit, ResumeCommand, Role, Session,
+    Adapter, Assembled, FOLD_VERSION, Fact, Message, RecordedGit, ResumeCommand, Role, Session,
     SourceDigest, assemble,
 };
 
@@ -124,12 +124,50 @@ impl Index {
         query: &Query,
         candidates: HashSet<SessionKey>,
     ) -> Result<HashSet<SessionKey>, DataError> {
-        narrow(&self.connection, query, candidates).map_err(|source| DataError {
+        narrow(&self.connection, query, candidates).map_err(|source| self.error(source))
+    }
+
+    /// What the person and the assistant said in `session`'s own thread,
+    /// in the order recorded; empty for a session the index doesn't hold.
+    /// Fails only when the index can no longer be read.
+    pub(crate) fn conversation(&self, session: &SessionKey) -> Result<Vec<Message>, DataError> {
+        conversation(&self.connection, session).map_err(|source| self.error(source))
+    }
+
+    fn error(&self, source: Cause) -> DataError {
+        DataError {
             path: self.path.clone(),
             file: DataFile::Index,
             source,
-        })
+        }
     }
+}
+
+/// `Index::conversation` before its error names the index.
+fn conversation(connection: &Connection, session: &SessionKey) -> Result<Vec<Message>, Cause> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT messages.role, messages.text
+        FROM messages
+        JOIN sources ON sources.path = messages.source_path
+        JOIN threads ON threads.provider = sources.provider
+            AND threads.thread = sources.thread
+        WHERE threads.provider = ?1 AND threads.session_id = ?2 AND {CONVERSATION}
+        ORDER BY sources.path, messages.seq"
+    ))?;
+    let messages = statement
+        .query_map(params![session.provider, session.id], |row| {
+            // `CONVERSATION` admits only the person's and the assistant's rows.
+            let role = match row.get::<_, String>(0)?.as_str() {
+                "user" => Role::User,
+                _ => Role::Assistant,
+            };
+            Ok(Message {
+                role,
+                text: row.get(1)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(messages)
 }
 
 /// `Index::matching` before its error names the index.

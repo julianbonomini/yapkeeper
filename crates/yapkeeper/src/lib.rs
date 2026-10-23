@@ -322,6 +322,14 @@ impl Catalog {
         Ok(Found { sessions, left_out })
     }
 
+    /// What the person and the assistant said in `session`, in the order
+    /// recorded: tool calls, tool output and subagent transcripts are left
+    /// out. Empty for a session this catalog doesn't hold. Fails only when
+    /// the index can no longer be read.
+    pub fn conversation(&self, session: &Session) -> Result<Vec<Message>, DataError> {
+        self.index.conversation(&SessionKey::of(session))
+    }
+
     /// Every session in the index, whether or not a query keeps it.
     pub fn indexed(&self) -> usize {
         self.sessions.len()

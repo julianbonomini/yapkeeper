@@ -1,5 +1,6 @@
 //! The command palette: a query line searched live as the person types,
-//! the sessions it matches and key hints, over a `Catalog` loaded once.
+//! the sessions it matches, a preview of the selected one and key hints,
+//! over a `Catalog` loaded once.
 //! It owns every terminal decision (keys, layout, theme and the terminal's
 //! lifecycle) and never touches the index, the preferences or the disk.
 
@@ -12,7 +13,7 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
-use crate::{Catalog, LeftOut, Listed, line};
+use crate::{Catalog, LeftOut, Listed, Message, Query, line};
 
 pub use terminal::{Restore, run};
 
@@ -24,11 +25,17 @@ pub struct Palette<'c> {
     /// Shown as `~` at the start of a folder's path.
     home: Option<PathBuf>,
     query: String,
+    /// `query` as the last search read it.
+    parsed: Query,
     /// What the query found, in `search`'s order.
     found: Vec<&'c Listed>,
     left_out: LeftOut,
     selection: ListState,
-    /// Why the last search failed; the rows are the last ones that didn't.
+    /// What was said in the selected session, for the preview.
+    conversation: Vec<Message>,
+    /// Why the last search, or the selected session's conversation, failed
+    /// to read; cleared by the next search that succeeds. After a failed
+    /// search the rows are the last ones that didn't fail.
     error: Option<String>,
 }
 
@@ -66,9 +73,11 @@ impl<'c> Palette<'c> {
             colour,
             home: line::home(),
             query: String::new(),
+            parsed: Query::default(),
             found: Vec::new(),
             left_out: LeftOut::default(),
             selection: ListState::default(),
+            conversation: Vec::new(),
             error: None,
         };
         palette.search();
@@ -118,8 +127,8 @@ impl<'c> Palette<'c> {
 
     /// Searches the catalog for the query and selects the first row.
     fn search(&mut self) {
-        let query = self.catalog.parse(&self.query);
-        match self.catalog.search(&query) {
+        self.parsed = self.catalog.parse(&self.query);
+        match self.catalog.search(&self.parsed) {
             Ok(found) => {
                 self.found = found.sessions;
                 self.left_out = found.left_out;
@@ -128,7 +137,8 @@ impl<'c> Palette<'c> {
             Err(error) => self.error = Some(error.to_string()),
         }
         let first = (!self.found.is_empty()).then_some(0);
-        self.selection = ListState::default().with_selected(first);
+        self.selection = ListState::default();
+        self.select(first);
     }
 
     /// Moves the selection one row, stopping at the first and last rows.
@@ -137,10 +147,33 @@ impl<'c> Palette<'c> {
             return;
         };
         let last = self.found.len().saturating_sub(1);
-        self.selection.select(Some(match direction {
+        let row = match direction {
             Direction::Up => selected.saturating_sub(1),
             Direction::Down => (selected + 1).min(last),
-        }));
+        };
+        if row != selected {
+            self.select(Some(row));
+        }
+    }
+
+    /// Selects `row` and reads what was said in its session. A read error
+    /// is shown in the footer, with an empty conversation.
+    fn select(&mut self, row: Option<usize>) {
+        self.selection.select(row);
+        let session = row.map(|row| &self.found[row].session);
+        self.conversation = match session.map(|session| self.catalog.conversation(session)) {
+            Some(Ok(conversation)) => conversation,
+            Some(Err(error)) => {
+                self.error = Some(error.to_string());
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+    }
+
+    /// The session the selection bar is on.
+    fn selected(&self) -> Option<&'c Listed> {
+        self.selection.selected().map(|row| self.found[row])
     }
 }
 

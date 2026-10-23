@@ -1,5 +1,8 @@
 //! How the palette looks: its theme, its breakpoints and every line it
 //! draws, from the query line down to the footer, plus the too-small state.
+//! The preview's lines are its own module's.
+
+mod preview;
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -20,7 +23,7 @@ const MIN_WIDTH: u16 = 48;
 const MIN_HEIGHT: u16 = 12;
 
 /// From this many terminal columns, results keep the left side and the
-/// right is left for the preview.
+/// preview the right.
 const SPLIT_WIDTH: u16 = 80;
 
 const PROMPT: &str = " › ";
@@ -40,6 +43,9 @@ struct Theme {
     accent: Style,
     selection: Style,
     dim: Style,
+    title: Style,
+    /// Text a search word matched; underlined, so it shows without colour.
+    highlight: Style,
     /// `orphaned`, `unavailable` and search errors.
     label: Style,
     key: Style,
@@ -54,6 +60,10 @@ impl Theme {
                 accent: bold.fg(Color::Indexed(108)),
                 selection: bold.bg(Color::Indexed(237)),
                 dim,
+                title: bold,
+                highlight: bold
+                    .fg(Color::Indexed(108))
+                    .add_modifier(Modifier::UNDERLINED),
                 label: Style::new().fg(Color::Yellow),
                 key: bold,
             },
@@ -63,6 +73,8 @@ impl Theme {
                 accent: bold,
                 selection: Style::new().add_modifier(Modifier::REVERSED),
                 dim,
+                title: bold,
+                highlight: bold.add_modifier(Modifier::UNDERLINED),
                 label: bold,
                 key: bold,
             },
@@ -91,9 +103,10 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
     .areas(inner);
     let results = match area.width >= SPLIT_WIDTH {
         true => {
-            let [results, _preview] =
+            let [results, preview] =
                 Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
                     .areas(body);
+            preview::render(palette, &theme, frame, preview);
             results
         }
         false => body,
@@ -217,17 +230,21 @@ fn row<'a>(
 /// keeps its end, a project name its start.
 fn location(listed: &Listed, home: Option<&Path>, cells: usize) -> (&'static str, String) {
     let text = place(listed, home);
-    let icon = match (&listed.location.place, listed.location.availability) {
-        (_, Availability::Orphaned) => MISSING_ICON,
-        (Place::MainCheckout { .. }, _) => REPO_ICON,
-        (Place::Worktree { .. }, _) => WORKTREE_ICON,
-        (Place::Folder, _) => FOLDER_ICON,
-    };
     let text = match listed.location.place {
         Place::Folder => fit_left(&text, cells),
         _ => fit(&text, cells),
     };
-    (icon, text)
+    (icon(listed), text)
+}
+
+/// The icon for the kind of place `listed` ran in, or for a missing folder.
+fn icon(listed: &Listed) -> &'static str {
+    match (&listed.location.place, listed.location.availability) {
+        (_, Availability::Orphaned) => MISSING_ICON,
+        (Place::MainCheckout { .. }, _) => REPO_ICON,
+        (Place::Worktree { .. }, _) => WORKTREE_ICON,
+        (Place::Folder, _) => FOLDER_ICON,
+    }
 }
 
 /// Key hints, dropped whole from the right when they don't fit, or the

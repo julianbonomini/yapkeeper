@@ -165,6 +165,28 @@ impl Query {
         &self.tokens
     }
 
+    /// The byte ranges of `text` that the query's search words match, by
+    /// the same rule as the search, in order, with overlapping ranges
+    /// merged; empty when no word matches. Each range covers whole
+    /// characters. Excluded words are never highlighted.
+    pub fn highlights(&self, text: &str) -> Vec<Range<usize>> {
+        let folded = Folded::of(text);
+        let mut found: Vec<Range<usize>> = self
+            .words
+            .iter()
+            .flat_map(|word| word.find_in(text, &folded))
+            .collect();
+        found.sort_by_key(|range| range.start);
+        let mut merged: Vec<Range<usize>> = Vec::new();
+        for range in found {
+            match merged.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => merged.push(range),
+            }
+        }
+        merged
+    }
+
     pub(crate) fn words(&self) -> &[Word] {
         &self.words
     }
@@ -350,11 +372,61 @@ impl Word {
     /// Whether `text` contains this word, ignoring case unless the word has
     /// an uppercase letter. Never true unless `fold(text)` contains `key()`.
     pub(crate) fn matches(&self, text: &str) -> bool {
-        if self.text.chars().any(char::is_uppercase) {
+        if self.matches_case() {
             text.contains(&self.text)
         } else {
             fold(text).contains(&self.key)
         }
+    }
+
+    /// Every range of `text`, whose fold is `folded`, that this word
+    /// matches by the rule of `matches`, not overlapping one another.
+    fn find_in(&self, text: &str, folded: &Folded) -> Vec<Range<usize>> {
+        if self.matches_case() {
+            return text
+                .match_indices(&self.text)
+                .map(|(at, found)| at..at + found.len())
+                .collect();
+        }
+        folded
+            .text
+            .match_indices(&self.key)
+            .map(|(at, found)| folded.origin(at..at + found.len()))
+            .collect()
+    }
+
+    /// Whether case counts: only when the word has an uppercase letter.
+    fn matches_case(&self) -> bool {
+        self.text.chars().any(char::is_uppercase)
+    }
+}
+
+/// A text's `fold`, with where each folded character came from, so a match
+/// in the fold can be shown in the original text.
+struct Folded {
+    text: String,
+    /// For each original character, in order: where its fold starts in
+    /// `text`, and its own byte range in the original.
+    chars: Vec<(usize, Range<usize>)>,
+}
+
+impl Folded {
+    fn of(original: &str) -> Folded {
+        let mut text = String::new();
+        let mut chars = Vec::new();
+        for (at, c) in original.char_indices() {
+            chars.push((text.len(), at..at + c.len_utf8()));
+            text.extend(c.to_lowercase());
+        }
+        Folded { text, chars }
+    }
+
+    /// The original characters whose folds `range` of the fold touches.
+    fn origin(&self, range: Range<usize>) -> Range<usize> {
+        let containing = |at: usize| self.chars.partition_point(|(start, _)| *start <= at) - 1;
+        let first = &self.chars[containing(range.start)].1;
+        let last = &self.chars[containing(range.end - 1)].1;
+        first.start..last.end
     }
 }
 

@@ -4,7 +4,7 @@ Now, where was I?
 
 Yapkeeper is a local CLI/TUI for finding, browsing, and resuming Claude Code, Codex, and Pi conversations across projects, Git worktrees, and folders, including sessions started outside Yapkeeper.
 
-The project is in planning. The `yapkeeper` command is not implemented yet.
+The palette is in planning. The `yapkeeper` command lists, searches and hides your Claude Code and Codex sessions, one line each with title, provider, age and location; `yapkeeper --help` covers the query language and where Yapkeeper keeps its files.
 
 On 1.91 GB of local histories, disposable benchmarks indexed in 2.75 seconds with 50 MiB peak RAM in Rust, versus 2.87 seconds and 235 MiB in Bun/TypeScript. We chose Rust with Ratatui for comparable indexing speed and a smaller memory footprint.
 

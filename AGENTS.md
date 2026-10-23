@@ -8,7 +8,7 @@ Never add AI authorship or generation notices to commit subjects, bodies, or tra
 
 ## Product and session data
 
-Read `docs/product.md` before changing product behavior, `GLOSSARY.md` when defining session or location concepts, and `docs/session-formats.md` before working on provider discovery, parsing, or resume.
+Read `docs/product.md` before changing product behavior, `GLOSSARY.md` when defining session or location concepts, and `docs/session-formats.md` before working on provider discovery, parsing, or resume. Read `docs/adr/` before changing the adapter contract, the model's fold rules or the index.
 
 Provider adapters own format-specific discovery, parsing, and resume arguments. The shared model, search index, and interface consume their results.
 

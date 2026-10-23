@@ -26,9 +26,9 @@ Words search conversation text, titles, and provider recaps. Every other token i
 | Form | Meaning | Examples |
 |---|---|---|
 | `@where` | Location: project, `project:worktree`, or any part of a path | `@acme-api`, `@acme-api:billing-retry`, `@scratch` |
-| `#agent` | Provider | `#claude`, `#codex` |
+| `#provider` | Provider | `#claude`, `#codex` |
 | `is:state` | Session state | `is:orphaned`, `is:temp`, `is:git`, `is:folder`, `is:pr`, `is:recap`, `is:unavailable`, `is:hidden` |
-| `!x`, `not:x` | Exclude a filter, an agent or state by name, or a word | `!codex`, `!temp`, `!@scratch`, `!is:pr`, `not:orphaned`, `!flaky` |
+| `!x`, `not:x` | Exclude a filter, a provider or state by name, or a word | `!codex`, `!temp`, `!@scratch`, `!is:pr`, `not:orphaned`, `!flaky` |
 
 Rules:
 
@@ -36,13 +36,17 @@ Rules:
 - A space never opens a completion list. `is pr` is two search words, so any phrase stays searchable.
 - No space goes between `!` and what it negates: `!codex`, not `! codex`.
 - The query line colors filter tokens with the accent color and leaves search words plain, so the user can see how the query was read.
-- Matching is case-insensitive substring matching with smart case. Fuzzy matching was not tried.
-- Tool calls are searched only after `Ctrl+T`.
+- Matching is case-insensitive substring matching with smart case. Fuzzy matching was not tried. A word with an uppercase letter matches case; other words ignore case letter by letter, so the index and the check always agree.
+- Tool calls, tool output and subagent transcripts are searched only after `Ctrl+T`, or with `--tools` on the command line.
 - Hidden sessions appear only with `is:hidden`.
 
 ## Locations
 
 A location is a Git repo, one of its linked worktrees, or a plain folder. Yapkeeper derives it from the session's recorded working directory: it walks up to the nearest `.git`, treats a `.git` directory as a main checkout and a `.git` file as a linked worktree, and names the project after the main checkout's folder.
+
+A session whose directory no longer exists is `orphaned`; one whose directory exists but can't be inspected, such as when permission is denied, is `unavailable`. Both are read from the disk on every listing and never stored, so deleting a directory takes effect on the next listing. `yapkeeper list` prints each session's location as `project`, `project › worktree`, or the folder path, after an `orphaned` or `unavailable` label when one applies.
+
+An orphaned or unavailable session's project is inferred on a best-effort basis. The first of these that applies names the project: the recorded `repository_url`, then the nearest existing repo above the directory, then a path layout (`X.wt/w`, `R/.claude/worktrees/w`, `~/.tool/worktrees/P/w`, `P/worktrees/w` or `P/.worktrees/w`). The worktree comes from that layout, or from a recorded branch whose last segment matches the folder name. When nothing applies, the raw path is shown.
 
 `Tab` (or typing `@`) opens the location list. Each project row comes first and covers the main checkout and every worktree; its worktrees are listed under it. Plain folders follow. Groups are ordered by most recent activity. Each row has a kind icon on the left, a kind label and path, and a session count. With the Unicode icon set:
 
@@ -55,7 +59,7 @@ A location is a Git repo, one of its linked worktrees, or a plain folder. Yapkee
 
 Typing after `@` matches location names and paths, so `@code` finds every project under `~/code`. Result rows label locations as `project › worktree`; the `project:worktree` form is used only inside `@` tokens. `Ctrl+L` inserts the location Yapkeeper was launched from.
 
-A folder that no longer exists cannot be checked for Git, so it is shown as `missing` with its path.
+In the location list, a folder that no longer exists cannot be checked for Git, so it is shown as `missing` with its path.
 
 ## Preview
 
@@ -80,7 +84,7 @@ Recaps cost nothing extra: Claude Code writes `away_summary` records into its se
 
 | Setting | Default | Reason |
 |---|---|---|
-| Hide sessions in temp folders (`/private/tmp`, `/tmp`, `/var/folders`) | On | 59 of 783 real sessions were scratch work in temp folders. The header shows how many are hidden, and `is:temp` shows them anyway. |
+| Hide sessions in temp folders (`/private/tmp`, `/tmp`, `/var/folders`, `/private/var/folders`) | On | 59 of 783 real sessions were scratch work in temp folders. The header shows how many are hidden, and `is:temp` shows them anyway. |
 | Hide missing folders in the location list | On | 46 of 82 real recorded folders no longer exist. They still appear when the user types a name after `@`. |
 | List orphaned sessions after the rest | On | 501 of 783 real sessions were orphaned and crowded out live ones. They stay searchable. |
 | Accent | Sage (256-color index 108), soft grey selection bar (index 237) | Chosen from cyan, amber, violet, sky, sage, and monochrome. |
@@ -115,14 +119,36 @@ For an orphaned session the dialog explains that the folder is gone and offers `
 
 ## Loading
 
+`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. Unlike the prototype below, it keeps tool output, capped like tool calls, so `--tools` can search it.
+
 The prototype reads every history file at launch, in parallel threads, without an index. On the real histories (866 files, 1.18 GB) it loaded 783 sessions in about 0.3 s with 55 MB peak memory on the user's Mac. It skips tool results, keeps tool calls as one-line summaries, caps messages at 4,000 characters, and drops injected context such as command caveats, `AGENTS.md` instructions, and environment blocks. Sessions with no user prompt (64) and Codex subagent sessions (19) are left out.
+
+## Where Yapkeeper keeps its files
+
+Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` when `XDG_DATA_HOME` is unset or relative:
+
+- `index.sqlite`, the index: rebuildable, and safe to delete at any time.
+- `prefs.sqlite`, the preferences, such as hides. Rebuilding the index never touches it.
+
+## Command line
+
+| Command | stdout | stderr |
+|---|---|---|
+| `yapkeeper list [--ids]` | One line per session outside temp folders and not hidden, orphaned last, each group most recent first; `--ids` starts each line with the session's id | No sessions found, no sessions outside temp folders (with the `is:temp` hint) or every session hidden (with the `is:hidden` hint), malformed lines skipped |
+| `yapkeeper search [--ids] [--tools] <query>…` | Sessions matching every word and filter of the query language, one line each, as `list` | No sessions found, no sessions match (with a `--tools` hint when the query has words), no sessions outside temp folders (with the `is:temp` hint) or every session hidden (with the `is:hidden` hint), unknown provider or state names (with the valid names), malformed lines skipped |
+| `yapkeeper paths` | `index` and `preferences`, each followed by its path in a space-aligned column | Nothing |
+| `yapkeeper rebuild` | Nothing | `yapkeeper: rebuilt the index at <path> (N sessions)` |
+| `yapkeeper hide <id>` | Nothing | `yapkeeper: hid "<title>"; yapkeeper search is:hidden lists it`, or, exiting 1, no session has the id (with the `list --ids` hint) |
+| `yapkeeper unhide <id>` | Nothing | `yapkeeper: unhid "<title>"`, or the same error as `hide` |
+
+When the index can't be written or the preferences can't be read or written, any command that uses them exits 1. Its stderr ends with `Check its permissions, or set XDG_DATA_HOME.` Hiding a session that is already hidden, or unhiding one that is shown, succeeds and changes nothing.
+
+The help footer names each provider's history directory and the index and preferences paths, as this environment resolves them; when a history directory can't be resolved, it says why instead. `search --help` names every state the query language accepts, and every provider when the history directories resolve.
 
 ## Open questions
 
-- Project for orphaned worktrees. A deleted worktree's project could be inferred from its path (for example `~/.vago/worktrees/<project>/...`) or from the recorded Git branch. Today it falls back to the raw path.
 - Cursor movement inside the query, so a filter in the middle can be edited.
 - Fuzzy matching for search words and locations.
 - Summaries for sessions without a recap: an opt-in, cached model call during indexing, which costs tokens and sends conversation text to a model.
-- Where hides and settings persist. The prototype keeps them in memory; `docs/product.md` requires hides to survive index rebuilds.
 - Behavior at 60 columns and 80×24 was built (the preview drops below 80 columns, and a "terminal too small" message appears below 48×12) but not reviewed by the user on real data.
 - Plain CLI output mode, `Ctrl+Z` suspend, and mouse support were not prototyped.

@@ -5,11 +5,12 @@ Observed read-only on 2026-10-23. These are structural findings from local sampl
 ## Claude Code
 
 - Top-level path: `~/.claude/projects/<encoded-project>/<session-id>.jsonl`.
-- Subagent path: `~/.claude/projects/<encoded-project>/<session-id>/subagents/agent-<id>.jsonl`.
+- Subagent path: `~/.claude/projects/<encoded-project>/<session-id>/subagents/agent-<id>.jsonl`, beside an `agent-<id>.meta.json`. Every record in a subagent transcript has `isSidechain: true`. Yapkeeper attaches each one to `<session-id>` and leaves out those with no `<session-id>.jsonl`.
 - Message metadata includes `sessionId`, `cwd`, `gitBranch`, `timestamp`, `uuid`, `parentUuid`, `isSidechain`, and sometimes `agentId`.
+- Yapkeeper takes the first non-empty `gitBranch` on a kept user or assistant record as the recorded branch. Claude Code records no remote.
 - `parentUuid` also links ordinary messages; it does not prove that a transcript belongs to a subagent.
 - `message.content` can be a string or an array of blocks. Observed blocks include `text`, `thinking`, `tool_use`, and `tool_result`.
-- Title records include `custom-title` with `customTitle`, and `ai-title` with `aiTitle`. Administrative and API records coexist with conversation records.
+- Title records include `custom-title` with `customTitle`, and `ai-title` with `aiTitle`. A `system` record with `subtype: away_summary` holds a recap in `content`; Yapkeeper keeps the latest. `pr-link` records carry `prNumber`, `prUrl`, and `prRepository`. Administrative and API records coexist with conversation records.
 - Optional running-session metadata exists under `~/.claude/sessions/*.json`; it is not the historical source.
 - No `sessions-index.json` was found locally. Discovery must work without one.
 
@@ -22,7 +23,8 @@ Installed CLI help supports `claude --resume <session-id>`. Launch it with the s
 - Records have `timestamp`, `type`, `payload`, and frequently `ordinal`.
 - Observed types include `session_meta`, `response_item`, `event_msg`, `turn_context`, `world_state`, `token_usage_record`, and `realtime_item`.
 - `session_meta.payload` includes `id`, `session_id`, `cwd`, source information, timestamps, and `git` metadata. Multiple `session_meta` records can occur in one file.
-- Subagent metadata includes `parent_thread_id` and `source.subagent.thread_spawn`, with parent identity, role, path, and depth. `source.subagent.other` also occurs.
+- `session_meta.payload.git` has `branch`, `commit_hash`, and `repository_url`, and can be missing. Yapkeeper reads `branch` and `repository_url` from the first `session_meta` only, because a fork's copied parent meta follows its own.
+- Subagent metadata includes `parent_thread_id` and `source.subagent.thread_spawn`, with parent identity, role, path, and depth. `source.subagent.other` also occurs. A parent can itself be a subagent; Yapkeeper follows the chain to the top session and leaves out a subagent whose chain reaches no session.
 - `forked_from_id` and `history_base` occur. Shared or forked history must not automatically be classified as a subagent.
 - Message response items have roles and block arrays, including `input_text` and `output_text` blocks.
 - Events can echo conversational content; avoid indexing those echoes as duplicate messages.
@@ -54,7 +56,7 @@ Not yet supported. No OpenCode history was available locally to inspect.
 - Prefer recorded working directories to decoding folder names. Preserve the recorded branch separately from a worktree's current Git branch.
 - Parse complete JSONL lines and retry an unfinished final line after more data arrives. Skip malformed complete records with bounded diagnostics.
 - Handle unknown records, large lines, file replacement, truncation, repeated metadata, and growing histories.
-- Consider source file identity, byte offsets, size/mtime, and parser version in rebuildable index state. Decide and test how incomplete bytes are retained and retried.
+- The index keeps each file's identity, size, mtime, offset, parser version and fold version. Incomplete bytes are never read: the next read starts at the last complete line. See [ADR 0001](adr/0001-adapters-translate-records-into-facts.md).
 - Keep archived, orphaned, unreadable, forked, and subagent states explicit.
 - Only an absent recorded directory establishes an orphan. Permission errors and unavailable filesystems require an unknown/unavailable state.
 

@@ -1,0 +1,14 @@
+{"timestamp":"2026-10-20T11:00:00.000Z","type":"session_meta","payload":{"id":"aaaaaaaa-0000-7000-8000-00000000000a","session_id":"aaaaaaaa-0000-7000-8000-00000000000a","cwd":"/synthetic/delta","source":"cli","git":{"branch":"main"}}}
+{"timestamp":"2026-10-20T11:00:01.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Synthetic developer instructions"}]}}
+{"timestamp":"2026-10-20T11:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /synthetic/delta\n\nSynthetic rules"},{"type":"input_text","text":"<environment_context>\n  <cwd>/synthetic/delta</cwd>\n</environment_context>"}]}}
+{"timestamp":"2026-10-20T11:00:03.000Z","type":"turn_context","payload":{"cwd":"/synthetic/delta"}}
+{"timestamp":"2026-10-20T11:00:04.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Make the synthetic retry back off"}]}}
+{"timestamp":"2026-10-20T11:00:04.000Z","type":"event_msg","payload":{"type":"user_message","message":"Make the synthetic retry back off"}}
+{"timestamp":"2026-10-20T11:00:05.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Synthetic reasoning"}]}}
+{"timestamp":"2026-10-20T11:00:06.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"ls\"]}","call_id":"call_1"}}
+{"timestamp":"2026-10-20T11:00:07.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"synthetic.txt"}}
+{"timestamp":"2026-10-20T11:00:08.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch","call_id":"call_2"}}
+{"timestamp":"2026-10-20T11:00:09.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":"Done"}}
+{"timestamp":"2026-10-20T12:00:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The synthetic retry now backs off."}]}}
+{"timestamp":"2026-10-20T12:00:00.000Z","type":"event_msg","payload":{"type":"agent_message","message":"The synthetic retry now backs off."}}
+{"timestamp":"2026-10-20T12:00:00.000Z","type":"world_state","payload":{"type":"unknown_future_record"}}

@@ -1,0 +1,4 @@
+{"timestamp":"2026-10-21T09:30:00.000Z","type":"session_meta","payload":{"id":"cccccccc-0000-7000-8000-00000000000c","session_id":"cccccccc-0000-7000-8000-00000000000c","forked_from_id":"aaaaaaaa-0000-7000-8000-00000000000a","cwd":"/synthetic/epsilon","source":"cli"}}
+{"timestamp":"2026-10-20T11:00:00.000Z","type":"session_meta","payload":{"id":"aaaaaaaa-0000-7000-8000-00000000000a","session_id":"aaaaaaaa-0000-7000-8000-00000000000a","cwd":"/synthetic/delta","source":"cli"}}
+{"timestamp":"2026-10-20T11:00:04.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Make the synthetic retry back off"}]}}
+{"timestamp":"2026-10-21T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Now cap the synthetic retries"}]}}

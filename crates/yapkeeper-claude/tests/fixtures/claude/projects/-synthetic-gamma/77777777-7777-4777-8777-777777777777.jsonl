@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"Tidy the synthetic notes folder"},"cwd":"/synthetic/gamma","sessionId":"77777777-7777-4777-8777-777777777777","timestamp":"2026-10-18T07:00:00.000Z","uuid":"g0000001","parentUuid":null,"isSidechain":false}
+{"type":"user","message":{"role":"user","content":"this line is not json
+{"type":"future-record","payload":{"something":"new"},"sessionId":"77777777-7777-4777-8777-777777777777","timestamp":"2026-10-18T07:00:30.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":"The notes folder is tidy."},"cwd":"/synthetic/gamma","sessionId":"77777777-7777-4777-8777-777777777777","timestamp":"2026-10-18T07:01:00.000Z","uuid":"g0000002","parentUuid":"g0000001","isSidechain":false}

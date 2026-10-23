@@ -181,15 +181,128 @@ fn working_dir_is_the_first_one_recorded_and_later_ones_are_kept_once() {
 }
 
 #[test]
-fn subagent_transcripts_are_never_sessions() {
+fn subagent_transcripts_belong_to_their_session_instead_of_being_listed() {
     let scan = scan_fixtures();
-    assert!(!ids(&scan).contains(&"agent-x"));
-    assert!(scan.sessions.iter().all(|session| {
-        session
+    assert_eq!(ids(&scan).iter().filter(|id| **id == LAUNCH).count(), 1);
+    assert!(!ids(&scan).iter().any(|id| id.starts_with("agent-")));
+    let launch = session(&scan, LAUNCH);
+    assert_eq!(launch.subagents.len(), 2);
+    let texts: Vec<&str> = launch
+        .subagents
+        .iter()
+        .flat_map(|subagent| &subagent.messages)
+        .map(|message| message.text.as_str())
+        .collect();
+    assert!(texts.contains(&"Subagent task that must never be listed"));
+    assert!(texts.contains(&"Second synthetic subagent reply"));
+    assert!(
+        launch
             .messages
             .iter()
-            .all(|message| !message.text.contains("Subagent task"))
-    }));
+            .all(|message| !message.text.contains("ubagent"))
+    );
+}
+
+#[test]
+fn a_parent_uuid_chain_is_one_session_with_no_subagents() {
+    let scan = scan_fixtures();
+    let build = session(&scan, BUILD);
+    assert_eq!(build.messages.len(), 4);
+    assert_eq!(build.subagents, []);
+}
+
+#[test]
+fn subagent_transcripts_whose_session_is_missing_are_left_out() {
+    let root = tempfile::tempdir().unwrap();
+    let kept = "aaaaaaaa-0000-4000-8000-000000000041";
+    write_session(
+        root.path(),
+        kept,
+        concat!(
+            r#"{"type":"user","message":{"content":"A synthetic prompt"},"cwd":"/synthetic/temp"}"#,
+            "\n"
+        ),
+    );
+    let subagents = root
+        .path()
+        .join("projects/-synthetic-temp/aaaaaaaa-0000-4000-8000-000000000042/subagents");
+    fs::create_dir_all(&subagents).unwrap();
+    fs::write(
+        subagents.join("agent-z.jsonl"),
+        concat!(
+            r#"{"type":"user","message":{"content":"An orphaned subagent task"},"cwd":"/synthetic/temp","isSidechain":true}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
+    assert_eq!(ids(&scan), [kept]);
+    assert_eq!(scan.sessions[0].subagents, []);
+}
+
+#[test]
+fn the_recap_is_the_latest_away_summary() {
+    let root = tempfile::tempdir().unwrap();
+    write_session(
+        root.path(),
+        "aaaaaaaa-0000-4000-8000-000000000051",
+        concat!(
+            r#"{"type":"user","message":{"content":"A synthetic prompt"},"cwd":"/synthetic/temp"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"away_summary","content":"An earlier synthetic recap","isMeta":false}"#,
+            "\n",
+            r#"{"type":"system","subtype":"away_summary","content":"The latest synthetic recap","isMeta":false}"#,
+            "\n",
+            r#"{"type":"system","subtype":"turn_duration","content":"Not a recap"}"#,
+            "\n",
+        ),
+    );
+    write_session(
+        root.path(),
+        "aaaaaaaa-0000-4000-8000-000000000052",
+        concat!(
+            r#"{"type":"user","message":{"content":"Another synthetic prompt"},"cwd":"/synthetic/temp"}"#,
+            "\n"
+        ),
+    );
+
+    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
+    assert_eq!(
+        session(&scan, "aaaaaaaa-0000-4000-8000-000000000051")
+            .recap
+            .as_deref(),
+        Some("The latest synthetic recap")
+    );
+    assert_eq!(
+        session(&scan, "aaaaaaaa-0000-4000-8000-000000000052").recap,
+        None
+    );
+}
+
+#[test]
+fn linked_prs_come_from_pr_link_records_each_once() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "aaaaaaaa-0000-4000-8000-000000000061";
+    let pr_link = |number: u64| {
+        format!(
+            r#"{{"type":"pr-link","prNumber":{number},"prUrl":"https://example.com/acme/acme-api/pull/{number}","prRepository":"acme/acme-api"}}"#
+        )
+    };
+    write_session(
+        root.path(),
+        id,
+        &format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","message":{"content":"A synthetic prompt"},"cwd":"/synthetic/temp"}"#,
+            pr_link(42),
+            pr_link(7),
+            pr_link(42),
+        ),
+    );
+
+    let scan = ClaudeCode::at(root.path().to_path_buf()).scan();
+    assert_eq!(session(&scan, id).linked_prs, [42, 7]);
 }
 
 #[test]

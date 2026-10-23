@@ -54,7 +54,23 @@ pub struct Session {
     pub recorded_git: RecordedGit,
     /// In transcript order, with injected context removed and long text capped.
     pub messages: Vec<Message>,
+    /// Agents this session started, each with its own transcript. Their text
+    /// is tool-level: it belongs to the session but is not something the
+    /// person and the assistant said to each other.
+    pub subagents: Vec<SubagentTranscript>,
+    /// The latest summary the provider wrote of the session, when it wrote one.
+    pub recap: Option<String>,
+    /// Numbers of the pull requests the provider linked to this session, each
+    /// once, in the order first linked.
+    pub linked_prs: Vec<u64>,
     pub resume: ResumeCommand,
+}
+
+/// What one subagent of a session said and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentTranscript {
+    /// Read by the same rules as a session's messages.
+    pub messages: Vec<Message>,
 }
 
 /// Git facts the provider recorded when the session ran. They may no longer
@@ -140,6 +156,28 @@ impl fmt::Display for MissingHome {
 }
 
 impl std::error::Error for MissingHome {}
+
+/// `.jsonl` files exactly `depth` directory levels below `dir`, or none when
+/// `dir` can't be read.
+pub fn jsonl_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if depth > 0 {
+            files.extend(jsonl_files(&path, depth - 1));
+        } else if path.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+        {
+            files.push(path);
+        }
+    }
+    files
+}
 
 /// Hands each complete JSONL record in `path` to `on_record` until it
 /// breaks, adding each malformed complete line to `malformed_lines`. A final

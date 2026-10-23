@@ -44,7 +44,7 @@ fn timestamp(rfc3339: &str) -> SystemTime {
 }
 
 #[test]
-fn active_and_archived_rollouts_are_sessions_but_subagent_rollouts_are_not() {
+fn active_and_archived_rollouts_and_forks_are_sessions_but_subagent_rollouts_are_not() {
     let scan = scan_fixtures();
     assert_eq!(ids(&scan), [RETRY, ARCHIVED, FORK]);
     assert!(!ids(&scan).contains(&SUBAGENT));
@@ -55,6 +55,23 @@ fn active_and_archived_rollouts_are_sessions_but_subagent_rollouts_are_not() {
     );
     assert_eq!(scan.malformed_lines, 0);
     assert_eq!(scan.searched, PathBuf::from(FIXTURES));
+}
+
+#[test]
+fn a_subagent_rollout_belongs_to_its_parent_and_a_fork_is_no_subagent() {
+    let scan = scan_fixtures();
+    let retry = session(&scan, RETRY);
+    let [subagent] = retry.subagents.as_slice() else {
+        panic!("expected one subagent, got {:?}", retry.subagents);
+    };
+    assert_eq!(
+        subagent.messages,
+        [Message {
+            role: Role::User,
+            text: "Synthetic subagent task".to_string(),
+        }]
+    );
+    assert_eq!(session(&scan, FORK).subagents, []);
 }
 
 #[test]
@@ -219,4 +236,62 @@ fn recorded_git_comes_from_the_first_session_meta_only() {
         panic!("expected one session, got {:?}", ids(&scan));
     };
     assert_eq!(session.recorded_git, RecordedGit::default());
+}
+
+/// A rollout's first `session_meta`, with `extra` fields added to its payload.
+fn meta(id: &str, extra: &str) -> String {
+    format!(
+        r#"{{"timestamp":"2026-10-22T08:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/synthetic/eta","source":"cli"{extra}}}}}"#
+    )
+}
+
+#[test]
+fn a_subagent_of_a_subagent_belongs_to_the_top_session_and_one_without_a_session_is_left_out() {
+    let home = tempfile::tempdir().unwrap();
+    let day = home.path().join("sessions/2026/10/22");
+    fs::create_dir_all(&day).unwrap();
+    let parent = "eeeeeeee-0000-7000-8000-000000000001";
+    let child = "eeeeeeee-0000-7000-8000-000000000002";
+    let grandchild = "eeeeeeee-0000-7000-8000-000000000003";
+    let orphan = "eeeeeeee-0000-7000-8000-000000000004";
+    let rollouts = [
+        (parent, String::new(), "Parent prompt"),
+        (
+            child,
+            format!(
+                r#","parent_thread_id":"{parent}","source":{{"subagent":{{"other":"worker"}}}}"#
+            ),
+            "Child task",
+        ),
+        (
+            grandchild,
+            format!(
+                r#","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{child}","depth":2}}}}}}"#
+            ),
+            "Grandchild task",
+        ),
+        (
+            orphan,
+            r#","parent_thread_id":"eeeeeeee-0000-7000-8000-0000000000ff""#.to_string(),
+            "Orphaned subagent task",
+        ),
+    ];
+    for (id, extra, text) in &rollouts {
+        fs::write(
+            day.join(format!("rollout-2026-10-22T08-00-00-{id}.jsonl")),
+            format!("{}\n{}\n", meta(id, extra), prompt(text)),
+        )
+        .unwrap();
+    }
+
+    let scan = Codex::at(home.path().to_path_buf()).scan();
+    assert_eq!(ids(&scan), [parent]);
+    let mut texts: Vec<&str> = scan.sessions[0]
+        .subagents
+        .iter()
+        .flat_map(|subagent| &subagent.messages)
+        .map(|message| message.text.as_str())
+        .collect();
+    texts.sort_unstable();
+    assert_eq!(texts, ["Child task", "Grandchild task"]);
 }

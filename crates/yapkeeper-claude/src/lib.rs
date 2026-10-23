@@ -1,6 +1,7 @@
 //! The Claude Code adapter. It owns where Claude Code keeps its history, the
 //! JSONL grammar of a transcript, which text counts as a prompt, how a title
-//! is chosen and how a session is resumed.
+//! is chosen, where a session's subagent transcripts, recap and linked PRs
+//! are recorded, and how a session is resumed.
 
 #![forbid(unsafe_code)]
 
@@ -11,7 +12,8 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 use yapkeeper_model::{
-    Adapter, Message, MissingHome, RecordedGit, ResumeCommand, Role, Scan, Session, read_jsonl,
+    Adapter, Message, MissingHome, RecordedGit, ResumeCommand, Role, Scan, Session,
+    SubagentTranscript, jsonl_files, read_jsonl,
 };
 
 /// Claude Code's history under one configuration directory.
@@ -30,7 +32,10 @@ impl Adapter for ClaudeCode {
     fn scan(&self) -> Scan {
         let projects = self.config_dir.join("projects");
         let mut malformed_lines = 0;
-        let sessions = transcript_files(&projects)
+        // Only `<encoded-project>/<id>.jsonl` is a session's transcript; the
+        // `<id>/subagents/` folder beside it is read with that session, so a
+        // subagent transcript without its session is never read at all.
+        let sessions = jsonl_files(&projects, 1)
             .iter()
             .filter_map(|path| read_session(path, &mut malformed_lines))
             .collect();
@@ -40,31 +45,6 @@ impl Adapter for ClaudeCode {
             searched: projects,
         }
     }
-}
-
-/// Top-level transcripts, `<projects>/<encoded-project>/<id>.jsonl`. Nothing
-/// deeper is visited, so `<id>/subagents/` transcripts never become sessions.
-fn transcript_files(projects: &Path) -> Vec<PathBuf> {
-    let Ok(project_dirs) = fs::read_dir(projects) else {
-        return Vec::new();
-    };
-    let mut files = Vec::new();
-    for project_dir in project_dirs.filter_map(Result::ok) {
-        let Ok(entries) = fs::read_dir(project_dir.path()) else {
-            continue;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension == "jsonl")
-            {
-                files.push(path);
-            }
-        }
-    }
-    files
 }
 
 /// The session recorded in one transcript file, or `None` when it can't be
@@ -78,6 +58,8 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
     let mut custom_title = None;
     let mut ai_title = None;
     let mut branch = None;
+    let mut recap = None;
+    let mut linked_prs = Vec::new();
     let read_to_end = read_jsonl(path, malformed_lines, |record| {
         if let Some(time) = record["timestamp"].as_str().and_then(parse_timestamp) {
             latest_timestamp = latest_timestamp.max(Some(time));
@@ -91,6 +73,18 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
             }
             Some("ai-title") => {
                 ai_title = non_empty(&record["aiTitle"]).or(ai_title.take());
+                return ControlFlow::Continue(());
+            }
+            Some("system") if record["subtype"] == "away_summary" => {
+                recap = non_empty(&record["content"]).or(recap.take());
+                return ControlFlow::Continue(());
+            }
+            Some("pr-link") => {
+                if let Some(number) = record["prNumber"].as_u64()
+                    && !linked_prs.contains(&number)
+                {
+                    linked_prs.push(number);
+                }
                 return ControlFlow::Continue(());
             }
             _ => return ControlFlow::Continue(()),
@@ -107,25 +101,7 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
         if branch.is_none() {
             branch = non_empty(&record["gitBranch"]);
         }
-        match &record["message"]["content"] {
-            Value::String(text) => push_message(&mut messages, role, text),
-            Value::Array(blocks) => {
-                for block in blocks {
-                    match block["type"].as_str() {
-                        Some("text") => {
-                            push_message(&mut messages, role, block["text"].as_str().unwrap_or(""));
-                        }
-                        Some("tool_use") => {
-                            let name = block["name"].as_str().unwrap_or("tool");
-                            let call = format!("{name} {}", block["input"]);
-                            push_message(&mut messages, Role::ToolCall, &call);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
+        push_content(&mut messages, role, &record["message"]["content"]);
         ControlFlow::Continue(())
     });
     if !read_to_end {
@@ -164,7 +140,61 @@ fn read_session(path: &Path, malformed_lines: &mut usize) -> Option<Session> {
             repository_url: None,
         },
         messages,
+        subagents: read_subagents(&path.with_extension("").join("subagents"), malformed_lines),
+        recap,
+        linked_prs,
     })
+}
+
+/// The transcripts in a session's `<id>/subagents/` folder, none when it is
+/// missing. Each `agent-<id>.jsonl` is one transcript; the `.meta.json`
+/// beside it is not read.
+fn read_subagents(dir: &Path, malformed_lines: &mut usize) -> Vec<SubagentTranscript> {
+    let mut subagents = Vec::new();
+    for path in jsonl_files(dir, 0) {
+        let mut messages = Vec::new();
+        // Every record in a subagent transcript is a sidechain, so unlike a
+        // session's own records they are kept.
+        let read_to_end = read_jsonl(&path, malformed_lines, |record| {
+            let role = match record["type"].as_str() {
+                Some("user") => Role::User,
+                Some("assistant") => Role::Assistant,
+                _ => return ControlFlow::Continue(()),
+            };
+            if record["isMeta"].as_bool() != Some(true) {
+                push_content(&mut messages, role, &record["message"]["content"]);
+            }
+            ControlFlow::Continue(())
+        });
+        if read_to_end {
+            subagents.push(SubagentTranscript { messages });
+        }
+    }
+    subagents
+}
+
+/// A record's `message.content`, a string or an array of blocks, as messages.
+/// Thinking and tool results are left out.
+fn push_content(messages: &mut Vec<Message>, role: Role, content: &Value) {
+    match content {
+        Value::String(text) => push_message(messages, role, text),
+        Value::Array(blocks) => {
+            for block in blocks {
+                match block["type"].as_str() {
+                    Some("text") => {
+                        push_message(messages, role, block["text"].as_str().unwrap_or(""));
+                    }
+                    Some("tool_use") => {
+                        let name = block["name"].as_str().unwrap_or("tool");
+                        let call = format!("{name} {}", block["input"]);
+                        push_message(messages, Role::ToolCall, &call);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn push_message(messages: &mut Vec<Message>, role: Role, text: &str) {

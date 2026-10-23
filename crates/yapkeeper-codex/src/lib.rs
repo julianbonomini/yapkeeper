@@ -1,6 +1,6 @@
 //! The Codex adapter. It owns where Codex keeps its rollouts, the JSONL
 //! grammar of a rollout and of the session index, which rollouts are
-//! subagents, how a title is chosen and how a session is resumed.
+//! subagents and whose, how a title is chosen and how a session is resumed.
 
 #![forbid(unsafe_code)]
 
@@ -12,7 +12,8 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 use yapkeeper_model::{
-    Adapter, Message, MissingHome, RecordedGit, ResumeCommand, Role, Scan, Session, read_jsonl,
+    Adapter, Message, MissingHome, RecordedGit, ResumeCommand, Role, Scan, Session,
+    SubagentTranscript, jsonl_files, read_jsonl,
 };
 
 /// Codex's history under one `CODEX_HOME`.
@@ -36,38 +37,22 @@ impl Adapter for Codex {
         // Active rollouts sit in `<year>/<month>/<day>/`; archived ones don't.
         let mut rollouts = jsonl_files(&self.home.join("sessions"), 3);
         rollouts.extend(jsonl_files(&self.home.join("archived_sessions"), 0));
-        let sessions = rollouts
-            .iter()
-            .filter_map(|path| read_session(path, &thread_names, &mut malformed_lines))
-            .collect();
+        let mut sessions = Vec::new();
+        let mut subagents = Vec::new();
+        for path in &rollouts {
+            match read_rollout(path, &thread_names, &mut malformed_lines) {
+                Some(Rollout::Session(session)) => sessions.push(*session),
+                Some(Rollout::Subagent(subagent)) => subagents.push(subagent),
+                None => {}
+            }
+        }
+        attach_subagents(&mut sessions, subagents);
         Scan {
             sessions,
             malformed_lines,
             searched: self.home.clone(),
         }
     }
-}
-
-/// `.jsonl` files exactly `depth` directory levels below `dir`, or none when
-/// `dir` can't be read.
-fn jsonl_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut files = Vec::new();
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if depth > 0 {
-            files.extend(jsonl_files(&path, depth - 1));
-        } else if path.is_file()
-            && path
-                .extension()
-                .is_some_and(|extension| extension == "jsonl")
-        {
-            files.push(path);
-        }
-    }
-    files
 }
 
 /// Each session's `thread_name` from the session index. A session renamed
@@ -83,16 +68,60 @@ fn read_thread_names(path: &Path, malformed_lines: &mut usize) -> HashMap<String
     thread_names
 }
 
-/// The session recorded in one rollout, or `None` when it can't be read, is
-/// a subagent's, or has nothing to resume. Adds each malformed complete line
+/// What one rollout records: a session, or the transcript of an agent that
+/// another thread started.
+enum Rollout {
+    Session(Box<Session>),
+    Subagent(SubagentRollout),
+}
+
+struct SubagentRollout {
+    id: String,
+    /// The thread that started it, a session or another subagent. `None`
+    /// when the rollout says it is a subagent without naming whose.
+    parent_id: Option<String>,
+    transcript: SubagentTranscript,
+}
+
+/// Adds each subagent to the session at the top of its chain of parents.
+/// One whose chain doesn't reach a listed session is left out, because a
+/// subagent is never a session of its own.
+fn attach_subagents(sessions: &mut [Session], subagents: Vec<SubagentRollout>) {
+    let session_index: HashMap<String, usize> = sessions
+        .iter()
+        .enumerate()
+        .map(|(index, session)| (session.id.clone(), index))
+        .collect();
+    let parent_of: HashMap<String, String> = subagents
+        .iter()
+        .filter_map(|subagent| Some((subagent.id.clone(), subagent.parent_id.clone()?)))
+        .collect();
+    for subagent in subagents {
+        let mut thread = subagent.parent_id;
+        // Bounded so a cycle in corrupt records can't loop forever.
+        for _ in 0..=parent_of.len() {
+            let Some(id) = thread else { break };
+            if let Some(&index) = session_index.get(&id) {
+                sessions[index].subagents.push(subagent.transcript);
+                break;
+            }
+            thread = parent_of.get(&id).cloned();
+        }
+    }
+}
+
+/// What one rollout records, or `None` when it can't be read or holds no
+/// subagent and no session to resume. Adds each malformed complete line
 /// read to `malformed_lines`.
-fn read_session(
+fn read_rollout(
     path: &Path,
     thread_names: &HashMap<String, String>,
     malformed_lines: &mut usize,
-) -> Option<Session> {
+) -> Option<Rollout> {
     let mut seen_meta = false;
     let mut id: Option<String> = None;
+    let mut is_subagent = false;
+    let mut parent_id = None;
     let mut recorded_git = RecordedGit::default();
     let mut working_dirs: Vec<PathBuf> = Vec::new();
     let mut messages = Vec::new();
@@ -108,10 +137,13 @@ fn read_session(
             Some("session_meta") => {
                 if !seen_meta {
                     seen_meta = true;
-                    if !payload["source"]["subagent"].is_null()
-                        || !payload["parent_thread_id"].is_null()
-                    {
-                        return ControlFlow::Break(());
+                    // A fork names the thread it copied as `forked_from_id`,
+                    // which alone doesn't make it a subagent.
+                    let spawn = &payload["source"]["subagent"];
+                    if !spawn.is_null() || !payload["parent_thread_id"].is_null() {
+                        is_subagent = true;
+                        parent_id = non_empty(&payload["parent_thread_id"])
+                            .or_else(|| non_empty(&spawn["thread_spawn"]["parent_thread_id"]));
                     }
                     id = payload["id"].as_str().map(str::to_string);
                     recorded_git = RecordedGit {
@@ -163,6 +195,13 @@ fn read_session(
         return None;
     }
     let id = id?;
+    if is_subagent {
+        return Some(Rollout::Subagent(SubagentRollout {
+            id,
+            parent_id,
+            transcript: SubagentTranscript { messages },
+        }));
+    }
     if working_dirs.is_empty() {
         return None;
     }
@@ -178,7 +217,7 @@ fn read_session(
         .find(|message| message.role == Role::User)?
         .text;
     let title = thread_names.get(&id).unwrap_or(first_prompt).clone();
-    Some(Session {
+    Some(Rollout::Session(Box::new(Session {
         provider: "codex",
         resume: ResumeCommand {
             program: "codex".to_string(),
@@ -197,7 +236,10 @@ fn read_session(
         last_active,
         recorded_git,
         messages,
-    })
+        subagents: Vec::new(),
+        recap: None,
+        linked_prs: Vec::new(),
+    })))
 }
 
 /// Text Codex adds to a user turn on the user's behalf: environment and

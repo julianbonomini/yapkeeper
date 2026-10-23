@@ -13,6 +13,9 @@ The coding agent that records and resumes a session, initially Claude Code or Co
 **Working directory**:
 The filesystem directory recorded for a session. It may be a Git worktree or an ordinary folder.
 
+**Location**:
+Where a session ran, derived from its working directory: a Git repo's main checkout, one of its linked worktrees, or a plain folder. A project groups a repo's main checkout and its worktrees.
+
 **Orphaned session**:
 A session whose recorded working directory no longer exists. A directory that cannot be inspected has an unknown availability state, rather than being presumed absent.
 

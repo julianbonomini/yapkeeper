@@ -596,6 +596,40 @@ fn typing_a_filter_narrows_the_rows_and_the_count() {
     assert!(retry[1].trim_end_matches('│').trim_end().ends_with("1 / 3"));
 }
 
+#[test]
+fn deleting_clearing_or_completing_after_a_search_finds_every_session_it_matches() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let rows = |palette: &mut Palette| {
+        let drawn = frame(palette, 120, 40);
+        rows_with(&drawn, &TITLES).len()
+    };
+
+    keys(&mut palette, "ret");
+    assert_eq!(rows(&mut palette), 1);
+    press(&mut palette, KeyCode::Backspace);
+    assert_eq!(rows(&mut palette), 2);
+
+    keys(&mut palette, "lease");
+    assert_eq!(rows(&mut palette), 1);
+    ctrl(&mut palette, 'u');
+    assert_eq!(rows(&mut palette), 3);
+
+    keys(&mut palette, "release");
+    assert_eq!(rows(&mut palette), 1);
+    press(&mut palette, KeyCode::Esc);
+    assert_eq!(rows(&mut palette), 3);
+
+    // `!re` leaves out two sessions, behind the ways to finish it;
+    // finishing it as `!recap` leaves out none.
+    keys(&mut palette, "!re");
+    frame(&mut palette, 120, 40);
+    press(&mut palette, KeyCode::Tab);
+    let completed = frame(&mut palette, 120, 40);
+    assert!(completed[1].contains("!recap"), "{completed:#?}");
+    assert_eq!(rows_with(&completed, &TITLES).len(), 3, "{completed:#?}");
+}
+
 /// The title of the selected row: the one whose first title cell is drawn
 /// bold or reversed, as only the selection bar is.
 fn selected(buffer: &Buffer) -> Option<&'static str> {

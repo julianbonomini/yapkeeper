@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use yapkeeper::{
-    Availability, DataDir, Listed, Listing, Query, Roots, hide, rebuild, search, unhide,
+    Availability, Catalog, DataDir, LeftOut, Listed, Listing, Query, Roots, Settings, hide,
+    rebuild, search, unhide,
 };
 
 /// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, Pi session directory and data
@@ -50,6 +51,24 @@ impl Histories {
     /// The ids of the sessions `text` finds with tool-level text included.
     fn found_with_tools(&self, text: &str) -> Vec<String> {
         ids(&self.search(Query::parse(text, &self.roots().providers()).including_tools(true)))
+    }
+
+    /// Checks that `catalog`, whatever it searched before, finds for `text`
+    /// what a fresh catalog over the same index and preferences finds, and
+    /// leaves out as many, tool-level text included when `tools` is true.
+    fn assert_found_as_from_scratch(&self, catalog: &Catalog, text: &str, tools: bool) {
+        let fresh = Catalog::open(&self.roots(), &self.data()).unwrap();
+        let found = |catalog: &Catalog| -> (Vec<String>, LeftOut) {
+            let query = catalog.parse(text).including_tools(tools);
+            let found = catalog.search(&query).unwrap();
+            let ids = found
+                .sessions
+                .iter()
+                .map(|listed| listed.session.id.clone())
+                .collect();
+            (ids, found.left_out)
+        };
+        assert_eq!(found(catalog), found(&fresh), "{text:?}, tools {tools}");
     }
 
     /// Writes Claude Code session `id` as `records`, one per line.
@@ -936,4 +955,133 @@ fn a_query_finds_exactly_what_its_words_find_one_at_a_time() {
             );
         }
     }
+}
+
+/// Sessions that `flaky`, `retry`, `test` and `upload` tell apart, in titles,
+/// messages and tool calls, with a pull request, a temp folder and a
+/// second provider.
+fn typed_over() -> Histories {
+    let histories = Histories::new();
+    histories.claude(
+        A,
+        &[prompt("Why is this test flaky?"), reply("Add a Retry.")],
+    );
+    histories.claude(
+        B,
+        &[
+            prompt("Please retry the upload"),
+            json!({ "type": "custom-title", "customTitle": "Flaky upload" }),
+            pr_link(),
+        ],
+    );
+    histories.claude(
+        C,
+        &[
+            prompt("Another flaky test"),
+            said(
+                "assistant",
+                json!([{ "type": "tool_use", "name": "Read", "input": { "file_path": "/synthetic/retry.log" } }]),
+            ),
+        ],
+    );
+    histories.claude(
+        D,
+        &[prompt_in(
+            "/tmp/yapkeeper-synthetic-scratch",
+            "Retry the flaky one",
+        )],
+    );
+    histories.codex(CODEX, json!({}), &[codex_prompt("flaky retry in codex")]);
+    histories
+}
+
+#[test]
+fn a_query_typed_on_from_the_last_finds_what_a_search_from_scratch_finds() {
+    let histories = typed_over();
+    let catalog = Catalog::open(&histories.roots(), &histories.data()).unwrap();
+    let typed = [
+        // Words growing, then words added.
+        "f",
+        "fl",
+        "fla",
+        "flak",
+        "flaky",
+        "flaky ",
+        "flaky r",
+        "flaky retry",
+        // Excluded words added, growing and shrinking.
+        "flaky !",
+        "flaky !t",
+        "flaky !te",
+        "flaky !test",
+        "flaky !test !u",
+        "flaky !test !upload",
+        "flaky !test !u",
+        // Words that start, come to or stop matching case.
+        "r",
+        "re",
+        "Re",
+        "Ret",
+        "Retry",
+        "Retry f",
+        "Retry",
+        "retry",
+        "retry F",
+        // Filters typed out, completed and negated.
+        "flaky",
+        "flaky #",
+        "flaky #c",
+        "flaky #claude",
+        "flaky #claude is:",
+        "flaky #claude is:pr",
+        "flaky #claude !is:pr",
+        "flaky #codex",
+        "flaky is:temp",
+        // Deleting back, clearing, and a word that becomes a filter.
+        "flaky retry",
+        "flaky retr",
+        "flaky",
+        "fla",
+        "",
+        "is",
+        "is:",
+        "is:pr",
+        "",
+        "x",
+        "xq",
+        "xq flaky",
+        "flaky",
+    ];
+    for text in typed {
+        histories.assert_found_as_from_scratch(&catalog, text, false);
+    }
+}
+
+#[test]
+fn changing_tools_hides_or_settings_finds_what_a_search_from_scratch_finds() {
+    let histories = typed_over();
+    let mut catalog = Catalog::open(&histories.roots(), &histories.data()).unwrap();
+
+    histories.assert_found_as_from_scratch(&catalog, "retry", false);
+    histories.assert_found_as_from_scratch(&catalog, "retry", true);
+    histories.assert_found_as_from_scratch(&catalog, "retry", false);
+    histories.assert_found_as_from_scratch(&catalog, "retry.", true);
+
+    histories.assert_found_as_from_scratch(&catalog, "flaky", false);
+    let found = catalog.search(&Query::default()).unwrap().sessions;
+    let a = found.iter().find(|listed| listed.session.id == A).unwrap();
+    let a = a.session.clone();
+    catalog.set_hidden(&a, true).unwrap();
+    histories.assert_found_as_from_scratch(&catalog, "flaky", false);
+    histories.assert_found_as_from_scratch(&catalog, "flaky is:hidden", false);
+    catalog.set_hidden(&a, false).unwrap();
+    histories.assert_found_as_from_scratch(&catalog, "flaky is:hidden", false);
+    histories.assert_found_as_from_scratch(&catalog, "flaky", false);
+
+    let settings = Settings {
+        hide_temp: false,
+        ..catalog.settings()
+    };
+    catalog.set_settings(settings).unwrap();
+    histories.assert_found_as_from_scratch(&catalog, "flaky", false);
 }

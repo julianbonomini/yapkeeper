@@ -26,6 +26,7 @@ mod settings;
 
 use prefs::Choice;
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::OsString;
@@ -333,6 +334,18 @@ pub struct Catalog {
     searched: Vec<PathBuf>,
     files_read: usize,
     bytes_read: u64,
+    /// The last search that succeeded over `sessions` as they are now, so
+    /// whatever changes `sessions` forgets it: a new session may match what
+    /// it ruled out. A query that narrows it looks its words up only among
+    /// what it matched.
+    last_search: RefCell<Option<LastSearch>>,
+}
+
+/// A query a catalog searched, and the sessions its words matched before
+/// its filters and defaults were applied.
+struct LastSearch {
+    query: Query,
+    matched: HashSet<SessionKey>,
 }
 
 /// What one query found in a catalog.
@@ -401,6 +414,7 @@ impl Catalog {
             searched: opening.searched,
             files_read: opening.files_read,
             bytes_read: opening.bytes_read,
+            last_search: RefCell::new(None),
         };
         catalog.apply(snapshot);
         Ok(catalog)
@@ -418,6 +432,7 @@ impl Catalog {
             })
             .collect();
         self.malformed_lines = snapshot.malformed_lines;
+        *self.last_search.get_mut() = None;
     }
 
     /// `text` read as the query language, with this catalog's providers,
@@ -429,13 +444,18 @@ impl Catalog {
     }
 
     /// The sessions matching `query`, with the same rules and order as
-    /// `search`. Fails only when the index can no longer be read.
+    /// `search`. A query that only extends the last one searched, as when
+    /// the person types on, costs no more than narrowing what that one
+    /// found. Fails only when the index can no longer be read.
     pub fn search(&self, query: &Query) -> Result<Found, DataError> {
-        let candidates = self
-            .sessions
-            .iter()
-            .map(|listed| SessionKey::of(&listed.session))
-            .collect();
+        let candidates = match self.last_search.take() {
+            Some(last) if query.narrows(&last.query) => last.matched,
+            _ => self
+                .sessions
+                .iter()
+                .map(|listed| SessionKey::of(&listed.session))
+                .collect(),
+        };
         let matched: HashSet<SessionKey> = self.index.matching(query, candidates)?;
         let mut sessions: Vec<Rc<Listed>> = self
             .sessions
@@ -444,6 +464,10 @@ impl Catalog {
             .cloned()
             .collect();
         let left_out = query.select(&mut sessions);
+        self.last_search.replace(Some(LastSearch {
+            query: query.clone(),
+            matched,
+        }));
         Ok(Found { sessions, left_out })
     }
 
@@ -490,6 +514,7 @@ impl Catalog {
                 });
             }
         }
+        *self.last_search.get_mut() = None;
         Ok(())
     }
 

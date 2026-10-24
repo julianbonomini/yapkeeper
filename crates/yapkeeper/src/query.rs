@@ -209,6 +209,29 @@ impl Query {
         self.tools
     }
 
+    /// Whether this query extends `last`: every session its words and
+    /// excluded words let through, `last`'s let through too, so its words
+    /// need only be looked up among the sessions `last`'s words matched.
+    /// This is the one rule for it: both read the same text (tool level or
+    /// not) with the same settings; each of `last`'s words is implied by one
+    /// of this query's, as when a word grows, gains a capital or is joined
+    /// by another; and each of `last`'s excluded words implies one of this
+    /// query's. Deleting a character breaks it, as does an excluded word
+    /// that grows. Filters play no part: they are applied in full to every
+    /// session the words let through.
+    pub(crate) fn narrows(&self, last: &Query) -> bool {
+        self.tools == last.tools
+            && self.settings == last.settings
+            && last
+                .words
+                .iter()
+                .all(|word| self.words.iter().any(|mine| mine.implies(word)))
+            && last
+                .excluded_words
+                .iter()
+                .all(|word| self.excluded_words.iter().any(|mine| word.implies(mine)))
+    }
+
     /// Keeps the sessions every non-word filter and both defaults admit,
     /// then orders them: orphaned last, each group most recent
     /// `last_active` first, ties by provider then id. Temp sessions are
@@ -409,6 +432,16 @@ impl Word {
         match self.as_typed() {
             Some(typed) => text.contains(typed),
             None => fold(text).contains(&self.key),
+        }
+    }
+
+    /// Whether every text this word matches, `other` matches too: by `matches`,
+    /// a text containing this word as typed, or its fold containing this
+    /// word's key, contains whatever of it `other` looks for.
+    fn implies(&self, other: &Word) -> bool {
+        match other.as_typed() {
+            Some(typed) => self.as_typed().is_some_and(|mine| mine.contains(typed)),
+            None => self.key.contains(&other.key),
         }
     }
 

@@ -1,10 +1,35 @@
 //! Lists and searches a history with its index kept under a tempdir, and
-//! picks sessions out of the `Listing` that gives, for the format tests.
+//! picks sessions out of the `Listing` that gives, for the format tests,
+//! and says where each adapter's committed fixtures are.
 
-use std::path::Path;
+#![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use yapkeeper::{DataDir, Listed, Listing, Query, Roots, search};
+
+pub const CLAUDE_FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../yapkeeper-claude/tests/fixtures/claude"
+);
+pub const CODEX_FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../yapkeeper-codex/tests/fixtures/codex"
+);
+pub const PI_FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../yapkeeper-pi/tests/fixtures/pi"
+);
+
+/// Every provider's committed fixtures as its root.
+pub fn fixture_roots() -> Roots {
+    Roots {
+        claude: PathBuf::from(CLAUDE_FIXTURES),
+        codex: PathBuf::from(CODEX_FIXTURES),
+        pi: PathBuf::from(PI_FIXTURES),
+    }
+}
 
 /// The data directory the index and preferences are kept in under `tmp`.
 pub fn data_dir(tmp: &Path) -> DataDir {

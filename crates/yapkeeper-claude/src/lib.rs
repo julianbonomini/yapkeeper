@@ -9,12 +9,11 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use serde_json::Value;
 use yapkeeper_model::{
     Adapter, Fact, Message, MissingHome, Reading, RecordedGit, ResumeCommand, Role, ThreadKind,
-    TitleKind, jsonl_files, read_jsonl_from,
+    TitleKind, jsonl_files, non_empty_text, read_jsonl_from, record_time,
 };
 
 const PARSER_VERSION: u32 = 2;
@@ -174,7 +173,7 @@ fn subagent_session(path: &Path) -> Option<String> {
 
 /// The facts one record of a session's own transcript gives.
 fn read_transcript_record(facts: &mut Vec<Fact>, record: &Value) {
-    if let Some(time) = record["timestamp"].as_str().and_then(parse_timestamp) {
+    if let Some(time) = record_time(record) {
         facts.push(Fact::Activity(time));
     }
     let role = match record["type"].as_str() {
@@ -185,7 +184,7 @@ fn read_transcript_record(facts: &mut Vec<Fact>, record: &Value) {
                 "custom-title" => ("customTitle", TitleKind::Named),
                 _ => ("aiTitle", TitleKind::Generated),
             };
-            if let Some(text) = non_empty(&record[field]) {
+            if let Some(text) = non_empty_text(&record[field]) {
                 facts.push(Fact::Title {
                     thread: None,
                     kind,
@@ -195,7 +194,7 @@ fn read_transcript_record(facts: &mut Vec<Fact>, record: &Value) {
             return;
         }
         Some("system") if record["subtype"] == "away_summary" => {
-            facts.extend(non_empty(&record["content"]).map(Fact::Recap));
+            facts.extend(non_empty_text(&record["content"]).map(Fact::Recap));
             return;
         }
         Some("pr-link") => {
@@ -210,7 +209,7 @@ fn read_transcript_record(facts: &mut Vec<Fact>, record: &Value) {
     if let Some(cwd) = record["cwd"].as_str() {
         facts.push(Fact::WorkingDir(PathBuf::from(cwd)));
     }
-    if let Some(branch) = non_empty(&record["gitBranch"]) {
+    if let Some(branch) = non_empty_text(&record["gitBranch"]) {
         facts.push(Fact::Git(RecordedGit {
             branch: Some(branch),
             repository_url: None,
@@ -268,15 +267,6 @@ fn push_message(facts: &mut Vec<Fact>, role: Role, text: &str) {
 /// caveats and tags, instruction files and environment blocks.
 fn is_injected(text: &str) -> bool {
     text.starts_with('<') || text.starts_with("Caveat:") || text.starts_with("# AGENTS.md")
-}
-
-fn non_empty(value: &Value) -> Option<String> {
-    let text = value.as_str()?.trim();
-    (!text.is_empty()).then(|| text.to_string())
-}
-
-fn parse_timestamp(text: &str) -> Option<SystemTime> {
-    text.parse::<jiff::Timestamp>().ok().map(SystemTime::from)
 }
 
 /// Claude Code's configuration directory for this process: `$CLAUDE_CONFIG_DIR`

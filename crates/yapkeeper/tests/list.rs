@@ -2,30 +2,16 @@
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use yapkeeper::list;
 
-use yapkeeper::{DataDir, Roots, list};
+mod listing;
 
-const CLAUDE_FIXTURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../yapkeeper-claude/tests/fixtures/claude"
-);
-const CODEX_FIXTURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../yapkeeper-codex/tests/fixtures/codex"
-);
+use listing::{data_dir, fixture_roots};
 
 #[test]
 fn list_merges_every_provider_most_recent_first() {
     let tmp = tempfile::tempdir().unwrap();
-    let listing = list(
-        &Roots {
-            claude: PathBuf::from(CLAUDE_FIXTURES),
-            codex: PathBuf::from(CODEX_FIXTURES),
-        },
-        &DataDir::at(tmp.path().join("data")),
-    )
-    .unwrap();
+    let listing = list(&fixture_roots(), &data_dir(tmp.path())).unwrap();
     let sessions: Vec<(&str, &str)> = listing
         .sessions
         .iter()
@@ -34,7 +20,9 @@ fn list_merges_every_provider_most_recent_first() {
     assert_eq!(
         sessions,
         [
+            ("pi", "01b00000-0000-7000-8000-00000000000b"),
             ("codex", "cccccccc-0000-7000-8000-00000000000c"),
+            ("pi", "01a00000-0000-7000-8000-00000000000a"),
             ("claude", "22222222-2222-4222-8222-222222222222"),
             ("codex", "aaaaaaaa-0000-7000-8000-00000000000a"),
             ("claude", "11111111-1111-4111-8111-111111111111"),

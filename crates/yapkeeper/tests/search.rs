@@ -29,6 +29,7 @@ impl Histories {
         Roots {
             claude: self.dir.path().join("claude"),
             codex: self.dir.path().join("codex"),
+            pi: self.dir.path().join("pi"),
         }
     }
 

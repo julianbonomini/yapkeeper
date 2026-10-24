@@ -67,7 +67,7 @@ In the location list, a folder that no longer exists cannot be checked for Git, 
 
 The preview shows, in order:
 
-1. Title: the provider title (Claude Code `custom-title`, then `ai-title`; Codex `thread_name`), or the first prompt.
+1. Title: the provider title (Claude Code `custom-title`, then `ai-title`; Codex `thread_name`; Pi `session_info` name), or the first prompt.
 2. Provider, age, message count, subagent count, and linked PR numbers.
 3. Location icon and full directory, and the worktree name.
 4. `orphaned` or `unavailable` when the session cannot resume in its recorded directory.

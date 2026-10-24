@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use yapkeeper_claude::ClaudeCode;
 use yapkeeper_codex::Codex;
+use yapkeeper_pi::Pi;
 
 pub use location::*;
 pub use query::{
@@ -47,6 +48,7 @@ pub use yapkeeper_model::*;
 pub struct Roots {
     pub claude: PathBuf,
     pub codex: PathBuf,
+    pub pi: PathBuf,
 }
 
 impl Roots {
@@ -56,11 +58,12 @@ impl Roots {
         Ok(Roots {
             claude: yapkeeper_claude::config_dir()?,
             codex: yapkeeper_codex::home_dir()?,
+            pi: yapkeeper_pi::session_dir()?,
         })
     }
 
     /// The provider name of each adapter `search` reads, in search order,
-    /// such as `["claude", "codex"]`. Opens nothing.
+    /// such as `["claude", "codex", "pi"]`. Opens nothing.
     pub fn providers(&self) -> Vec<&'static str> {
         adapters(self)
             .iter()
@@ -89,10 +92,11 @@ pub struct HistoryDir {
 }
 
 /// An adapter for each provider, reading from `roots`.
-fn adapters(roots: &Roots) -> [Box<dyn Adapter>; 2] {
+fn adapters(roots: &Roots) -> [Box<dyn Adapter>; 3] {
     [
         Box::new(ClaudeCode::at(roots.claude.clone())),
         Box::new(Codex::at(roots.codex.clone())),
+        Box::new(Pi::at(roots.pi.clone())),
     ]
 }
 

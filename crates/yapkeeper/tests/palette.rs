@@ -1,4 +1,4 @@
-//! Drives `yapkeeper::palette` over synthetic Claude Code and Codex histories
+//! Drives `yapkeeper::palette` over synthetic Claude Code, Codex and Pi histories
 //! indexed into a tempdir, and checks the frames it draws into a
 //! `TestBackend` and what each key press does.
 
@@ -28,7 +28,8 @@ use support::{live_dir, repo_with_worktree, repo_with_worktrees, temp_dir};
 
 mod support;
 
-/// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and data directory, each empty.
+/// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, Pi session directory and data
+/// directory, each empty.
 struct Histories {
     dir: TempDir,
 }
@@ -55,6 +56,7 @@ impl Histories {
         Roots {
             claude: self.dir.path().join("claude"),
             codex: self.dir.path().join("codex"),
+            pi: self.dir.path().join("pi"),
         }
     }
 
@@ -133,11 +135,43 @@ impl Histories {
             ],
         );
     }
+
+    /// Writes Pi session `id`, run in `cwd`, whose one prompt is `text`.
+    fn pi(&self, id: &str, cwd: &str, text: &str) {
+        let path = self
+            .dir
+            .path()
+            .join("pi/--synthetic-palette--")
+            .join(format!("2026-10-22T09-00-00-000Z_{id}.jsonl"));
+        write_records(
+            &path,
+            &[
+                json!({
+                    "type": "session",
+                    "version": 3,
+                    "id": id,
+                    "timestamp": "2026-10-22T09:00:00.000Z",
+                    "cwd": cwd,
+                }),
+                json!({
+                    "type": "message",
+                    "id": "p1",
+                    "parentId": null,
+                    "timestamp": "2026-10-22T09:00:01.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "text", "text": text }],
+                    },
+                }),
+            ],
+        );
+    }
 }
 
 const CLAUDE_RETRY: &str = "aaaaaaaa-0000-4000-8000-000000000401";
 const CLAUDE_GONE: &str = "aaaaaaaa-0000-4000-8000-000000000402";
 const CODEX: &str = "eeeeeeee-0000-7000-8000-000000000401";
+const PI: &str = "01d00000-0000-7000-8000-000000000401";
 
 /// The Nerd Font folder icon a session in a plain folder shows.
 const FOLDER_ICON: &str = "\u{f07b}";
@@ -925,7 +959,7 @@ fn the_query_line_accents_filter_tokens_and_leaves_words_plain() {
 fn each_filter_prefix_opens_its_completions_with_session_counts() {
     let histories = Histories::three();
     let cases: [(&str, &[(&str, usize)]); 4] = [
-        ("#", &[("#claude", 2), ("#codex", 1)]),
+        ("#", &[("#claude", 2), ("#codex", 1), ("#pi", 0)]),
         (
             "is:",
             &[
@@ -2459,6 +2493,35 @@ fn enter_shows_the_codex_command_and_directory() {
         field(&dialog, "command"),
         Some(format!("codex resume {CODEX} -C /usr/bin")),
         "{dialog:#?}"
+    );
+}
+
+#[test]
+fn enter_shows_the_pi_command_and_directory() {
+    let histories = Histories::three();
+    histories.pi(PI, "/usr", "Sort the inbox");
+    let bin = bin_with(&["claude", "codex", "pi"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    keys(&mut palette, "#pi ");
+    press(&mut palette, KeyCode::Enter);
+    let dialog = frame(&mut palette, 120, 40);
+    assert!(
+        dialog[1].starts_with("│ Resume \"Sort the inbox\""),
+        "{dialog:#?}"
+    );
+    assert_eq!(field(&dialog, "directory").as_deref(), Some("/usr"));
+    assert_eq!(
+        field(&dialog, "command"),
+        Some(format!("pi --session {PI}")),
+        "{dialog:#?}"
+    );
+    assert_eq!(
+        press(&mut palette, KeyCode::Enter),
+        Step::Resume(ResumeCommand {
+            program: "pi".to_string(),
+            args: vec!["--session".to_string(), PI.to_string()],
+            cwd: PathBuf::from("/usr"),
+        })
     );
 }
 

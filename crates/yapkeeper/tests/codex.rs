@@ -10,29 +10,25 @@ use yapkeeper::{Listing, RecordedGit, ResumeCommand, Roots, list};
 
 mod listing;
 
-use listing::{data_dir, found, found_with_tools, ids, listed, timestamp};
-
-const FIXTURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../yapkeeper-codex/tests/fixtures/codex"
-);
+use listing::{CODEX_FIXTURES, data_dir, found, found_with_tools, ids, listed, timestamp};
 
 const RETRY: &str = "aaaaaaaa-0000-7000-8000-00000000000a";
 const ARCHIVED: &str = "bbbbbbbb-0000-7000-8000-00000000000b";
 const FORK: &str = "cccccccc-0000-7000-8000-00000000000c";
 const SUBAGENT: &str = "dddddddd-0000-7000-8000-00000000000d";
 
-/// `codex` as the Codex root, beside an empty Claude Code root under `tmp`.
+/// `codex` as the Codex root, beside empty Claude Code and Pi roots under `tmp`.
 fn roots(codex: &Path, tmp: &Path) -> Roots {
     Roots {
         claude: tmp.join("claude"),
         codex: codex.to_path_buf(),
+        pi: tmp.join("pi"),
     }
 }
 
 /// Every session the fixtures give, read into a fresh index under `tmp`.
 fn list_fixtures(tmp: &Path) -> Listing {
-    list(&roots(Path::new(FIXTURES), tmp), &data_dir(tmp)).unwrap()
+    list(&roots(Path::new(CODEX_FIXTURES), tmp), &data_dir(tmp)).unwrap()
 }
 
 #[test]
@@ -55,7 +51,7 @@ fn active_and_archived_rollouts_and_forks_are_listed_but_subagent_rollouts_are_n
 #[test]
 fn a_subagent_rollout_belongs_to_its_parent_and_a_fork_is_no_subagent() {
     let tmp = tempfile::tempdir().unwrap();
-    let fixtures = roots(Path::new(FIXTURES), tmp.path());
+    let fixtures = roots(Path::new(CODEX_FIXTURES), tmp.path());
     let listing = list_fixtures(tmp.path());
     assert_eq!(listed(&listing, RETRY).session.subagent_count, 1);
     assert_eq!(listed(&listing, FORK).session.subagent_count, 0);
@@ -101,7 +97,7 @@ fn prompt(text: &str) -> String {
 #[test]
 fn echoes_and_injected_context_are_never_searched() {
     let tmp = tempfile::tempdir().unwrap();
-    let fixtures = roots(Path::new(FIXTURES), tmp.path());
+    let fixtures = roots(Path::new(CODEX_FIXTURES), tmp.path());
     // In the fixtures, each word appears only in RETRY's developer message,
     // its `AGENTS.md` block or its environment block.
     for injected in ["developer", "rules", "environment_context"] {
@@ -133,7 +129,7 @@ fn echoes_and_injected_context_are_never_searched() {
 #[test]
 fn tool_calls_and_tool_output_are_tool_level() {
     let tmp = tempfile::tempdir().unwrap();
-    let fixtures = roots(Path::new(FIXTURES), tmp.path());
+    let fixtures = roots(Path::new(CODEX_FIXTURES), tmp.path());
     // In the fixtures, only RETRY's `function_call` has the first word and
     // only its `function_call_output` the second.
     for tool_level in ["shell", "txt"] {

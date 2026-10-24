@@ -11,12 +11,7 @@ use yapkeeper::{Listing, RecordedGit, ResumeCommand, Roots, list};
 
 mod listing;
 
-use listing::{data_dir, found, found_with_tools, ids, listed, timestamp};
-
-const FIXTURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../yapkeeper-claude/tests/fixtures/claude"
-);
+use listing::{CLAUDE_FIXTURES, data_dir, found, found_with_tools, ids, listed, timestamp};
 
 const LAUNCH: &str = "11111111-1111-4111-8111-111111111111";
 const BUILD: &str = "22222222-2222-4222-8222-222222222222";
@@ -26,17 +21,18 @@ const PROMPTLESS: &str = "55555555-5555-4555-8555-555555555555";
 const NO_WORKING_DIR: &str = "66666666-6666-4666-8666-666666666666";
 const NOTES: &str = "77777777-7777-4777-8777-777777777777";
 
-/// `claude` as the Claude Code root, beside an empty Codex root under `tmp`.
+/// `claude` as the Claude Code root, beside empty Codex and Pi roots under `tmp`.
 fn roots(claude: &Path, tmp: &Path) -> Roots {
     Roots {
         claude: claude.to_path_buf(),
         codex: tmp.join("codex"),
+        pi: tmp.join("pi"),
     }
 }
 
 /// Every session the fixtures give, read into a fresh index under `tmp`.
 fn list_fixtures(tmp: &Path) -> Listing {
-    list(&roots(Path::new(FIXTURES), tmp), &data_dir(tmp)).unwrap()
+    list(&roots(Path::new(CLAUDE_FIXTURES), tmp), &data_dir(tmp)).unwrap()
 }
 
 /// Writes `contents` byte for byte as one session file under Claude Code root `root`.
@@ -99,7 +95,7 @@ fn title_is_the_latest_custom_title_then_the_latest_ai_title_then_the_first_prom
 #[test]
 fn injected_context_is_never_a_title_or_searchable() {
     let tmp = tempfile::tempdir().unwrap();
-    let fixtures = roots(Path::new(FIXTURES), tmp.path());
+    let fixtures = roots(Path::new(CLAUDE_FIXTURES), tmp.path());
     let listing = list_fixtures(tmp.path());
     assert_eq!(
         listed(&listing, RELEASE).session.title,
@@ -129,7 +125,7 @@ fn sessions_without_a_prompt_or_a_working_directory_are_not_listed() {
 #[test]
 fn a_malformed_line_and_an_unknown_record_type_do_not_stop_listing() {
     let tmp = tempfile::tempdir().unwrap();
-    let fixtures = roots(Path::new(FIXTURES), tmp.path());
+    let fixtures = roots(Path::new(CLAUDE_FIXTURES), tmp.path());
     let listing = list_fixtures(tmp.path());
     listed(&listing, NOTES);
     assert_eq!(listing.malformed_lines, 1);
@@ -195,7 +191,7 @@ fn working_dir_is_the_first_one_recorded_and_later_ones_are_kept_once() {
 #[test]
 fn subagent_transcripts_belong_to_their_session_instead_of_being_listed() {
     let tmp = tempfile::tempdir().unwrap();
-    let fixtures = roots(Path::new(FIXTURES), tmp.path());
+    let fixtures = roots(Path::new(CLAUDE_FIXTURES), tmp.path());
     let listing = list_fixtures(tmp.path());
     assert_eq!(ids(&listing).iter().filter(|id| **id == LAUNCH).count(), 1);
     assert!(!ids(&listing).iter().any(|id| id.contains("agent-")));
@@ -208,7 +204,7 @@ fn subagent_transcripts_belong_to_their_session_instead_of_being_listed() {
 #[test]
 fn a_parent_uuid_chain_is_one_session_with_no_subagents() {
     let tmp = tempfile::tempdir().unwrap();
-    let fixtures = roots(Path::new(FIXTURES), tmp.path());
+    let fixtures = roots(Path::new(CLAUDE_FIXTURES), tmp.path());
     let listing = list_fixtures(tmp.path());
     assert_eq!(ids(&listing).iter().filter(|id| **id == BUILD).count(), 1);
     assert_eq!(listed(&listing, BUILD).session.subagent_count, 0);
@@ -324,7 +320,7 @@ fn linked_prs_come_from_pr_link_records_each_once() {
 #[test]
 fn tool_calls_and_tool_output_are_tool_level() {
     let tmp = tempfile::tempdir().unwrap();
-    let fixtures = roots(Path::new(FIXTURES), tmp.path());
+    let fixtures = roots(Path::new(CLAUDE_FIXTURES), tmp.path());
     // In the fixtures, only BUILD's `tool_use` input has the first word,
     // only its `tool_result` the second, and only its last reply the third.
     for tool_level in ["file_path", "output"] {

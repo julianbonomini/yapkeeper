@@ -104,7 +104,7 @@ The settings screen takes the place of the query line, the results and the previ
 | Accent | Sage (108, grey bar 237), Cyan (the terminal's cyan, reversed selection), Amber (214), Violet (141), Sky (75), Mono; each but Cyan and Mono has the grey bar |
 | Location icons | Nerd Font, Unicode (`▣ ⎇ ▢ ⊘`), Text tags (`git wt dir gone`), None; each shows its four icons so the user can check their font |
 
-Below the rows, `index` and `preferences` name the two files' paths, cut from the left when they don't fit. `↑` `↓` or `Ctrl+P` `Ctrl+N` move between rows, `→` or `Enter` picks the next value, `←` the previous, `Esc` or `Ctrl+S` goes back to the palette, and `Ctrl+C` quits. Other keys do nothing, so typing never reaches the query. Each change is saved to `prefs.sqlite` and shows at once; the palette searches again from the first row. When it can't be saved, the footer says so and the setting stays as it was.
+Below the rows, `index` and `preferences` name the two files' paths, cut from the left when they don't fit. `↑` `↓` or `Ctrl+P` `Ctrl+N` move between rows, `→` or `Enter` picks the next value, `←` the previous, `Esc` or `Ctrl+S` goes back to the palette, `Ctrl+R` refreshes the index, and `Ctrl+C` quits. Other keys do nothing, so typing never reaches the query. Each change is saved to `prefs.sqlite` and shows at once; the palette searches again from the first row. When it can't be saved, the footer says so and the setting stays as it was.
 
 While temp sessions are hidden, the query line shows `N temp hidden ·` before the match count: how many sessions the query matched that are left out for being in a temp folder. It is dropped first when the query needs the room. Under `NO_COLOR` the accent row reads, for example, `Amber · off: NO_COLOR`: the choice is kept but nothing is drawn in color. With the icon set None, the icon and the space after it are left out, so the text starts where the icon would.
 
@@ -123,11 +123,14 @@ Settings change the palette only; `yapkeeper list` and `search` always use these
 | `Ctrl+X` | Hide or unhide the selected session |
 | `Ctrl+T` | Include tool calls in search |
 | `Ctrl+S` | Settings |
+| `Ctrl+R` | Refresh the index now |
 | `Ctrl+U` | Clear the query |
 | `Esc` | Clear the query, then quit |
 | `Ctrl+C` | Quit |
 
 The selection stops at the first and last rows and returns to the first row whenever the query changes.
+
+`Ctrl+R` works on every screen and has no footer hint: the periodic refresh covers the common case, so the hint would only crowd the footer.
 
 While the query line shows, every printable key goes to the query, so all actions use `Enter`, arrows, `Tab`, or `Ctrl` keys. This is why hide has no undo key in the palette: the toast points to `is:hidden` instead.
 
@@ -154,7 +157,7 @@ A second `Enter` resumes, unless the program isn't found or the directory can't 
 
 ## Loading
 
-`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. The palette opens on the sessions already in the index and reads no history file before the first frame. A background pass then reads changed histories in small committed batches, newest first. Each batch's sessions appear in place, keeping the query, the selected session when it is still listed, and the place in an open conversation. Results behind an open conversation or resume dialog update when the user returns to them. `indexing ·` shows dimly before the match count once a pass has run for 150 ms; with an empty index the results read `Indexing histories…`. Quitting or resuming stops the pass without waiting: an unfinished batch is discarded, so the index stays as of its last commit. A second Yapkeeper or `yapkeeper list` takes turns with the pass batch by batch, and a pass that finds the index busy for 5 s ends quietly. Unlike the prototype below, the index keeps tool output, capped like tool calls, so `--tools` can search it.
+`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. The palette opens on the sessions already in the index and reads no history file before the first frame. A background pass then reads changed histories in small committed batches, newest first. Each batch's sessions appear in place, keeping the query, the selected session when it is still listed, and the place in an open conversation. Results behind an open conversation or resume dialog update when the user returns to them. `indexing ·` shows dimly before the match count once a pass has run for 150 ms; with an empty index the results read `Indexing histories…`. While the palette is open, a new pass starts 10 s after the last one ended, and `Ctrl+R` starts one at once; pressed during a pass it does nothing, and a file the running pass didn't plan waits for the next one. Each pass, even one that finds no file changed, reads every session's location again, so a deleted or remounted folder shows as `orphaned` or `unavailable`, or stops doing so, after it. A file that grows while it is read is stat'ed before the read, so the next pass reads the rest. Quitting or resuming stops the pass, or the wait for the next one, without waiting: an unfinished batch is discarded, so the index stays as of its last commit. A second Yapkeeper or `yapkeeper list` takes turns with the pass batch by batch, and a pass that finds the index busy for 5 s ends quietly. Unlike the prototype below, the index keeps tool output, capped like tool calls, so `--tools` can search it.
 
 The prototype reads every history file at launch, in parallel threads, without an index. On the real histories (866 files, 1.18 GB) it loaded 783 sessions in about 0.3 s with 55 MB peak memory on the user's Mac. It skips tool results, keeps tool calls as one-line summaries, caps messages at 4,000 characters, and drops injected context such as command caveats, `AGENTS.md` instructions, and environment blocks. Sessions with no user prompt (64) and Codex subagent sessions (19) are left out.
 

@@ -38,7 +38,7 @@ use yapkeeper_claude::ClaudeCode;
 use yapkeeper_codex::Codex;
 use yapkeeper_pi::Pi;
 
-pub use indexer::{Indexer, Stepper};
+pub use indexer::{Indexer, REFRESH_INTERVAL, Stepper};
 pub use location::*;
 pub use query::{
     Completion, LocationRow, LocationRowKind, Query, State, Token, TokenKind, location_token,

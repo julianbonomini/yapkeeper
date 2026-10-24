@@ -188,6 +188,11 @@ impl Palette {
             return Step::Continue;
         }
         let ctrl = key.modifiers == KeyModifiers::CONTROL;
+        // On every screen, as none of them takes `Ctrl+R` for itself.
+        if ctrl && key.code == KeyCode::Char('r') {
+            self.indexer.refresh();
+            return Step::Continue;
+        }
         if let Some(resuming) = &mut self.resuming {
             match key.code {
                 KeyCode::Char('c') if ctrl => return Step::Quit,
@@ -276,15 +281,16 @@ impl Palette {
     }
 
     /// When the frame changes with no key pressed: when the toast gives way
-    /// to the key hints, or 50 ms after the last render while a pass runs.
-    /// `None` while nothing will.
+    /// to the key hints, 50 ms after the last render while a pass runs, or
+    /// when the next pass is due. `None` while nothing will.
     pub fn redraw_at(&self) -> Option<Instant> {
         let toast = self.toast.as_ref().map(|toast| toast.until);
         let tick = self
             .drawn_at
             .filter(|_| self.running_since.is_some())
             .map(|drawn_at| drawn_at + INDEXING_TICK);
-        toast.into_iter().chain(tick).min()
+        let pass = self.indexer.next_pass_at();
+        toast.into_iter().chain(tick).chain(pass).min()
     }
 
     /// Whether the query line says a pass is running: once it has run for
@@ -297,12 +303,13 @@ impl Palette {
     }
 
     /// Takes in what the indexer has done by `now`: whether a pass runs, why
-    /// it failed, and the sessions it published since the last render.
+    /// it failed, and the sessions it published since the last render; and
+    /// starts the next pass when it is due.
     fn take_in(&mut self, now: Instant) {
         self.drawn_at = Some(now);
         // Read before the snapshot, so the last batch of a pass that has just
         // ended is taken in by this render or the one its tick brings.
-        let status = self.indexer.status();
+        let status = self.indexer.status(now);
         match status {
             Indexing::Running => {
                 self.running_since.get_or_insert(now);

@@ -25,4 +25,4 @@ Joining the worker on quit. It delays exit and the exec by up to a file read, fo
 - A snapshot taken mid-pass can lag on facts recorded in another file, such as Codex renames or subagent counts, until that file's batch commits. The finished pass matches a single full refresh.
 - A `yapkeeper list` that is interrupted keeps the batches it committed.
 - The palette redraws on a 50 ms tick while a pass runs.
-- A later `Ctrl+R` or refresh interval wakes the same worker rather than adding a new seam.
+- `Ctrl+R` and the refresh interval wake the same worker, which waits between passes rather than exiting. Each pass publishes once more when it ends, so locations are read again even when no file changed.

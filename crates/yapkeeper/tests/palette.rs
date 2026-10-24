@@ -10,6 +10,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
@@ -22,7 +23,8 @@ use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 use yapkeeper::palette::{Colour, Palette, Restore, Step};
 use yapkeeper::{
-    Catalog, DataDir, Indexer, ResumeCommand, Roots, State, Stepper, hide, list, rebuild,
+    Catalog, DataDir, Indexer, REFRESH_INTERVAL, ResumeCommand, Roots, State, Stepper, hide, list,
+    rebuild,
 };
 
 #[cfg(unix)]
@@ -3074,9 +3076,10 @@ fn indexing_shows_on_the_query_line_while_a_pass_runs_and_clears_after() {
     assert!(palette.redraw_at().is_some());
 
     finish(&mut stepper);
-    let done = frame_at(&mut palette, start + Duration::from_millis(250));
+    let ended = start + Duration::from_millis(250);
+    let done = frame_at(&mut palette, ended);
     assert!(!done[1].contains("indexing"), "{done:#?}");
-    assert_eq!(palette.redraw_at(), None);
+    assert_eq!(palette.redraw_at(), Some(ended + REFRESH_INTERVAL));
 }
 
 /// The match count at the end of the query line, such as `32 / 32`.
@@ -3147,4 +3150,124 @@ fn resuming_mid_index_drops_the_indexer_at_once_and_leaves_the_index_consistent(
     };
     assert_eq!(ids(&listed.sessions), ids(&rebuilt.sessions));
     assert_eq!(listed.sessions.len(), 303);
+}
+
+#[test]
+fn a_refresh_runs_once_the_interval_has_passed_since_the_last_pass() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, mut stepper) = histories.palette_indexing();
+    finish(&mut stepper);
+    let ended = Instant::now();
+    frame_at(&mut palette, ended);
+    assert_eq!(palette.redraw_at(), Some(ended + REFRESH_INTERVAL));
+    histories.claude(CLAUDE_NEW, "/usr", "Draft the onboarding guide");
+
+    let early = ended + REFRESH_INTERVAL - Duration::from_millis(1);
+    frame_at(&mut palette, early);
+    assert!(!stepper.step());
+    let before = frame_at(&mut palette, early);
+    assert!(rows_with(&before, &["Draft"]).is_empty(), "{before:#?}");
+
+    frame_at(&mut palette, ended + REFRESH_INTERVAL);
+    finish(&mut stepper);
+    let after = frame_at(&mut palette, ended + REFRESH_INTERVAL);
+    assert_eq!(rows_with(&after, &["Draft"]).len(), 1, "{after:#?}");
+}
+
+#[test]
+fn ctrl_r_refreshes_at_once_and_not_again_while_a_pass_runs() {
+    let histories = Histories::new();
+    histories.many(40);
+    let (mut palette, mut stepper) = histories.palette_indexing();
+    // The pass has planned its files and committed the newest 32.
+    assert!(stepper.step());
+    histories.claude(CLAUDE_NEW, "/usr", "Draft the onboarding guide");
+    ctrl(&mut palette, 'r');
+    finish(&mut stepper);
+    assert!(!stepper.step());
+    let during = frame(&mut palette, 80, 24);
+    assert!(rows_with(&during, &["Draft"]).is_empty(), "{during:#?}");
+
+    ctrl(&mut palette, 'r');
+    finish(&mut stepper);
+    let after = frame(&mut palette, 80, 24);
+    assert_eq!(rows_with(&after, &["Draft"]).len(), 1, "{after:#?}");
+}
+
+#[test]
+fn a_file_appended_to_during_a_pass_shows_after_the_next_pass() {
+    let histories = Histories::three();
+    histories.catalog();
+    let grow = |text: &str| {
+        let record = json!({ "type": "user", "message": { "content": text } });
+        append_claude(&histories, CLAUDE_RETRY, "/usr", &[record]);
+    };
+    grow("Grown once");
+    let (mut palette, mut stepper) = histories.palette_indexing();
+    keys(&mut palette, "twice");
+    assert!(stepper.step());
+    grow("Grown twice");
+    finish(&mut stepper);
+    let during = frame(&mut palette, 80, 24);
+    assert!(rows_with(&during, &["Retry"]).is_empty(), "{during:#?}");
+
+    ctrl(&mut palette, 'r');
+    finish(&mut stepper);
+    let after = frame(&mut palette, 80, 24);
+    assert_eq!(rows_with(&after, &["Retry"]).len(), 1, "{after:#?}");
+}
+
+#[test]
+fn deleting_a_sessions_folder_orphans_it_after_the_next_refresh() {
+    let histories = Histories::new();
+    let folder = live_dir();
+    histories.claude(
+        CLAUDE_NEW,
+        &folder.path().to_string_lossy(),
+        "Draft the guide",
+    );
+    histories.catalog();
+    let (mut palette, mut stepper) = histories.palette_indexing();
+    finish(&mut stepper);
+    let before = frame(&mut palette, 80, 24);
+    assert!(
+        !rows_with(&before, &["Draft"])[0].contains("orphaned"),
+        "{before:#?}"
+    );
+
+    drop(folder);
+    ctrl(&mut palette, 'r');
+    finish(&mut stepper);
+    let after = frame(&mut palette, 80, 24);
+    assert!(
+        rows_with(&after, &["Draft"])[0].contains("orphaned"),
+        "{after:#?}"
+    );
+}
+
+#[test]
+fn the_background_thread_waits_after_a_pass_and_runs_another_on_ctrl_r() {
+    let histories = Histories::three();
+    histories.catalog();
+    let catalog = Catalog::cached(&histories.roots(), &histories.data()).unwrap();
+    let indexer = Indexer::start(&histories.roots(), &histories.data());
+    let mut palette = Palette::new(catalog, Colour::Accent, Path::new("/")).indexing(indexer);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // The first pass has ended once the next is due only after the interval.
+    while palette
+        .redraw_at()
+        .is_none_or(|at| at < Instant::now() + REFRESH_INTERVAL / 2)
+    {
+        assert!(Instant::now() < deadline, "the first pass never ended");
+        frame(&mut palette, 80, 24);
+        thread::sleep(Duration::from_millis(5));
+    }
+    histories.claude(CLAUDE_NEW, "/usr", "Draft the onboarding guide");
+
+    ctrl(&mut palette, 'r');
+    while rows_with(&frame(&mut palette, 80, 24), &["Draft"]).is_empty() {
+        assert!(Instant::now() < deadline, "Ctrl+R started no second pass");
+        thread::sleep(Duration::from_millis(5));
+    }
 }

@@ -1,6 +1,10 @@
-//! Real Git repos and locked directories for the location tests, built in the
-//! system temp folder, which has no `.git` above it, so the location walk
-//! can't climb into this repository.
+//! Real Git repos and locked directories for the location tests. They are
+//! built in the system temp folder, which has no `.git` above it, or in a
+//! live folder under the build's target directory, where each repo's own
+//! `.git` stops the location walk before it climbs into this repository.
+
+// Each test crate compiles this module on its own and uses only some of it.
+#![allow(dead_code)]
 
 use std::fs;
 #[cfg(unix)]
@@ -18,6 +22,18 @@ pub fn temp_dir() -> TempDir {
     assert!(
         Location::of(dir.path(), &RecordedGit::default()).temp,
         "{} is not under a system temp folder; unset TMPDIR or point it at /tmp",
+        dir.path().display()
+    );
+    dir
+}
+
+/// A fresh directory under the build's target directory, checked not to sit
+/// under a system temp folder: sessions in it are listed by default.
+pub fn live_dir() -> TempDir {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    assert!(
+        !Location::of(dir.path(), &RecordedGit::default()).temp,
+        "{} is under a system temp folder; point CARGO_TARGET_DIR elsewhere",
         dir.path().display()
     );
     dir
@@ -41,7 +57,12 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// A main checkout at `<parent>/acme-api` with one commit and a `src` folder.
 pub fn main_checkout(parent: &Path) -> PathBuf {
-    let repo = parent.join("acme-api");
+    checkout(parent, "acme-api")
+}
+
+/// A main checkout at `<parent>/<name>` with one commit and a `src` folder.
+fn checkout(parent: &Path, name: &str) -> PathBuf {
+    let repo = parent.join(name);
     fs::create_dir_all(repo.join("src")).unwrap();
     git(&repo, &["init", "-q"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
@@ -57,6 +78,25 @@ pub fn repo_with_worktree(parent: &Path) -> (PathBuf, PathBuf) {
         &["worktree", "add", "-q", "../acme-api.wt/billing-retry"],
     );
     (repo, parent.join("acme-api.wt/billing-retry"))
+}
+
+/// A main checkout at `<parent>/<name>` and a linked worktree of it at
+/// `<parent>/<name>.wt/<worktree>` for each of `worktrees`, in order.
+pub fn repo_with_worktrees(
+    parent: &Path,
+    name: &str,
+    worktrees: &[&str],
+) -> (PathBuf, Vec<PathBuf>) {
+    let repo = checkout(parent, name);
+    let linked = worktrees
+        .iter()
+        .map(|worktree| {
+            let path = format!("../{name}.wt/{worktree}");
+            git(&repo, &["worktree", "add", "-q", &path]);
+            parent.join(format!("{name}.wt/{worktree}"))
+        })
+        .collect();
+    (repo, linked)
 }
 
 /// Takes every permission away from a directory until dropped, so the

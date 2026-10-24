@@ -9,7 +9,7 @@ The palette fills the terminal inside a single rounded border. From top to botto
 1. The query line, with the match count on the right (`2 / 783`).
 2. A rule.
 3. Results on the left (48%) and the preview on the right (52%) when the palette is at least 80 columns wide. Below that width the preview is dropped and `→` opens the conversation.
-4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action.
+4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action. Under the results the hints include `Tab locations` and `^S settings`; while a completion list is open, `Tab insert`.
 
 There is no permanent location sidebar. The query line handles locations (see below).
 
@@ -48,7 +48,7 @@ A session whose directory no longer exists is `orphaned`; one whose directory ex
 
 An orphaned or unavailable session's project is inferred on a best-effort basis. The first of these that applies names the project: the recorded `repository_url`, then the nearest existing repo above the directory, then a path layout (`X.wt/w`, `R/.claude/worktrees/w`, `~/.tool/worktrees/P/w`, `P/worktrees/w` or `P/.worktrees/w`). The worktree comes from that layout, or from a recorded branch whose last segment matches the folder name. When nothing applies, the raw path is shown.
 
-`Tab` (or typing `@`) opens the location list. Each project row comes first and covers the main checkout and every worktree; its worktrees are listed under it. Plain folders follow. Groups are ordered by most recent activity. Each row has a kind icon on the left, a kind label and path, and a session count. With the Unicode icon set:
+`Tab` (or typing `@`) opens the location list. Each project row comes first and covers the main checkout and every worktree; its worktrees are listed under it. Plain folders follow. Project groups come first, then folders, each ordered by most recent activity, with missing places last. Each row has a kind icon on the left, a kind label and path, and a session count. A row's count is the number of sessions its `@` token lists, so a folder also counts its subfolders' sessions. A folder row shows its path once, as its label, with `folder` as its kind. With the Unicode icon set:
 
 ```
 ▣ acme-api                git repo · 3 worktrees · ~/code/acme-api   10
@@ -57,9 +57,11 @@ An orphaned or unavailable session's project is inferred on a best-effort basis.
 ⊘ ~/scratch/regex-tester  missing · folder no longer exists            1
 ```
 
+The kind words are never cut. In a narrow terminal the path gives way from the left, and a missing folder's `folder no longer exists` from the right.
+
 Typing after `@` matches location names and paths, so `@code` finds every project under `~/code`. Result rows label locations as `project › worktree`; the `project:worktree` form is used only inside `@` tokens. `Ctrl+L` inserts the location Yapkeeper was launched from.
 
-In the location list, a folder that no longer exists cannot be checked for Git, so it is shown as `missing` with its path.
+In the location list, a folder that no longer exists cannot be checked for Git, so it is shown as `missing` with its path. A missing folder reads `missing · folder no longer exists`. Missing places are left out while nothing follows `@`, and shown once anything does.
 
 ## Preview
 
@@ -74,7 +76,7 @@ The preview shows, in order:
 7. Opening: the first prompt.
 8. Latest: the last prompt and the replies after it.
 
-`→` opens the full conversation. `n` and `N` jump between matches, and `Enter` there opens the resume dialog.
+`→` opens the full conversation in place of the query line, results and preview, with the session's title and where it ran above it. Every message is shown whole, with the search words highlighted, and each tool call is one line. `↑` `↓` scroll by a line, `PgUp` `PgDn` by a page less one line, and `Home` `End` jump to either end. It opens at the first match. `n` and `N` move to the next and previous match, wrapping past the last and the first, and the title line shows which one (`match 2 / 3`). `Enter` there opens the resume dialog. `Esc` or `←` returns to the palette with the query and selection unchanged.
 
 Recaps cost nothing extra: Claude Code writes `away_summary` records into its session files. On the real histories, 180 of 783 sessions had one and 100 had a `pr-link` record. Codex sessions have no recap. Writing a summary for every session would need a model call during indexing; that is deferred (see open questions).
 
@@ -92,6 +94,22 @@ Recaps cost nothing extra: Claude Code writes `away_summary` records into its se
 
 Terminals cannot report whether a Nerd Font is installed, so the icon set has to stay a setting with a Unicode fallback. `NO_COLOR` switches to the monochrome theme. Selection must remain visible without color (reversed or bold).
 
+The settings screen takes the place of the query line, the results and the preview, inside the same border. It has one row per setting, with its value on the right in the accent:
+
+| Row | Values, in the order `→` steps through them |
+|---|---|
+| Hide temp-folder sessions | `on`, `off` |
+| Hide missing folders in locations | `on`, `off` |
+| List orphans last | `on`, `off` |
+| Accent | Sage (108, grey bar 237), Cyan (the terminal's cyan, reversed selection), Amber (214), Violet (141), Sky (75), Mono; each but Cyan and Mono has the grey bar |
+| Location icons | Nerd Font, Unicode (`▣ ⎇ ▢ ⊘`), Text tags (`git wt dir gone`), None; each shows its four icons so the user can check their font |
+
+Below the rows, `index` and `preferences` name the two files' paths, cut from the left when they don't fit. `↑` `↓` or `Ctrl+P` `Ctrl+N` move between rows, `→` or `Enter` picks the next value, `←` the previous, `Esc` or `Ctrl+S` goes back to the palette, and `Ctrl+C` quits. Other keys do nothing, so typing never reaches the query. Each change is saved to `prefs.sqlite` and shows at once; the palette searches again from the first row. When it can't be saved, the footer says so and the setting stays as it was.
+
+While temp sessions are hidden, the query line shows `N temp hidden ·` before the match count: how many sessions the query matched that are left out for being in a temp folder. It is dropped first when the query needs the room. Under `NO_COLOR` the accent row reads, for example, `Amber · off: NO_COLOR`: the choice is kept but nothing is drawn in color. With the icon set None, the icon and the space after it are left out, so the text starts where the icon would.
+
+Settings change the palette only; `yapkeeper list` and `search` always use these defaults, so scripts get the same answer whatever the palette is set to.
+
 ## Keys
 
 | Key | Action |
@@ -101,7 +119,7 @@ Terminals cannot report whether a Nerd Font is installed, so the icon set has to
 | `Enter` | Resume dialog |
 | `→` | Read the whole conversation |
 | `Tab` | Location list |
-| `Ctrl+L` | Insert the launch location |
+| `Ctrl+L` | Insert the launch directory's `@` token |
 | `Ctrl+X` | Hide or unhide the selected session |
 | `Ctrl+T` | Include tool calls in search |
 | `Ctrl+S` | Settings |
@@ -109,17 +127,34 @@ Terminals cannot report whether a Nerd Font is installed, so the icon set has to
 | `Esc` | Clear the query, then quit |
 | `Ctrl+C` | Quit |
 
-Every printable key goes to the query, so all actions use `Enter`, arrows, `Tab`, or `Ctrl` keys. This is why hide has no undo key in the palette: the toast points to `is:hidden` instead.
+The selection stops at the first and last rows and returns to the first row whenever the query changes.
+
+While the query line shows, every printable key goes to the query, so all actions use `Enter`, arrows, `Tab`, or `Ctrl` keys. This is why hide has no undo key in the palette: the toast points to `is:hidden` instead.
+
+The resume dialog has no query line, so it takes letters: `Enter` resumes, `c` resumes in the launch directory instead, `r` checks an unavailable folder again, and `Esc` goes back.
 
 ## Resume dialog
 
-`Enter` on a result opens a dialog with the directory and the exact command, for example `claude --resume <id>` or `codex resume <id> -C <dir>`. A second `Enter` exits the TUI and starts the provider in that directory; the prototype only prints the command.
+`Enter` on a result, or in the conversation, opens the resume dialog in place of the query line, results and preview, inside the palette's one border. Its title line reads `Resume "<title>"` with the provider on the right. Below the rule come `directory`, where the provider would start, and `command`, the exact program and arguments the adapter gives, for example `claude --resume <id>` or `codex resume <id> -C <dir>`. Both wrap and are never cut. An argument a shell would split or read as syntax is shown single-quoted; the command itself never goes through a shell. Below them is one row per state that applies, each with a word label, so it reads the same under `NO_COLOR`:
 
-For an orphaned session the dialog explains that the folder is gone and offers `c` to resume in the launch directory instead. Resume never moves to another directory without that explicit choice. For Claude Code the dialog warns that the session may not be found from another directory, because Claude Code looks sessions up by project directory. For an unavailable folder (one that exists but cannot be inspected) it also offers `r` to check again.
+| Label | When |
+|---|---|
+| `orphaned` | The session's folder is gone, so it can't resume there. While on offer, the row says `c` resumes in the launch directory instead. |
+| `unavailable` | The folder exists but can't be inspected (permissions, or a volume not mounted). The row offers `c` as above, and `r` to check again. |
+| `orphaned` or `unavailable` | After `c`, the launch directory is gone too, or can't be inspected either. |
+| `running` | Claude Code's running-session metadata lists the session as open. Resuming is still allowed. |
+| `warning` | After `c`, for a provider that looks sessions up by directory (Claude Code): it may not find this session from another directory. |
+| `not found` | The provider's program isn't on `PATH`, so it can't start. |
+
+Resume never moves to another directory without `c`. `c` is offered while the session's own folder is orphaned or unavailable, and it is one-way: `Esc` and opening the dialog again start from the recorded folder. `r` checks an unavailable folder again and redraws the dialog; when it is still unavailable, the dialog says `Checked again: still can't inspect it.` The result row keeps its label until the next launch. Directory and command come first, so a short terminal drops state rows from the bottom.
+
+A second `Enter` resumes, unless the program isn't found or the directory can't be used; then the dialog's own rows say why and `Enter` does nothing. Yapkeeper restores the terminal, closes the index, and the provider **replaces** Yapkeeper in the same terminal, started with its arguments as separate words and no shell, in that directory. The provider gets the terminal, signals and exit status directly, and nothing of Yapkeeper is left running. If it can't be started, Yapkeeper says why on stderr and exits 1.
+
+`Esc` closes the dialog and returns to the results or the conversation it opened from, unchanged. `Ctrl+C` quits. The footer shows `↵ resume` only while resuming would start, `c here` and `r check again` only while they are offered, then `Esc back` and `^C quit`. Other keys do nothing.
 
 ## Loading
 
-`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. Unlike the prototype below, it keeps tool output, capped like tool calls, so `--tools` can search it.
+`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. The palette loads the index once at launch, refreshing it first as `list` does, and searches that snapshot while the user types. It does not see changes made after launch. Unlike the prototype below, the index keeps tool output, capped like tool calls, so `--tools` can search it.
 
 The prototype reads every history file at launch, in parallel threads, without an index. On the real histories (866 files, 1.18 GB) it loaded 783 sessions in about 0.3 s with 55 MB peak memory on the user's Mac. It skips tool results, keeps tool calls as one-line summaries, caps messages at 4,000 characters, and drops injected context such as command caveats, `AGENTS.md` instructions, and environment blocks. Sessions with no user prompt (64) and Codex subagent sessions (19) are left out.
 
@@ -128,12 +163,13 @@ The prototype reads every history file at launch, in parallel threads, without a
 Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` when `XDG_DATA_HOME` is unset or relative:
 
 - `index.sqlite`, the index: rebuildable, and safe to delete at any time.
-- `prefs.sqlite`, the preferences, such as hides. Rebuilding the index never touches it.
+- `prefs.sqlite`, the preferences: hides and settings. Rebuilding the index never touches it. Opening it with an older Yapkeeper than the one that last wrote it fails rather than losing them.
 
 ## Command line
 
 | Command | stdout | stderr |
 |---|---|---|
+| `yapkeeper` | Nothing | On a terminal, opens the palette. Otherwise help, then `yapkeeper: the palette needs a terminal; yapkeeper list and yapkeeper search work in scripts`, exiting 2 |
 | `yapkeeper list [--ids]` | One line per session outside temp folders and not hidden, orphaned last, each group most recent first; `--ids` starts each line with the session's id | No sessions found, no sessions outside temp folders (with the `is:temp` hint) or every session hidden (with the `is:hidden` hint), malformed lines skipped |
 | `yapkeeper search [--ids] [--tools] <query>…` | Sessions matching every word and filter of the query language, one line each, as `list` | No sessions found, no sessions match (with a `--tools` hint when the query has words), no sessions outside temp folders (with the `is:temp` hint) or every session hidden (with the `is:hidden` hint), unknown provider or state names (with the valid names), malformed lines skipped |
 | `yapkeeper paths` | `index` and `preferences`, each followed by its path in a space-aligned column | Nothing |
@@ -141,7 +177,7 @@ Both files sit in `$XDG_DATA_HOME/yapkeeper/`, or `~/.local/share/yapkeeper/` wh
 | `yapkeeper hide <id>` | Nothing | `yapkeeper: hid "<title>"; yapkeeper search is:hidden lists it`, or, exiting 1, no session has the id (with the `list --ids` hint) |
 | `yapkeeper unhide <id>` | Nothing | `yapkeeper: unhid "<title>"`, or the same error as `hide` |
 
-When the index can't be written or the preferences can't be read or written, any command that uses them exits 1. Its stderr ends with `Check its permissions, or set XDG_DATA_HOME.` Hiding a session that is already hidden, or unhiding one that is shown, succeeds and changes nothing.
+When the index can't be used or the preferences can't be read or written, any command that uses them exits 1, saying `can't use the index` or `can't use the preferences`. Its stderr ends with `Check its permissions, or set XDG_DATA_HOME.` Hiding a session that is already hidden, or unhiding one that is shown, succeeds and changes nothing.
 
 The help footer names each provider's history directory and the index and preferences paths, as this environment resolves them; when a history directory can't be resolved, it says why instead. `search --help` names every state the query language accepts, and every provider when the history directories resolve.
 

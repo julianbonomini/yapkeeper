@@ -3,28 +3,44 @@
 //! each one is rooted and where Yapkeeper keeps its own files, keeps the
 //! index of every session up to date, finds sessions by what was said and
 //! by the query language's filters, reads each session's location from
-//! the disk when it is listed, and keeps the user's hides apart from the
-//! index.
+//! the disk when it is listed, keeps the user's hides and settings apart
+//! from the index, and says what resuming a session would do now, and
+//! starts it. A `Catalog` loads all of that once so it can be searched
+//! many times, by the settings, and record hides and settings, as the
+//! `palette` does while the person types;
+//! `line` holds how a session reads as one line of terminal text, for the
+//! palette and the CLI.
 
 #![forbid(unsafe_code)]
 
 mod index;
+pub mod line;
 mod location;
+pub mod palette;
 mod prefs;
 mod query;
+mod resume;
+mod settings;
 
 use prefs::Choice;
 
+use std::collections::HashSet;
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use yapkeeper_claude::ClaudeCode;
 use yapkeeper_codex::Codex;
 
 pub use location::*;
-pub use query::{Query, State, Token, TokenKind};
+pub use query::{
+    Completion, LocationRow, LocationRowKind, Query, State, Token, TokenKind, location_token,
+};
+pub use resume::{Caution, ResumeDir, ResumePlan, launch};
+pub use settings::*;
 pub use yapkeeper_model::*;
 
 /// Where each provider keeps its history.
@@ -82,6 +98,7 @@ fn adapters(roots: &Roots) -> [Box<dyn Adapter>; 2] {
 
 /// Where Yapkeeper keeps its own files: `$XDG_DATA_HOME/yapkeeper` when that
 /// is set and absolute, otherwise `$HOME/.local/share/yapkeeper`. Creates nothing.
+#[derive(Clone)]
 pub struct DataDir {
     dir: PathBuf,
 }
@@ -113,7 +130,8 @@ impl DataDir {
         self.dir.join("index.sqlite")
     }
 
-    /// `<dir>/prefs.sqlite`, the user's hides; never touched by the index.
+    /// `<dir>/prefs.sqlite`, the user's hides and settings; never touched by
+    /// the index.
     pub fn prefs(&self) -> PathBuf {
         self.dir.join("prefs.sqlite")
     }
@@ -134,19 +152,21 @@ pub struct Listing {
     pub files_read: usize,
     /// History bytes read during this call; only the new bytes of a file that grew.
     pub bytes_read: u64,
-    /// Which defaults left out a session the query otherwise matched.
+    /// How many sessions the query otherwise matched each default left out.
     pub left_out: LeftOut,
 }
 
-/// The defaults that left sessions out of a listing: temp sessions unless
-/// the query has `is:temp`, and hidden ones unless it has `is:hidden`.
+/// How many sessions every filter admitted that each default left out: temp
+/// sessions unless the query has `is:temp` (none while `hide_temp` is off),
+/// and hidden ones unless it has `is:hidden`. A session can count in both.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LeftOut {
-    pub temp: bool,
-    pub hidden: bool,
+    pub temp: usize,
+    pub hidden: usize,
 }
 
 /// A session with its location and whether it is hidden, as of this listing.
+#[derive(Clone)]
 pub struct Listed {
     pub session: Session,
     pub location: Location,
@@ -171,7 +191,7 @@ type Cause = Box<dyn Error + Send + Sync>;
 
 /// A session as the index and the preferences name it: by provider as well
 /// as id, so two providers can never share one.
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct SessionKey {
     provider: String,
     id: String,
@@ -195,7 +215,7 @@ enum DataFile {
 impl fmt::Display for DataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let what = match self.file {
-            DataFile::Index => "write the index",
+            DataFile::Index => "use the index",
             DataFile::Preferences => "use the preferences",
         };
         write!(
@@ -230,26 +250,201 @@ pub fn list(roots: &Roots, data: &DataDir) -> Result<Listing, DataError> {
 /// recent `last_active` first, ties by provider then id. The other fields
 /// are as `list` gives them. Fails only as `list` does.
 pub fn search(roots: &Roots, data: &DataDir, query: &Query) -> Result<Listing, DataError> {
-    let refreshed = refresh(roots, data, query)?;
-    let hides = prefs::hides(&data.prefs())?;
-    let mut sessions: Vec<Listed> = refreshed
-        .sessions
-        .into_iter()
-        .map(|session| {
-            let hidden = hides.contains(&session);
-            listed(session, hidden)
-        })
-        .collect();
-    let left_out = query.select(&mut sessions);
+    listing(&Catalog::open(roots, data)?, query)
+}
+
+/// What `catalog.search` finds for `query`, with what opening it read.
+fn listing(catalog: &Catalog, query: &Query) -> Result<Listing, DataError> {
+    let found = catalog.search(query)?;
     Ok(Listing {
-        sessions,
-        indexed: refreshed.indexed,
-        malformed_lines: refreshed.malformed_lines,
-        searched: refreshed.searched,
-        files_read: refreshed.files_read,
-        bytes_read: refreshed.bytes_read,
-        left_out,
+        sessions: found
+            .sessions
+            .iter()
+            .map(|listed| Listed::clone(listed))
+            .collect(),
+        indexed: catalog.indexed(),
+        malformed_lines: catalog.malformed_lines,
+        searched: catalog.searched.clone(),
+        files_read: catalog.files_read,
+        bytes_read: catalog.bytes_read,
+        left_out: found.left_out,
     })
+}
+
+/// Every indexed session as of `Catalog::open`, with its location and
+/// whether it is hidden, ready to be searched many times without
+/// refreshing the index or rereading the disk, to record hides and
+/// settings, and to say what resuming one would do.
+pub struct Catalog {
+    index: index::Index,
+    /// Every session in the index, in no particular order; shared with what
+    /// each search finds, so a search holds no borrow of the catalog.
+    sessions: Vec<Rc<Listed>>,
+    /// The settings `parse` and `completions` follow.
+    settings: Settings,
+    /// Where the index and the preferences live.
+    data: DataDir,
+    providers: Vec<&'static str>,
+    /// One per provider, to say how each of its sessions resumes.
+    adapters: Vec<Box<dyn Adapter>>,
+    /// Where `resume` looks for providers' programs.
+    path: OsString,
+    malformed_lines: usize,
+    searched: Vec<PathBuf>,
+    files_read: usize,
+    bytes_read: u64,
+}
+
+/// What one query found in a catalog.
+pub struct Found {
+    /// In `search`'s order.
+    pub sessions: Vec<Rc<Listed>>,
+    pub left_out: LeftOut,
+}
+
+impl Catalog {
+    /// Brings the index up to date as `list` does, then reads the hides, the
+    /// settings and every session's location from the disk once. Fails only
+    /// as `list` does.
+    pub fn open(roots: &Roots, data: &DataDir) -> Result<Catalog, DataError> {
+        let refreshed = refresh(roots, data)?;
+        let prefs = prefs::read(&data.prefs())?;
+        let sessions = refreshed
+            .sessions
+            .into_iter()
+            .map(|session| {
+                let hidden = prefs.hides.contains(&session);
+                Rc::new(listed(session, hidden))
+            })
+            .collect();
+        Ok(Catalog {
+            index: refreshed.index,
+            sessions,
+            settings: prefs.settings,
+            data: data.clone(),
+            providers: roots.providers(),
+            adapters: adapters(roots).into(),
+            path: std::env::var_os("PATH").unwrap_or_default(),
+            malformed_lines: refreshed.malformed_lines,
+            searched: refreshed.searched,
+            files_read: refreshed.files_read,
+            bytes_read: refreshed.bytes_read,
+        })
+    }
+
+    /// `text` read as the query language, with this catalog's providers,
+    /// following its settings: temp sessions are left out only while
+    /// `hide_temp` is on, and orphaned ones come last only while
+    /// `orphans_last` is on. `Query::parse` always follows the defaults.
+    pub fn parse(&self, text: &str) -> Query {
+        Query::parse(text, &self.providers).following(self.settings)
+    }
+
+    /// The sessions matching `query`, with the same rules and order as
+    /// `search`. Fails only when the index can no longer be read.
+    pub fn search(&self, query: &Query) -> Result<Found, DataError> {
+        let candidates = self
+            .sessions
+            .iter()
+            .map(|listed| SessionKey::of(&listed.session))
+            .collect();
+        let matched: HashSet<SessionKey> = self.index.matching(query, candidates)?;
+        let mut sessions: Vec<Rc<Listed>> = self
+            .sessions
+            .iter()
+            .filter(|listed| matched.contains(&SessionKey::of(&listed.session)))
+            .cloned()
+            .collect();
+        let left_out = query.select(&mut sessions);
+        Ok(Found { sessions, left_out })
+    }
+
+    /// What the person and the assistant said in `session`, and the tools
+    /// the assistant called, in the order recorded: tool output and
+    /// subagent transcripts are left out. Empty for a session this catalog
+    /// doesn't hold. Fails only when the index can no longer be read.
+    pub fn conversation(&self, session: &Session) -> Result<Vec<Message>, DataError> {
+        self.index.conversation(&SessionKey::of(session))
+    }
+
+    /// The ways to finish the filter at the end of `text`, each with how
+    /// many sessions its token lists. After `@`, this is the location list:
+    /// the places where the sessions `@` lists ran. Each project comes with
+    /// its worktrees after it, then the plain folders. Each group is ordered
+    /// most recent first, and missing places come last. A row is kept when a
+    /// session that the typed `@` token lists ran there. Missing places are
+    /// left out while nothing follows the `@` and `hide_missing` is on.
+    /// Empty unless the last token starts with `@`, `#`, `is:`, `!` or
+    /// `not:` and nothing follows it, so a space never offers any, and empty
+    /// when the token typed is already the only way to finish it. Counts and
+    /// rows follow this catalog's settings, as `parse` does.
+    pub fn completions(&self, text: &str) -> Vec<Completion> {
+        query::completions(text, &self.providers, &self.sessions, self.settings)
+    }
+
+    /// Hides `session`, so that only `is:hidden` finds it, or shows it
+    /// again, in this catalog and in `prefs.sqlite`, which is created when
+    /// missing. Fails, changing nothing, when the preferences can't be written.
+    pub fn set_hidden(&mut self, session: &Session, hidden: bool) -> Result<(), DataError> {
+        let choice = match hidden {
+            true => Choice::Hide,
+            false => Choice::Unhide,
+        };
+        prefs::record(&self.data.prefs(), std::slice::from_ref(session), choice)?;
+        let key = SessionKey::of(session);
+        for listed in &mut self.sessions {
+            if SessionKey::of(&listed.session) == key {
+                *listed = Rc::new(Listed {
+                    hidden,
+                    ..Listed::clone(listed)
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The settings recorded in prefs.sqlite when this catalog opened, as
+    /// changed since; defaults for any not recorded.
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// Where this catalog's index and preferences live.
+    pub fn data_dir(&self) -> &DataDir {
+        &self.data
+    }
+
+    /// Records `settings` in prefs.sqlite, which is created when missing or
+    /// upgraded with its hides kept, and makes later `parse` and
+    /// `completions` follow them. Fails, changing nothing, when the
+    /// preferences can't be written.
+    pub fn set_settings(&mut self, settings: Settings) -> Result<(), DataError> {
+        prefs::record_settings(&self.data.prefs(), &settings)?;
+        self.settings = settings;
+        Ok(())
+    }
+
+    /// What resuming `session` in `dir` would do, read from the disk, the
+    /// provider's metadata and this catalog's `PATH` now. Never fails.
+    pub fn resume(&self, session: &Session, dir: ResumeDir) -> ResumePlan {
+        let adapter = self
+            .adapters
+            .iter()
+            .find(|adapter| adapter.provider() == session.provider)
+            .expect("every catalog session comes from one of its adapters");
+        resume::plan(adapter.as_ref(), session, dir, &self.path)
+    }
+
+    /// This catalog, finding providers' programs on `path` rather than
+    /// the `PATH` this process had when it opened.
+    pub fn finding_programs_in(self, path: OsString) -> Catalog {
+        Catalog { path, ..self }
+    }
+
+    /// Every session in the index, whether or not a query keeps it.
+    pub fn indexed(&self) -> usize {
+        self.sessions.len()
+    }
 }
 
 /// Hides every session whose id is `id`, temp, orphaned or already hidden
@@ -275,7 +470,7 @@ fn set_hidden(
     choice: Choice,
 ) -> Result<Vec<Listed>, DataError> {
     // Straight from the index, so temp and hidden sessions are found too.
-    let matched: Vec<Session> = refresh(roots, data, &Query::default())?
+    let matched: Vec<Session> = refresh(roots, data)?
         .sessions
         .into_iter()
         .filter(|session| session.id == id)
@@ -297,12 +492,12 @@ fn listed(session: Session, hidden: bool) -> Listed {
     }
 }
 
-/// The index brought up to date, and its sessions with `query`'s words,
-/// unfiltered and unordered.
-fn refresh(roots: &Roots, data: &DataDir, query: &Query) -> Result<index::Refreshed, DataError> {
+/// The index brought up to date, and every session in it, unfiltered and
+/// unordered.
+fn refresh(roots: &Roots, data: &DataDir) -> Result<index::Refreshed, DataError> {
     let adapters = adapters(roots);
     let adapters: Vec<&dyn Adapter> = adapters.iter().map(Box::as_ref).collect();
-    index::refresh(&adapters, &data.index(), query)
+    index::refresh(&adapters, &data.index())
 }
 
 /// Deletes the index and builds it again from every history file, then

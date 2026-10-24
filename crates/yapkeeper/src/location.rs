@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use yapkeeper_model::RecordedGit;
 
@@ -25,6 +25,10 @@ pub struct Location {
     pub availability: Availability,
     /// Under one of the system temp folders.
     pub temp: bool,
+    /// The folder this place is: the checkout's top folder when the working
+    /// directory sits in a repo read from the disk now, otherwise the working
+    /// directory itself.
+    pub root: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,16 +66,20 @@ impl Location {
             }
             Err(_) => Availability::Unavailable,
         };
-        let place = if availability == Availability::Available {
+        let inferred = || RepoPlace {
+            place: inferred_place(working_dir, recorded),
+            root: working_dir.to_path_buf(),
+        };
+        let RepoPlace { place, root } = if availability == Availability::Available {
             match repo_place(working_dir) {
-                Ok(place) => place,
+                Ok(found) => found,
                 Err(Uninspectable) => {
                     availability = Availability::Unavailable;
-                    inferred_place(working_dir, recorded)
+                    inferred()
                 }
             }
         } else {
-            inferred_place(working_dir, recorded)
+            inferred()
         };
         Location {
             place,
@@ -79,6 +87,7 @@ impl Location {
             temp: TEMP_FOLDERS
                 .iter()
                 .any(|folder| working_dir.starts_with(folder)),
+            root,
         }
     }
 }
@@ -189,7 +198,7 @@ fn nearest_live_place(dir: &Path) -> Option<Place> {
     let live = dir
         .ancestors()
         .find(|ancestor| fs::metadata(ancestor).is_ok_and(|metadata| metadata.is_dir()))?;
-    repo_place(live).ok()
+    repo_place(live).ok().map(|found| found.place)
 }
 
 /// The repo a remote URL such as `git@example.com:acme/acme-api.git` names.
@@ -203,9 +212,17 @@ fn repo_name(url: &str) -> Option<String> {
 /// belongs to is unknown.
 struct Uninspectable;
 
+/// What `repo_place` read from the disk.
+struct RepoPlace {
+    place: Place,
+    /// The checkout's top folder, or the directory asked about when it sits
+    /// in no repo.
+    root: PathBuf,
+}
+
 /// The repo `dir` sits in, found at the nearest `.git` above it: a `.git`
 /// directory marks a main checkout and a `.git` file a linked worktree.
-fn repo_place(dir: &Path) -> Result<Place, Uninspectable> {
+fn repo_place(dir: &Path) -> Result<RepoPlace, Uninspectable> {
     for checkout in dir.ancestors() {
         let dot_git = checkout.join(".git");
         let metadata = match fs::metadata(&dot_git) {
@@ -213,15 +230,23 @@ fn repo_place(dir: &Path) -> Result<Place, Uninspectable> {
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(_) => return Err(Uninspectable),
         };
-        if metadata.is_dir() {
-            return Ok(Place::MainCheckout {
+        let place = if metadata.is_dir() {
+            Place::MainCheckout {
                 project: folder_name(checkout),
-            });
-        }
-        let contents = fs::read_to_string(&dot_git).map_err(|_| Uninspectable)?;
-        return Ok(linked_place(checkout, &contents));
+            }
+        } else {
+            let contents = fs::read_to_string(&dot_git).map_err(|_| Uninspectable)?;
+            linked_place(checkout, &contents)
+        };
+        return Ok(RepoPlace {
+            place,
+            root: checkout.to_path_buf(),
+        });
     }
-    Ok(Place::Folder)
+    Ok(RepoPlace {
+        place: Place::Folder,
+        root: dir.to_path_buf(),
+    })
 }
 
 /// The place of a checkout whose `.git` is a file holding `contents`. A

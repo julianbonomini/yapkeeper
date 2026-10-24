@@ -1,10 +1,13 @@
 //! The Claude Code adapter. It owns where Claude Code keeps its history, the
 //! JSONL grammar of a transcript and of a subagent transcript, which text
 //! counts as a prompt, which records carry a title, a recap or a linked PR,
-//! and how a session is resumed. The model folds what it reads into sessions.
+//! how a session is resumed, and which sessions its running-session
+//! metadata lists as open. The model folds what it reads into sessions.
 
 #![forbid(unsafe_code)]
 
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -15,6 +18,10 @@ use yapkeeper_model::{
 };
 
 const PARSER_VERSION: u32 = 2;
+
+/// A running-session file is a few hundred bytes; anything past this is
+/// not one, and is not read.
+const MAX_RUNNING_FILE_BYTES: u64 = 64 * 1024;
 
 /// Claude Code's history under one configuration directory.
 pub struct ClaudeCode {
@@ -109,6 +116,50 @@ impl Adapter for ClaudeCode {
             cwd: working_dir.to_path_buf(),
         }
     }
+
+    fn is_running(&self, id: &str) -> bool {
+        // Claude Code writes `sessions/<pid>.json` for each open session.
+        let Ok(entries) = fs::read_dir(self.config_dir.join("sessions")) else {
+            return false;
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .any(|path| names_session(&path, id))
+    }
+
+    fn resumes_by_directory(&self) -> bool {
+        // `--resume` looks under the project folder named after the
+        // directory it starts in.
+        true
+    }
+}
+
+/// Whether the running-session file at `path` names session `id` as its
+/// top-level `sessionId`; false for anything that isn't a readable JSON
+/// file within `MAX_RUNNING_FILE_BYTES`.
+fn names_session(path: &Path, id: &str) -> bool {
+    // Checked before opening, as opening a FIFO would wait for a writer.
+    if !fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_RUNNING_FILE_BYTES)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return false;
+    }
+    serde_json::from_slice::<Value>(&bytes)
+        .is_ok_and(|record| record["sessionId"].as_str() == Some(id))
 }
 
 /// The session id whose `<id>/subagents/` folder holds `path`, or `None`

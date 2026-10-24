@@ -1,19 +1,21 @@
 //! The `yapkeeper` command line. It owns presentation only: one plain line per
-//! session or path for people, `grep`, `cut` and `wc -l`, and diagnostics and
-//! confirmations on stderr.
+//! session or path for people, `grep`, `cut` and `wc -l`, diagnostics and
+//! confirmations on stderr, and the palette when run bare on a terminal.
 
 #![forbid(unsafe_code)]
 
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::time::SystemTime;
 
+use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
+use yapkeeper::line::{age, availability_label, fit, home, one_line, place, without_controls};
+use yapkeeper::palette::{self, Colour, Palette};
 use yapkeeper::{
-    Availability, DataDir, DataError, Listed, MissingHome, Place, Query, Roots, State, TokenKind,
-    hide, rebuild, search, unhide,
+    Catalog, DataDir, DataError, Listed, MissingHome, Query, Roots, State, TokenKind, hide,
+    rebuild, search, unhide,
 };
 
 /// Wide enough for most titles; what follows may wrap on an 80-column terminal.
@@ -23,10 +25,11 @@ const EXIT_FAILURE: u8 = 1;
 
 /// Find coding sessions wherever they ran: in a repo, a worktree or a folder.
 #[derive(Parser)]
-#[command(version, arg_required_else_help = true)]
+#[command(version)]
 struct Cli {
+    /// None opens the palette.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -85,7 +88,10 @@ fn main() -> ExitCode {
     let roots = Roots::from_env();
     let providers = roots.as_ref().map(Roots::providers).unwrap_or_default();
     let footer = help_footer(roots.as_ref());
+    // The palette needs a terminal to draw on and to read keys from.
+    let on_terminal = io::stdin().is_terminal() && io::stdout().is_terminal();
     let matches = Cli::command()
+        .arg_required_else_help(!on_terminal)
         .mut_subcommand("search", |search| {
             // `long_about` replaces `about` in `--help`, so it starts with it.
             let about = search.get_about().map(ToString::to_string);
@@ -94,18 +100,64 @@ fn main() -> ExitCode {
         })
         .after_help(footer.clone())
         .mut_subcommands(|subcommand| subcommand.after_help(footer.clone()))
-        .get_matches();
+        .try_get_matches();
+    let matches = match matches {
+        Ok(matches) => matches,
+        Err(error) if error.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            let _ = error.print();
+            eprintln!(
+                "yapkeeper: the palette needs a terminal; \
+                 yapkeeper list and yapkeeper search work in scripts"
+            );
+            return ExitCode::from(error.exit_code() as u8);
+        }
+        Err(error) => error.exit(),
+    };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     match cli.command {
-        Command::List(columns) => print_sessions(&Search {
+        None => open_palette(),
+        Some(Command::List(columns)) => print_sessions(&Search {
             columns,
             ..Search::default()
         }),
-        Command::Search(search) => print_sessions(&search),
-        Command::Hide(Id { id }) => print_hidden(&id, hide),
-        Command::Unhide(Id { id }) => print_hidden(&id, unhide),
-        Command::Paths => print_paths(),
-        Command::Rebuild => print_rebuild(),
+        Some(Command::Search(search)) => print_sessions(&search),
+        Some(Command::Hide(Id { id })) => print_hidden(&id, hide),
+        Some(Command::Unhide(Id { id })) => print_hidden(&id, unhide),
+        Some(Command::Paths) => print_paths(),
+        Some(Command::Rebuild) => print_rebuild(),
+    }
+}
+
+/// Opens the palette over the index, brought up to date first, until the
+/// person quits it or confirms resuming a session, which then replaces
+/// this process.
+fn open_palette() -> ExitCode {
+    let (roots, data) = match environment() {
+        Ok(environment) => environment,
+        Err(code) => return code,
+    };
+    let catalog = match Catalog::open(&roots, &data) {
+        Ok(catalog) => catalog,
+        Err(error) => return data_failure(error),
+    };
+    // A launch directory that is gone has no location to offer `Ctrl+L`.
+    let launch_dir = std::env::current_dir().unwrap_or_default();
+    match palette::run(Palette::new(catalog, Colour::from_env(), &launch_dir)) {
+        Ok(None) => ExitCode::SUCCESS,
+        // The terminal is restored by now; nothing else may run before this.
+        Ok(Some(command)) => {
+            let error = yapkeeper::launch(&command);
+            eprintln!(
+                "yapkeeper: can't start {} in {}: {error}",
+                command.program,
+                command.cwd.display()
+            );
+            ExitCode::from(EXIT_FAILURE)
+        }
+        Err(error) => {
+            eprintln!("yapkeeper: {error}");
+            ExitCode::from(EXIT_FAILURE)
+        }
     }
 }
 
@@ -288,7 +340,7 @@ fn print_hidden(
         return ExitCode::from(EXIT_FAILURE);
     }
     for listed in &sessions {
-        let title = fit_title(&one_line(&listed.session.title));
+        let title = fit(&one_line(&listed.session.title), MAX_TITLE_WIDTH);
         match listed.hidden {
             true => eprintln!("yapkeeper: hid \"{title}\"; yapkeeper search is:hidden lists it"),
             false => eprintln!("yapkeeper: unhid \"{title}\""),
@@ -328,7 +380,7 @@ fn print_sessions(
     {
         // A query that asks nothing can only have lost everything to the
         // temp and hidden defaults.
-        let hint = match (listing.left_out.temp, listing.left_out.hidden) {
+        let hint = match (listing.left_out.temp > 0, listing.left_out.hidden > 0) {
             (true, true) => {
                 "every session is hidden or in a temp folder; \
                  yapkeeper search is:temp or is:hidden lists them"
@@ -359,13 +411,11 @@ fn print_sessions(
         n => eprintln!("yapkeeper: skipped {n} malformed lines"),
     }
     let now = SystemTime::now();
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from);
+    let home = home();
     let titles: Vec<String> = listing
         .sessions
         .iter()
-        .map(|listed| fit_title(&one_line(&listed.session.title)))
+        .map(|listed| fit(&one_line(&listed.session.title), MAX_TITLE_WIDTH))
         .collect();
     let title_width = titles.iter().map(|title| title.width()).max().unwrap_or(0);
     let provider_width = listing
@@ -377,7 +427,7 @@ fn print_sessions(
     let state_width = listing
         .sessions
         .iter()
-        .map(|listed| state_label(listed.location.availability).width())
+        .map(|listed| availability_label(listed.location.availability).width())
         .max()
         .unwrap_or(0);
     let id_width = listing
@@ -391,17 +441,17 @@ fn print_sessions(
         let session = &listed.session;
         let padding = " ".repeat(title_width - title.width());
         let provider = session.provider;
-        let age = ago(session.last_active, now);
+        let age = age(session.last_active, now);
         // The label column is dropped when no line has one, rather than
         // left as blank padding.
         let state = match state_width {
             0 => String::new(),
             _ => format!(
                 "{:<state_width$}  ",
-                state_label(listed.location.availability)
+                availability_label(listed.location.availability)
             ),
         };
-        let location = without_controls(&location_text(listed, home.as_deref()));
+        let location = place(listed, home.as_deref());
         // First, so `cut -d' ' -f1` gives the id whatever the title holds.
         let id = match columns.ids {
             true => format!("{:<id_width$}  ", without_controls(&session.id)),
@@ -433,84 +483,4 @@ fn print_sessions(
         }
     }
     ExitCode::SUCCESS
-}
-
-/// Words rather than colour, so the state survives `NO_COLOR` and `grep`;
-/// the same words `is:` takes.
-fn state_label(availability: Availability) -> &'static str {
-    match availability {
-        Availability::Available => "",
-        Availability::Orphaned => State::Orphaned.name(),
-        Availability::Unavailable => State::Unavailable.name(),
-    }
-}
-
-/// `project`, `project › worktree`, or the working directory when the
-/// session ran outside any known repo.
-fn location_text(listed: &Listed, home: Option<&Path>) -> String {
-    match &listed.location.place {
-        Place::MainCheckout { project } => project.clone(),
-        Place::Worktree { project, worktree } => format!("{project} › {worktree}"),
-        Place::Folder => with_tilde(&listed.session.working_dir, home),
-    }
-}
-
-/// `dir` with a leading home directory shown as `~`.
-fn with_tilde(dir: &Path, home: Option<&Path>) -> String {
-    match home.and_then(|home| dir.strip_prefix(home).ok()) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => dir.display().to_string(),
-    }
-}
-
-/// Transcript text on one line: control characters such as ESC are removed,
-/// then each whitespace run, newlines included, becomes one space.
-fn one_line(text: &str) -> String {
-    let kept: String = text
-        .chars()
-        .filter(|c| c.is_whitespace() || !c.is_control())
-        .collect();
-    kept.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Recorded text can't move the cursor or restyle the terminal once control
-/// characters such as ESC are gone.
-fn without_controls(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).collect()
-}
-
-/// The title cut to at most `MAX_TITLE_WIDTH` terminal cells, ending in `…`
-/// when cut.
-fn fit_title(title: &str) -> String {
-    if title.width() <= MAX_TITLE_WIDTH {
-        return title.to_string();
-    }
-    let mut fitted = String::new();
-    let mut width = 0;
-    for c in title.chars() {
-        let char_width = c.width().unwrap_or(0);
-        if width + char_width > MAX_TITLE_WIDTH - 1 {
-            break;
-        }
-        fitted.push(c);
-        width += char_width;
-    }
-    fitted.push('…');
-    fitted
-}
-
-/// How long ago `then` was, in the largest unit that keeps the number
-/// readable: `42m`, `5h`, `9d`, `30w`. A time in the future shows `0m`.
-fn ago(then: SystemTime, now: SystemTime) -> String {
-    let minutes = now
-        .duration_since(then)
-        .map(|elapsed| elapsed.as_secs() / 60)
-        .unwrap_or(0);
-    match minutes {
-        m if m < 60 => format!("{m}m"),
-        m if m < 60 * 24 => format!("{}h", m / 60),
-        m if m < 60 * 24 * 14 => format!("{}d", m / (60 * 24)),
-        m => format!("{}w", m / (60 * 24 * 7)),
-    }
 }

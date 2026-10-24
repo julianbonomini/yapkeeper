@@ -8,11 +8,20 @@
 //! as `@where`, `#provider` or `is:state` when it starts with one, otherwise
 //! as a bare provider name, then a bare state name, and otherwise as a word;
 //! a second `!` is just text. Sigils and names ignore case; words keep smart
-//! case.
+//! case. While the last token is a filter being typed, it offers the ways to
+//! finish it, each with how many sessions it lists; after `@` that is the
+//! location list.
 
+mod locations;
+
+use std::borrow::Borrow;
 use std::ops::Range;
+use std::path::Path;
+use std::rc::Rc;
 
-use crate::{Availability, LeftOut, Listed, Place};
+use crate::{Availability, LeftOut, Listed, Location, Place, RecordedGit, Settings};
+
+pub use locations::{LocationRow, LocationRowKind};
 
 /// What the person typed, read as the query language. A session must pass
 /// every filter and contain every search word, in its title, recap or
@@ -25,6 +34,8 @@ pub struct Query {
     excluded_words: Vec<Word>,
     conditions: Vec<Condition>,
     tools: bool,
+    /// Which defaults `select` applies.
+    settings: Settings,
 }
 
 /// One whitespace-separated piece of a query and what it was read as.
@@ -124,18 +135,12 @@ impl Query {
     /// Reads `text` as the query language; `providers` are the names
     /// `#name`, `!name` and `not:name` may name. Never fails; empty or
     /// all-space text is `Query::default()`, which every session outside
-    /// temp folders and not hidden matches.
+    /// temp folders and not hidden matches. It always follows the documented
+    /// defaults, whatever the user's settings; `Catalog::parse` follows them.
     pub fn parse(text: &str, providers: &[&'static str]) -> Query {
         let mut query = Query::default();
         for span in pieces(text) {
-            let piece = &text[span.clone()];
-            let (negated, rest) = match piece.strip_prefix('!') {
-                Some(rest) => (true, rest),
-                None => match strip_prefix_ignoring_case(piece, "not:") {
-                    Some(rest) => (true, rest),
-                    None => (false, piece),
-                },
-            };
+            let (negated, rest) = negation(&text[span.clone()]);
             let Parsed { kind, filter } = parse_rest(rest, negated, providers);
             match filter {
                 Some(filter) => query.conditions.push(Condition { filter, negated }),
@@ -152,6 +157,11 @@ impl Query {
         query
     }
 
+    /// The same query, selecting by `settings`.
+    pub(crate) fn following(self, settings: Settings) -> Query {
+        Query { settings, ..self }
+    }
+
     /// The same query, also searching tool calls, tool output and subagent
     /// transcripts when `tools` is true.
     pub fn including_tools(self, tools: bool) -> Query {
@@ -162,6 +172,28 @@ impl Query {
     /// what it was read as.
     pub fn tokens(&self) -> &[Token] {
         &self.tokens
+    }
+
+    /// The byte ranges of `text` that the query's search words match, by
+    /// the same rule as the search, in order, with overlapping ranges
+    /// merged; empty when no word matches. Each range covers whole
+    /// characters. Excluded words are never highlighted.
+    pub fn highlights(&self, text: &str) -> Vec<Range<usize>> {
+        let folded = Folded::of(text);
+        let mut found: Vec<Range<usize>> = self
+            .words
+            .iter()
+            .flat_map(|word| word.find_in(text, &folded))
+            .collect();
+        found.sort_by_key(|range| range.start);
+        let mut merged: Vec<Range<usize>> = Vec::new();
+        for range in found {
+            match merged.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => merged.push(range),
+            }
+        }
+        merged
     }
 
     pub(crate) fn words(&self) -> &[Word] {
@@ -181,9 +213,10 @@ impl Query {
     /// then orders them: orphaned last, each group most recent
     /// `last_active` first, ties by provider then id. Temp sessions are
     /// left out unless the query has a non-negated `is:temp`, and hidden
-    /// ones unless it has `is:hidden`; returns which of the two defaults
-    /// left out a session every filter admits.
-    pub(crate) fn select(&self, sessions: &mut Vec<Listed>) -> LeftOut {
+    /// ones unless it has `is:hidden`; returns how many sessions every
+    /// filter admits each default left out. The query's settings can turn
+    /// off leaving temp sessions out and listing orphaned ones last.
+    pub(crate) fn select<L: Borrow<Listed>>(&self, sessions: &mut Vec<L>) -> LeftOut {
         let asked = |state| {
             self.conditions.iter().any(|condition| {
                 !condition.negated && condition.filter == Filter::State(Some(state))
@@ -192,20 +225,22 @@ impl Query {
         let (temp_asked, hidden_asked) = (asked(State::Temp), asked(State::Hidden));
         let mut left_out = LeftOut::default();
         sessions.retain(|listed| {
+            let listed = listed.borrow();
             let admitted = self
                 .conditions
                 .iter()
                 .all(|condition| condition.filter.admits(listed) != condition.negated);
-            let temp = !temp_asked && State::Temp.of(listed);
+            let temp = self.settings.hide_temp && !temp_asked && State::Temp.of(listed);
             let hidden = !hidden_asked && State::Hidden.of(listed);
-            left_out.temp |= admitted && temp;
-            left_out.hidden |= admitted && hidden;
+            left_out.temp += usize::from(admitted && temp);
+            left_out.hidden += usize::from(admitted && hidden);
             admitted && !temp && !hidden
         });
+        let orphaned = |listed: &Listed| self.settings.orphans_last && State::Orphaned.of(listed);
         sessions.sort_by(|a, b| {
-            State::Orphaned
-                .of(a)
-                .cmp(&State::Orphaned.of(b))
+            let (a, b) = (a.borrow(), b.borrow());
+            orphaned(a)
+                .cmp(&orphaned(b))
                 .then_with(|| b.session.last_active.cmp(&a.session.last_active))
                 .then_with(|| a.session.provider.cmp(b.session.provider))
                 .then_with(|| a.session.id.cmp(&b.session.id))
@@ -235,13 +270,10 @@ enum Filter {
 impl Filter {
     fn admits(&self, listed: &Listed) -> bool {
         match self {
-            // `project:worktree` for a worktree, so `@project` finds every
-            // worktree too and `@project:worktree` only that one.
             Filter::Location(name) => {
                 let key = match &listed.location.place {
-                    Place::MainCheckout { project } => Some(project.clone()),
-                    Place::Worktree { project, worktree } => Some(format!("{project}:{worktree}")),
                     Place::Folder => None,
+                    place => Some(location_name(place, &listed.session.working_dir)),
                 };
                 key.is_some_and(|key| fold(&key).contains(name))
                     || fold(&listed.session.working_dir.to_string_lossy()).contains(name)
@@ -267,19 +299,12 @@ fn parse_rest(rest: &str, negated: bool, providers: &[&'static str]) -> Parsed {
         let name = fold(name);
         providers.iter().copied().find(|provider| *provider == name)
     };
-    // The name after a sigil, and the filter it makes.
-    let sigil = if let Some(name) = rest.strip_prefix('@') {
-        Some((name, Filter::Location(fold(name))))
-    } else if let Some(name) = rest.strip_prefix('#') {
-        Some((name, Filter::Provider(provider(name))))
-    } else {
-        strip_prefix_ignoring_case(rest, "is:")
-            .map(|name| (name, Filter::State(State::named(name))))
-    };
     let unfiltered = |kind| Parsed { kind, filter: None };
-    let filter = match sigil {
-        Some(("", _)) => return unfiltered(TokenKind::Incomplete),
-        Some((_, filter)) => filter,
+    let filter = match sigil(rest) {
+        Some((_, "")) => return unfiltered(TokenKind::Incomplete),
+        Some((Sigil::Location, name)) => Filter::Location(fold(name)),
+        Some((Sigil::Provider, name)) => Filter::Provider(provider(name)),
+        Some((Sigil::State, name)) => Filter::State(State::named(name)),
         None if rest.is_empty() => return unfiltered(TokenKind::Incomplete),
         None if !negated => return unfiltered(TokenKind::Word),
         None => match (provider(rest), State::named(rest)) {
@@ -296,6 +321,40 @@ fn parse_rest(rest: &str, negated: bool, providers: &[&'static str]) -> Parsed {
     Parsed {
         kind,
         filter: Some(filter),
+    }
+}
+
+/// What a token names after its `!` or `not:`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sigil {
+    /// `@`
+    Location,
+    /// `#`
+    Provider,
+    /// `is:`
+    State,
+}
+
+/// The sigil `rest` starts with, and the name after it.
+fn sigil(rest: &str) -> Option<(Sigil, &str)> {
+    if let Some(name) = rest.strip_prefix('@') {
+        Some((Sigil::Location, name))
+    } else if let Some(name) = rest.strip_prefix('#') {
+        Some((Sigil::Provider, name))
+    } else {
+        strip_prefix_ignoring_case(rest, "is:").map(|name| (Sigil::State, name))
+    }
+}
+
+/// `text` split after its `!` or `not:`, as typed: whether there was one,
+/// and the rest.
+fn negation(text: &str) -> (bool, &str) {
+    match text.strip_prefix('!') {
+        Some(rest) => (true, rest),
+        None => match strip_prefix_ignoring_case(text, "not:") {
+            Some(rest) => (true, rest),
+            None => (false, text),
+        },
     }
 }
 
@@ -347,11 +406,61 @@ impl Word {
     /// Whether `text` contains this word, ignoring case unless the word has
     /// an uppercase letter. Never true unless `fold(text)` contains `key()`.
     pub(crate) fn matches(&self, text: &str) -> bool {
-        if self.text.chars().any(char::is_uppercase) {
+        if self.matches_case() {
             text.contains(&self.text)
         } else {
             fold(text).contains(&self.key)
         }
+    }
+
+    /// Every range of `text`, whose fold is `folded`, that this word
+    /// matches by the rule of `matches`, not overlapping one another.
+    fn find_in(&self, text: &str, folded: &Folded) -> Vec<Range<usize>> {
+        if self.matches_case() {
+            return text
+                .match_indices(&self.text)
+                .map(|(at, found)| at..at + found.len())
+                .collect();
+        }
+        folded
+            .text
+            .match_indices(&self.key)
+            .map(|(at, found)| folded.origin(at..at + found.len()))
+            .collect()
+    }
+
+    /// Whether case counts: only when the word has an uppercase letter.
+    fn matches_case(&self) -> bool {
+        self.text.chars().any(char::is_uppercase)
+    }
+}
+
+/// A text's `fold`, with where each folded character came from, so a match
+/// in the fold can be shown in the original text.
+struct Folded {
+    text: String,
+    /// For each original character, in order: where its fold starts in
+    /// `text`, and its own byte range in the original.
+    chars: Vec<(usize, Range<usize>)>,
+}
+
+impl Folded {
+    fn of(original: &str) -> Folded {
+        let mut text = String::new();
+        let mut chars = Vec::new();
+        for (at, c) in original.char_indices() {
+            chars.push((text.len(), at..at + c.len_utf8()));
+            text.extend(c.to_lowercase());
+        }
+        Folded { text, chars }
+    }
+
+    /// The original characters whose folds `range` of the fold touches.
+    fn origin(&self, range: Range<usize>) -> Range<usize> {
+        let containing = |at: usize| self.chars.partition_point(|(start, _)| *start <= at) - 1;
+        let first = &self.chars[containing(range.start)].1;
+        let last = &self.chars[containing(range.end - 1)].1;
+        first.start..last.end
     }
 }
 
@@ -361,4 +470,131 @@ impl Word {
 /// this fold, so changing it means bumping the index's schema version.
 pub(crate) fn fold(text: &str) -> String {
     text.chars().flat_map(char::to_lowercase).collect()
+}
+
+/// The name `@` takes for a session at `place` in `working_dir`: the
+/// project, `project:worktree`, or for a folder its path. `@project` finds
+/// every worktree too, as a filter matches any part of the name.
+fn location_name(place: &Place, working_dir: &Path) -> String {
+    match place {
+        Place::MainCheckout { project } => project.clone(),
+        Place::Worktree { project, worktree } => format!("{project}:{worktree}"),
+        Place::Folder => working_dir.to_string_lossy().into_owned(),
+    }
+}
+
+/// The `@` token that finds sessions where `dir` is now: its project,
+/// `project:worktree`, or its path, read from the disk now. `None` when that
+/// name is empty or holds whitespace, which a token can't.
+pub fn location_token(dir: &Path) -> Option<String> {
+    let location = Location::of(dir, &RecordedGit::default());
+    let name = location_name(&location.place, dir);
+    fits_a_token(&name).then(|| format!("@{name}"))
+}
+
+/// Whether `name` can end a token: it isn't empty and holds no whitespace,
+/// which would split it.
+fn fits_a_token(name: &str) -> bool {
+    !name.is_empty() && !name.chars().any(char::is_whitespace)
+}
+
+/// One way to finish the filter being typed at the end of a query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// The finished token as it would read, such as `is:pr` or `!#codex`,
+    /// keeping its `!` or `not:` and sigil as typed.
+    pub token: String,
+    /// The whole query with the token finished and a space after it.
+    pub query: String,
+    /// How many sessions `token` alone lists, by the same defaults and
+    /// settings as a search.
+    pub count: usize,
+    /// The row the location list shows for this way to finish an `@`
+    /// token; `None` for every completion not after `@`.
+    pub location: Option<LocationRow>,
+}
+
+/// The ways to finish the filter at the end of `text`, each with how many
+/// sessions its token lists. After `@`, this is the location list: the
+/// places where the sessions `@` lists ran. Each project comes with its
+/// worktrees after it, then the plain folders. Each group is ordered most
+/// recent first, and missing places come last. A row is kept when a session
+/// that the typed `@` token lists ran there. Missing places are left out
+/// while nothing follows the `@` and `settings.hide_missing` is on. After
+/// `#`, it is the `providers` starting with what was typed after it; after
+/// `is:`, the states that do; after a bare `!` or `not:`, those providers
+/// then those states. Empty unless the last token starts with `@`, `#`,
+/// `is:`, `!` or `not:` and nothing follows it, so a space never offers any,
+/// and empty when the token typed is already the only way to finish it.
+/// Counts and rows follow `settings`.
+pub(crate) fn completions(
+    text: &str,
+    providers: &[&'static str],
+    sessions: &[Rc<Listed>],
+    settings: Settings,
+) -> Vec<Completion> {
+    let Some(last) = pieces(text).pop().filter(|span| span.end == text.len()) else {
+        return Vec::new();
+    };
+    let typed_token = &text[last.start..];
+    let (negated, rest) = negation(typed_token);
+    let named = sigil(rest);
+    let typed = named.map_or(rest, |(_, name)| name);
+    // What is kept as typed: everything up to the name being finished.
+    let head = &text[..text.len() - typed.len()];
+    let prefix = &text[last.start..head.len()];
+    let starting = |name: &&str| fold(name).starts_with(&fold(typed));
+    let matching_providers = || providers.iter().copied().filter(starting);
+    let states = || State::ALL.into_iter().map(State::name).filter(starting);
+    let plain = |name: &str| Ending {
+        name: name.to_string(),
+        location: None,
+    };
+    let endings: Vec<Ending> = match named {
+        Some((Sigil::Provider, _)) => matching_providers().map(plain).collect(),
+        Some((Sigil::State, _)) => states().map(plain).collect(),
+        Some((Sigil::Location, _)) => locations::rows(typed, providers, sessions, settings),
+        None if negated => matching_providers().chain(states()).map(plain).collect(),
+        None => return Vec::new(),
+    };
+    let completions: Vec<Completion> = endings
+        .into_iter()
+        .filter(|ending| fits_a_token(&ending.name))
+        .map(|Ending { name, location }| {
+            let token = format!("{prefix}{name}");
+            Completion {
+                count: listed_by(&token, providers, sessions, settings).len(),
+                query: format!("{head}{name} "),
+                token,
+                location,
+            }
+        })
+        .collect();
+    // A token typed out in full is searched as it stands, not offered back.
+    match completions.as_slice() {
+        [only] if fold(&only.token) == fold(typed_token) => Vec::new(),
+        _ => completions,
+    }
+}
+
+/// One way to finish the name being typed, before it becomes a `Completion`.
+struct Ending {
+    /// What follows the sigil, or the `!` or `not:`, in the finished token.
+    name: String,
+    location: Option<LocationRow>,
+}
+
+/// The `sessions` that `text`, holding no search words, lists, in a
+/// search's order and by its defaults as `settings` set them.
+fn listed_by<'s>(
+    text: &str,
+    providers: &[&'static str],
+    sessions: &'s [Rc<Listed>],
+    settings: Settings,
+) -> Vec<&'s Listed> {
+    let mut found: Vec<&Listed> = sessions.iter().map(Rc::as_ref).collect();
+    Query::parse(text, providers)
+        .following(settings)
+        .select(&mut found);
+    found
 }

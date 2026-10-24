@@ -10,7 +10,7 @@ use std::process::{Command, Output};
 #[cfg(unix)]
 use support::Locked;
 use support::{repo_with_worktree, temp_dir};
-use yapkeeper::{Roots, State};
+use yapkeeper::{Catalog, DataDir, Roots, Settings, State};
 
 mod support;
 
@@ -192,11 +192,25 @@ fn help_describes_the_list_command() {
         let stdout = stdout(&output);
         assert!(stdout.contains("list"), "{args:?}: {stdout}");
     }
+}
 
+#[test]
+fn no_arguments_without_a_terminal_print_help_and_say_the_palette_needs_one() {
+    let home = tempfile::tempdir().unwrap();
+    // `output()` gives the child a null stdin and a piped stdout.
     let output = yapkeeper(&[], home.path(), None);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(stdout(&output), "");
-    assert!(stderr(&output).contains("list"), "{}", stderr(&output));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("list"), "{stderr}");
+    assert_eq!(
+        stderr.lines().last(),
+        Some(
+            "yapkeeper: the palette needs a terminal; \
+             yapkeeper list and yapkeeper search work in scripts"
+        ),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -606,7 +620,7 @@ fn list_fails_naming_the_index_when_it_cannot_be_written() {
     let index = not_a_dir.join("yapkeeper/index.sqlite");
     assert!(
         stderr.starts_with(&format!(
-            "yapkeeper: can't write the index at {}: ",
+            "yapkeeper: can't use the index at {}: ",
             index.display()
         )),
         "{stderr}"
@@ -1097,4 +1111,37 @@ fn list_with_every_session_hidden_or_temp_says_which_queries_list_them() {
         "yapkeeper: every session is hidden or in a temp folder; \
          yapkeeper search is:temp or is:hidden lists them\n"
     );
+}
+
+#[test]
+fn list_keeps_the_documented_defaults_whatever_the_palette_is_set_to() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = temp_dir();
+    write_home_session(home.path(), "a1", "Live work", Path::new("/usr"), "");
+    write_home_session(home.path(), "a2", "Scratch work", scratch.path(), "");
+    let orphaned = r#"{"type":"user","message":{"content":"Orphaned work"},"cwd":"/synthetic/gone","timestamp":"2026-10-21T10:00:00Z"}"#;
+    let project = home.path().join(".claude/projects/-synthetic-temp");
+    fs::write(project.join("a3.jsonl"), format!("{orphaned}\n")).unwrap();
+    let roots = Roots {
+        claude: home.path().join(".claude"),
+        codex: home.path().join(".codex"),
+    };
+    let data = DataDir::at(home.path().join(".local/share/yapkeeper"));
+    let mut catalog = Catalog::open(&roots, &data).unwrap();
+    catalog
+        .set_settings(Settings {
+            hide_temp: false,
+            orphans_last: false,
+            ..Settings::default()
+        })
+        .unwrap();
+
+    let output = yapkeeper(&["list"], home.path(), None);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    let titles: Vec<&str> = stdout
+        .lines()
+        .map(|line| line.split("  ").next().unwrap())
+        .collect();
+    assert_eq!(titles, ["Live work", "Orphaned work"], "{stdout}");
 }

@@ -96,6 +96,16 @@ impl Adapter for Codex {
             cwd: working_dir.to_path_buf(),
         }
     }
+
+    fn is_running(&self, _id: &str) -> bool {
+        // Codex keeps no record of which sessions are open.
+        false
+    }
+
+    fn resumes_by_directory(&self) -> bool {
+        // `codex resume` finds a rollout by id from any directory.
+        false
+    }
 }
 
 /// The facts one rollout record gives.

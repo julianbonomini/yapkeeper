@@ -53,7 +53,12 @@ impl Histories {
     /// in a folder that exists and one whose folder is gone, and one Codex
     /// session. None is in a temp folder, so every one is listed.
     fn three() -> Histories {
-        let histories = Histories::new();
+        Histories::three_in(tempfile::tempdir().unwrap())
+    }
+
+    /// The same three sessions, in `dir`.
+    fn three_in(dir: TempDir) -> Histories {
+        let histories = Histories { dir };
         histories.claude(CLAUDE_RETRY, "/usr", "Retry the billing job");
         histories.claude(CLAUDE_GONE, "/synthetic/gone", "Release notes draft");
         histories.codex(CODEX, "/usr/bin", "Tidy the lint config");
@@ -3041,7 +3046,13 @@ fn a_setting_that_cannot_be_saved_says_so_and_stays_as_it_was() {
 
 #[test]
 fn settings_give_way_in_narrow_and_short_terminals() {
-    let histories = Histories::three();
+    // A long folder name, so the paths are cut however short the system's
+    // temp folder is.
+    let dir = tempfile::Builder::new()
+        .prefix("yapkeeper-settings-with-a-long-folder-name")
+        .tempdir()
+        .unwrap();
+    let histories = Histories::three_in(dir);
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     change_setting(&mut palette, SETTINGS[5], KeyCode::Right);
     change_setting(&mut palette, SETTINGS[5], KeyCode::Right);

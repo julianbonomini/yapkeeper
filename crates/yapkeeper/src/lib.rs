@@ -8,7 +8,8 @@
 //! starts it. A `Catalog` loads all of that from the index, and takes in
 //! each batch an `Indexer` publishes, so it can be searched many times, by
 //! the settings, and record hides and settings, as the `palette` does while
-//! the person types;
+//! the person types; it can find sessions on a worker of its own, so typing
+//! never waits on a search;
 //! `line` holds how a session reads as one line of terminal text, for the
 //! palette and the CLI.
 
@@ -22,16 +23,20 @@ pub mod palette;
 mod prefs;
 mod query;
 mod resume;
+mod searcher;
 mod settings;
 
 use prefs::Choice;
+use searcher::{Matched, Matcher, Searcher};
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use yapkeeper_claude::ClaudeCode;
@@ -45,6 +50,7 @@ pub use query::{
     location_token, place_location, start_location,
 };
 pub use resume::{Caution, ResumeDir, ResumePlan, launch};
+pub use searcher::SearchStepper;
 pub use settings::*;
 pub use yapkeeper_model::*;
 
@@ -333,10 +339,20 @@ pub struct Catalog {
     searched: Vec<PathBuf>,
     files_read: usize,
     bytes_read: u64,
+    /// Every session's key, a new set whenever `sessions` changes which
+    /// sessions it holds, so a lookup over the old set is never narrowed
+    /// from: a new session may match what it ruled out.
+    keys: Arc<HashSet<SessionKey>>,
+    /// What `search` narrows from.
+    matcher: RefCell<Matcher>,
+    /// What runs each `ask`'s search; `None` searches on the caller's thread.
+    searcher: Option<Searcher>,
 }
 
 /// What one query found in a catalog.
 pub struct Found {
+    /// The query these sessions were found for.
+    pub query: Query,
     /// In `search`'s order.
     pub sessions: Vec<Rc<Listed>>,
     pub left_out: LeftOut,
@@ -401,6 +417,9 @@ impl Catalog {
             searched: opening.searched,
             files_read: opening.files_read,
             bytes_read: opening.bytes_read,
+            keys: Arc::default(),
+            matcher: RefCell::default(),
+            searcher: None,
         };
         catalog.apply(snapshot);
         Ok(catalog)
@@ -417,6 +436,12 @@ impl Catalog {
                 Rc::new(Listed { hidden, ..listed })
             })
             .collect();
+        self.keys = Arc::new(
+            self.sessions
+                .iter()
+                .map(|listed| SessionKey::of(&listed.session))
+                .collect(),
+        );
         self.malformed_lines = snapshot.malformed_lines;
     }
 
@@ -429,14 +454,50 @@ impl Catalog {
     }
 
     /// The sessions matching `query`, with the same rules and order as
-    /// `search`. Fails only when the index can no longer be read.
+    /// `search`. A query that only extends the last one searched, as when
+    /// the person types on, costs no more than narrowing what that one
+    /// found. Fails only when the index can no longer be read.
     pub fn search(&self, query: &Query) -> Result<Found, DataError> {
-        let candidates = self
-            .sessions
-            .iter()
-            .map(|listed| SessionKey::of(&listed.session))
-            .collect();
-        let matched: HashSet<SessionKey> = self.index.matching(query, candidates)?;
+        let matched = self
+            .matcher
+            .borrow_mut()
+            .matching(&self.index, query, &self.keys)?;
+        Ok(self.found(query.clone(), &matched))
+    }
+
+    /// Asks for the sessions matching `query`, as `search` finds them. A
+    /// catalog without a worker searches now and gives the results. One
+    /// searching in the background or stepped gives `None`, and the results
+    /// come through `answer`; an earlier ask whose search hasn't started is
+    /// dropped.
+    pub(crate) fn ask(&mut self, query: Query) -> Option<Result<Found, DataError>> {
+        match &mut self.searcher {
+            Some(searcher) => {
+                searcher.ask(query, Arc::clone(&self.keys));
+                None
+            }
+            None => Some(self.search(&query)),
+        }
+    }
+
+    /// The newest results found for the query last asked and not handed
+    /// over before; `None` while none has come. Results for any other query
+    /// are never handed over. Sessions are listed with the hides as they are
+    /// now; a session added since the ask is missing until an ask after it
+    /// is answered.
+    pub(crate) fn answer(&mut self) -> Option<Result<Found, DataError>> {
+        let Matched { query, keys } = self.searcher.as_mut()?.take()?;
+        Some(keys.map(|keys| self.found(query, &keys)))
+    }
+
+    /// Whether the results for the last ask are still to come.
+    pub(crate) fn searching(&self) -> bool {
+        self.searcher.as_ref().is_some_and(Searcher::searching)
+    }
+
+    /// The sessions among `matched` that `query`'s filters and defaults
+    /// keep, in `search`'s order.
+    fn found(&self, query: Query, matched: &HashSet<SessionKey>) -> Found {
         let mut sessions: Vec<Rc<Listed>> = self
             .sessions
             .iter()
@@ -444,7 +505,11 @@ impl Catalog {
             .cloned()
             .collect();
         let left_out = query.select(&mut sessions);
-        Ok(Found { sessions, left_out })
+        Found {
+            query,
+            sessions,
+            left_out,
+        }
     }
 
     /// What the person and the assistant said in `session`, and the tools
@@ -529,6 +594,29 @@ impl Catalog {
     /// the `PATH` this process had when it opened.
     pub fn finding_programs_in(self, path: OsString) -> Catalog {
         Catalog { path, ..self }
+    }
+
+    /// This catalog, finding each later `ask`'s sessions on a thread of its
+    /// own with its own read-only connection to this catalog's index, so
+    /// `ask` returns at once and the results come through `answer`. Returns
+    /// at once; dropping the catalog never waits for a search.
+    pub fn searching_in_background(self) -> Catalog {
+        let searcher = Searcher::start(self.data.index());
+        Catalog {
+            searcher: Some(searcher),
+            ..self
+        }
+    }
+
+    /// The same, but each search runs only when the returned
+    /// `SearchStepper` steps, on the stepping thread.
+    pub fn searching_stepped(self) -> (Catalog, SearchStepper) {
+        let (searcher, stepper) = Searcher::stepped(self.data.index());
+        let catalog = Catalog {
+            searcher: Some(searcher),
+            ..self
+        };
+        (catalog, stepper)
     }
 
     /// Whether `session` is among this catalog's sessions.

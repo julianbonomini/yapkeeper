@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use yapkeeper::{
-    Availability, DataDir, Listed, Listing, Query, Roots, hide, rebuild, search, unhide,
+    Availability, Catalog, DataDir, LeftOut, Listed, Listing, Query, Roots, Settings, hide,
+    rebuild, search, unhide,
 };
 
 /// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, Pi session directory and data
@@ -50,6 +51,24 @@ impl Histories {
     /// The ids of the sessions `text` finds with tool-level text included.
     fn found_with_tools(&self, text: &str) -> Vec<String> {
         ids(&self.search(Query::parse(text, &self.roots().providers()).including_tools(true)))
+    }
+
+    /// Checks that `catalog`, whatever it searched before, finds for `text`
+    /// what a fresh catalog over the same index and preferences finds, and
+    /// leaves out as many, tool-level text included when `tools` is true.
+    fn assert_found_as_from_scratch(&self, catalog: &Catalog, text: &str, tools: bool) {
+        let fresh = Catalog::open(&self.roots(), &self.data()).unwrap();
+        let found = |catalog: &Catalog| -> (Vec<String>, LeftOut) {
+            let query = catalog.parse(text).including_tools(tools);
+            let found = catalog.search(&query).unwrap();
+            let ids = found
+                .sessions
+                .iter()
+                .map(|listed| listed.session.id.clone())
+                .collect();
+            (ids, found.left_out)
+        };
+        assert_eq!(found(catalog), found(&fresh), "{text:?}, tools {tools}");
     }
 
     /// Writes Claude Code session `id` as `records`, one per line.
@@ -372,6 +391,126 @@ fn search_after_rebuild_finds_the_same_sessions() {
 
     rebuild(&histories.roots(), &histories.data()).unwrap();
     assert_eq!(histories.found("canary"), before);
+}
+
+#[test]
+fn short_words_are_found_in_titles_recaps_and_messages() {
+    let histories = Histories::new();
+    histories.claude(
+        A,
+        &[
+            prompt("Plan the release"),
+            json!({ "type": "custom-title", "customTitle": "Go live" }),
+        ],
+    );
+    histories.claude(
+        B,
+        &[
+            prompt("Plan the release"),
+            json!({ "type": "system", "subtype": "away_summary", "content": "Let it go" }),
+        ],
+    );
+    histories.claude(C, &[prompt("Plan the release"), reply("GO when ready")]);
+    histories.claude(D, &[prompt("Plan the release")]);
+
+    for found in [Histories::found, Histories::found_with_tools] {
+        assert_eq!(sorted(found(&histories, "go")), [A, B, C]);
+        assert_eq!(found(&histories, "Go"), [A]);
+        assert_eq!(found(&histories, "GO"), [C]);
+    }
+}
+
+/// A Claude Code assistant record calling the Read tool on `file_path`.
+fn read_call(file_path: &str) -> Value {
+    said(
+        "assistant",
+        json!([{ "type": "tool_use", "name": "Read", "input": { "file_path": file_path } }]),
+    )
+}
+
+#[test]
+fn short_words_in_tool_text_are_found_only_with_tools() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Read the log"), read_call("/synthetic/Qz.log")]);
+    histories.claude(
+        B,
+        &[
+            prompt("Read the log"),
+            said(
+                "user",
+                json!([{ "type": "tool_result", "tool_use_id": "t1", "content": "Qz sighted" }]),
+            ),
+        ],
+    );
+    histories.claude(C, &[prompt("Plan the release")]);
+    histories.claude_subagent(C, "x", &[prompt("Look for Qz")]);
+    histories.claude(D, &[prompt("Read the log"), read_call("/synthetic/qz.log")]);
+
+    for word in ["qz", "Qz"] {
+        assert!(histories.found(word).is_empty(), "{word}");
+    }
+    assert_eq!(sorted(histories.found_with_tools("qz")), [A, B, C, D]);
+    assert_eq!(sorted(histories.found_with_tools("Qz")), [A, B, C]);
+}
+
+#[test]
+fn a_short_word_never_spans_two_messages() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Bring"), reply("only once")]);
+
+    for found in [Histories::found, Histories::found_with_tools] {
+        assert!(found(&histories, "go").is_empty());
+        assert_eq!(found(&histories, "g"), [A]);
+    }
+}
+
+#[test]
+fn a_short_uppercase_word_matches_case_beyond_ascii() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Échec du build")]);
+    histories.claude(B, &[prompt("Encore un échec")]);
+    histories.claude(C, &[prompt("ÉCHEC TOTAL")]);
+
+    assert_eq!(sorted(histories.found("É")), [A, C]);
+    assert_eq!(sorted(histories.found("é")), [A, B, C]);
+    assert_eq!(histories.found("ÉC"), [C]);
+}
+
+#[test]
+fn short_words_follow_files_that_grow_are_rewritten_or_disappear() {
+    let histories = Histories::new();
+    let path = histories.claude(A, &[prompt("Plan the release")]);
+    histories.claude(B, &[prompt("Another plan")]);
+    assert!(histories.found("qz").is_empty());
+
+    let grown = format!("{}\n", reply("A qz appeared"));
+    fs::File::options()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(grown.as_bytes())
+        .unwrap();
+    assert_eq!(histories.found("qz"), [A]);
+
+    // Shorter than what was read, so it is read again from the start.
+    write_records(&path, &[prompt("Plan it")]);
+    assert!(histories.found("qz").is_empty());
+
+    write_records(&path, &[prompt("Plan it"), reply("A qz again")]);
+    assert_eq!(histories.found("qz"), [A]);
+    fs::remove_file(&path).unwrap();
+    assert!(histories.found("qz").is_empty());
+}
+
+#[test]
+fn a_negated_short_word_leaves_out_its_sessions() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Use qz here")]);
+    histories.claude(B, &[prompt("Read the log"), read_call("/synthetic/qz.log")]);
+    histories.claude(C, &[prompt("Plan the release")]);
+
+    assert_eq!(sorted(histories.found("!qz")), [B, C]);
+    assert_eq!(histories.found_with_tools("!qz"), [C]);
 }
 
 /// A Claude Code prompt recorded in `cwd`.
@@ -744,4 +883,205 @@ fn orphaned_sessions_come_after_the_rest_each_group_most_recent_first() {
     );
 
     assert_eq!(histories.found(""), [B, A, C, D]);
+}
+
+/// Sessions with text in titles, prompts, replies, tool output and a
+/// subagent, for checking that a query of several words finds exactly
+/// what its words find one at a time.
+fn mixed() -> Histories {
+    let histories = Histories::new();
+    histories.claude(
+        A,
+        &[
+            prompt("Run the database migration"),
+            reply("The migration needs a retry"),
+            said(
+                "user",
+                json!([{ "type": "tool_result", "tool_use_id": "t1", "content": "rollback ok" }]),
+            ),
+        ],
+    );
+    histories.claude(
+        B,
+        &[
+            prompt("Retry the upload"),
+            json!({ "type": "custom-title", "customTitle": "Database upload" }),
+        ],
+    );
+    histories.claude(C, &[prompt("Go plan the migration")]);
+    histories.claude_subagent(C, "x", &[prompt("Look at the rollback")]);
+    histories.claude(D, &[prompt("Nothing in common at all")]);
+    histories
+}
+
+/// The ids every one of `terms` finds when searched alone with `found`,
+/// sorted.
+fn found_by_each(
+    histories: &Histories,
+    found: fn(&Histories, &str) -> Vec<String>,
+    terms: &[&str],
+) -> Vec<String> {
+    let mut all = found(histories, "");
+    for term in terms {
+        let matched = found(histories, term);
+        all.retain(|id| matched.contains(id));
+    }
+    sorted(all)
+}
+
+#[test]
+fn a_query_finds_exactly_what_its_words_find_one_at_a_time() {
+    let histories = mixed();
+    let queries: &[&[&str]] = &[
+        &["database", "zzzzzz", "migration"],
+        &["zzzzzz", "m"],
+        &["migration", "r"],
+        &["database", "m"],
+        &["migration", "retry", "go"],
+        &["database", "up", "!retry"],
+        &["migration", "!go", "!zzzzzz"],
+        &["rollback", "migration"],
+        &["rollback", "not:plan", "a"],
+        &["!rollback", "the"],
+    ];
+    let without_tools: fn(&Histories, &str) -> Vec<String> = Histories::found;
+    for found in [without_tools, Histories::found_with_tools] {
+        for terms in queries {
+            let text = terms.join(" ");
+            assert_eq!(
+                sorted(found(&histories, &text)),
+                found_by_each(&histories, found, terms),
+                "{text:?}"
+            );
+        }
+    }
+}
+
+/// Sessions that `flaky`, `retry`, `test` and `upload` tell apart, in titles,
+/// messages and tool calls, with a pull request, a temp folder and a
+/// second provider.
+fn typed_over() -> Histories {
+    let histories = Histories::new();
+    histories.claude(
+        A,
+        &[prompt("Why is this test flaky?"), reply("Add a Retry.")],
+    );
+    histories.claude(
+        B,
+        &[
+            prompt("Please retry the upload"),
+            json!({ "type": "custom-title", "customTitle": "Flaky upload" }),
+            pr_link(),
+        ],
+    );
+    histories.claude(
+        C,
+        &[
+            prompt("Another flaky test"),
+            said(
+                "assistant",
+                json!([{ "type": "tool_use", "name": "Read", "input": { "file_path": "/synthetic/retry.log" } }]),
+            ),
+        ],
+    );
+    histories.claude(
+        D,
+        &[prompt_in(
+            "/tmp/yapkeeper-synthetic-scratch",
+            "Retry the flaky one",
+        )],
+    );
+    histories.codex(CODEX, json!({}), &[codex_prompt("flaky retry in codex")]);
+    histories
+}
+
+#[test]
+fn a_query_typed_on_from_the_last_finds_what_a_search_from_scratch_finds() {
+    let histories = typed_over();
+    let catalog = Catalog::open(&histories.roots(), &histories.data()).unwrap();
+    let typed = [
+        // Words growing, then words added.
+        "f",
+        "fl",
+        "fla",
+        "flak",
+        "flaky",
+        "flaky ",
+        "flaky r",
+        "flaky retry",
+        // Excluded words added, growing and shrinking.
+        "flaky !",
+        "flaky !t",
+        "flaky !te",
+        "flaky !test",
+        "flaky !test !u",
+        "flaky !test !upload",
+        "flaky !test !u",
+        // Words that start, come to or stop matching case.
+        "r",
+        "re",
+        "Re",
+        "Ret",
+        "Retry",
+        "Retry f",
+        "Retry",
+        "retry",
+        "retry F",
+        // Filters typed out, completed and negated.
+        "flaky",
+        "flaky #",
+        "flaky #c",
+        "flaky #claude",
+        "flaky #claude is:",
+        "flaky #claude is:pr",
+        "flaky #claude !is:pr",
+        "flaky #codex",
+        "flaky is:temp",
+        // Deleting back, clearing, and a word that becomes a filter.
+        "flaky retry",
+        "flaky retr",
+        "flaky",
+        "fla",
+        "",
+        "is",
+        "is:",
+        "is:pr",
+        "",
+        "x",
+        "xq",
+        "xq flaky",
+        "flaky",
+    ];
+    for text in typed {
+        histories.assert_found_as_from_scratch(&catalog, text, false);
+    }
+}
+
+#[test]
+fn changing_tools_hides_or_settings_finds_what_a_search_from_scratch_finds() {
+    let histories = typed_over();
+    let mut catalog = Catalog::open(&histories.roots(), &histories.data()).unwrap();
+
+    histories.assert_found_as_from_scratch(&catalog, "retry", false);
+    histories.assert_found_as_from_scratch(&catalog, "retry", true);
+    histories.assert_found_as_from_scratch(&catalog, "retry", false);
+    histories.assert_found_as_from_scratch(&catalog, "retry.", true);
+
+    histories.assert_found_as_from_scratch(&catalog, "flaky", false);
+    let found = catalog.search(&Query::default()).unwrap().sessions;
+    let a = found.iter().find(|listed| listed.session.id == A).unwrap();
+    let a = a.session.clone();
+    catalog.set_hidden(&a, true).unwrap();
+    histories.assert_found_as_from_scratch(&catalog, "flaky", false);
+    histories.assert_found_as_from_scratch(&catalog, "flaky is:hidden", false);
+    catalog.set_hidden(&a, false).unwrap();
+    histories.assert_found_as_from_scratch(&catalog, "flaky is:hidden", false);
+    histories.assert_found_as_from_scratch(&catalog, "flaky", false);
+
+    let settings = Settings {
+        hide_temp: false,
+        ..catalog.settings()
+    };
+    catalog.set_settings(settings).unwrap();
+    histories.assert_found_as_from_scratch(&catalog, "flaky", false);
 }

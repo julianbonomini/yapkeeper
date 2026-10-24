@@ -16,7 +16,7 @@ Vago builds Yapkeeper with Claude Code and Claude Opus 5.5 by default. Run a Goa
 
 ## Measuring launch and search
 
-`yapkeeper-bench` measures how fast the palette opens over a warm index and how fast it answers a query, against the 200 ms and 50 ms targets in [docs/product.md](docs/product.md#speed-and-refresh). It writes a synthetic corpus from a seed, indexes it into a temporary folder, and prints p50 and p95 for each measurement on stdout. Run it from the repository root in a release build:
+`yapkeeper-bench` measures how fast the palette opens over a warm index and how fast it answers each keystroke of a query and a pasted query, against the 200 ms and 50 ms targets in [docs/product.md](docs/product.md#speed-and-refresh). It writes a synthetic corpus from a seed, indexes it into a temporary folder, and prints p50 and p95 for each measurement on stdout. Run it from the repository root in a release build:
 
 ```sh
 cargo run --release -p yapkeeper-bench

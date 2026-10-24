@@ -205,8 +205,37 @@ impl Query {
         &self.excluded_words
     }
 
+    /// Whether finding this query's sessions reads the index: it has a
+    /// search word or an excluded word.
+    pub(crate) fn has_words(&self) -> bool {
+        !self.words.is_empty() || !self.excluded_words.is_empty()
+    }
+
     pub(crate) fn tools(&self) -> bool {
         self.tools
+    }
+
+    /// Whether this query extends `last`: every session its words and
+    /// excluded words let through, `last`'s let through too, so its words
+    /// need only be looked up among the sessions `last`'s words matched.
+    /// This is the one rule for it: both read the same text (tool level or
+    /// not) with the same settings; each of `last`'s words is implied by one
+    /// of this query's, as when a word grows, gains a capital or is joined
+    /// by another; and each of `last`'s excluded words implies one of this
+    /// query's. Deleting a character breaks it, as does an excluded word
+    /// that grows. Filters play no part: they are applied in full to every
+    /// session the words let through.
+    pub(crate) fn narrows(&self, last: &Query) -> bool {
+        self.tools == last.tools
+            && self.settings == last.settings
+            && last
+                .words
+                .iter()
+                .all(|word| self.words.iter().any(|mine| mine.implies(word)))
+            && last
+                .excluded_words
+                .iter()
+                .all(|word| self.excluded_words.iter().any(|mine| word.implies(mine)))
     }
 
     /// Keeps the sessions every non-word filter and both defaults admit,
@@ -406,11 +435,27 @@ impl Word {
     /// Whether `text` contains this word, ignoring case unless the word has
     /// an uppercase letter. Never true unless `fold(text)` contains `key()`.
     pub(crate) fn matches(&self, text: &str) -> bool {
-        if self.matches_case() {
-            text.contains(&self.text)
-        } else {
-            fold(text).contains(&self.key)
+        match self.as_typed() {
+            Some(typed) => text.contains(typed),
+            None => fold(text).contains(&self.key),
         }
+    }
+
+    /// Whether every text this word matches, `other` matches too: by `matches`,
+    /// a text containing this word as typed, or its fold containing this
+    /// word's key, contains whatever of it `other` looks for.
+    fn implies(&self, other: &Word) -> bool {
+        match other.as_typed() {
+            Some(typed) => self.as_typed().is_some_and(|mine| mine.contains(typed)),
+            None => self.key.contains(&other.key),
+        }
+    }
+
+    /// The word as typed when case counts (it has an uppercase letter): a text
+    /// matches the word when it contains this. `None` when case is ignored: a
+    /// text matches when its `fold` contains `key()`.
+    pub(crate) fn as_typed(&self) -> Option<&str> {
+        self.matches_case().then_some(self.text.as_str())
     }
 
     /// Every range of `text`, whose fold is `folded`, that this word

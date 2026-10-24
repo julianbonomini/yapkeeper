@@ -9,4 +9,4 @@ mod corpus;
 mod measure;
 
 pub use corpus::{Corpus, Shape, generate};
-pub use measure::{FRAME, Latency, Measurements, Search, measure};
+pub use measure::{FRAME, Latency, Measurements, Paste, SlowestKeystroke, measure};

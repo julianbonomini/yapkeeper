@@ -89,6 +89,10 @@ const TOPICS: [&str; 8] = [
 /// word, filters only, and a location filter with a word.
 pub(crate) const QUERIES: [&str; 4] = ["migration", "db", "#codex is:orphaned", "@atlas retry"];
 
+/// The query the benchmark pastes: two topic words, so the paste crosses a
+/// word boundary and starts each word with its short prefixes.
+pub(crate) const PASTED: &str = "migration retry";
+
 /// What every other word is made of, two or three to a word: a wide
 /// vocabulary in which no topic or project name can appear by chance,
 /// since each pairs one consonant with one vowel.

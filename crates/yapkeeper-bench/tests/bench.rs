@@ -31,7 +31,14 @@ fn a_tiny_run_reports_every_measurement_against_its_target() {
     assert!(corpus.contains("14 files"), "{corpus}");
     // Every generated session is indexed, so the histories parse.
     assert!(line("Index").contains("12 sessions"), "{stdout}");
-    assert!(line("Runs").contains("3 per measurement"), "{stdout}");
+    let runs = line("Runs");
+    assert!(runs.contains("3 per measurement"), "{runs}");
+    // Typing is timed past the search worker's hand-over; this run would
+    // never end if the palette never caught up with the query.
+    assert!(
+        runs.contains("up to the frame showing its results"),
+        "{runs}"
+    );
     let header = line("Measurement");
     for column in ["p50", "p95", "Target"] {
         assert!(header.contains(column), "{header}");
@@ -45,9 +52,20 @@ fn a_tiny_run_reports_every_measurement_against_its_target() {
         .collect();
     assert_eq!(searches.len(), 4, "{stdout}");
     for search in searches {
+        // Each names its query and the prefix whose keystroke was slowest.
+        let quoted: Vec<&str> = search.split('"').collect();
+        let (query, prefix) = (quoted[1], quoted[3]);
+        assert!(
+            search.starts_with(&format!("Search \"{query}\" at \"")),
+            "{search}"
+        );
+        assert!(!prefix.is_empty() && query.starts_with(prefix), "{search}");
         assert!(search.contains("50 ms"), "{search}");
         assert_eq!(search.matches(" ms").count(), 3, "{search}");
     }
+    let paste = line("Paste \"");
+    assert!(paste.contains("50 ms"), "{paste}");
+    assert_eq!(paste.matches(" ms").count(), 3, "{paste}");
     // The corpus is removed when the run ends.
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }

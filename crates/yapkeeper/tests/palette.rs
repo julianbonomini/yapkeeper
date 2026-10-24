@@ -4,8 +4,10 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{self, AssertUnwindSafe};
@@ -14,18 +16,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
-use ratatui::backend::TestBackend;
-use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::Position;
+use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::{Position, Size};
 use ratatui::style::{Color, Modifier};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
-use yapkeeper::palette::{Colour, Palette, Restore, Step};
+use yapkeeper::palette::{Colour, Events, Palette, Restore, Step, event_loop};
 use yapkeeper::{
-    Catalog, DataDir, Indexer, REFRESH_INTERVAL, ResumeCommand, Roots, State, Stepper, hide, list,
-    rebuild,
+    Catalog, DataDir, Indexer, REFRESH_INTERVAL, ResumeCommand, Roots, SearchStepper, State,
+    Stepper, hide, list, rebuild,
 };
 
 #[cfg(unix)]
@@ -81,6 +83,25 @@ impl Histories {
         let (indexer, stepper) = Indexer::stepped(&self.roots(), &self.data());
         let palette = Palette::new(catalog, Colour::Accent, Path::new("/")).indexing(indexer);
         (palette, stepper)
+    }
+
+    /// The palette over the sessions already indexed, finding each query's
+    /// sessions only as the returned stepper steps.
+    fn palette_searching(&self) -> (Palette, SearchStepper) {
+        let (catalog, searcher) = Catalog::cached(&self.roots(), &self.data())
+            .unwrap()
+            .searching_stepped();
+        let palette = Palette::new(catalog, Colour::Accent, Path::new("/"));
+        (palette, searcher)
+    }
+
+    /// The palette over the sessions already indexed, finding each query's
+    /// sessions only as the returned searcher steps and taking in what a
+    /// stepped indexer over these histories publishes as it is stepped.
+    fn palette_searching_indexing(&self) -> (Palette, SearchStepper, Stepper) {
+        let (palette, searcher) = self.palette_searching();
+        let (indexer, stepper) = Indexer::stepped(&self.roots(), &self.data());
+        (palette.indexing(indexer), searcher, stepper)
     }
 
     /// Writes `count` Claude Code sessions run in `/usr`, `Synthetic session 0`
@@ -269,6 +290,178 @@ fn keys(palette: &mut Palette, text: &str) {
     }
 }
 
+/// What a `Script` gives the event loop next.
+enum Scripted {
+    Event(Event),
+    /// Nothing comes until the loop waits with a timeout.
+    Pause,
+}
+
+/// Events for `event_loop`, given in order: everything up to a `Pause` is
+/// already waiting when the loop asks, and a `Pause` ends the first timed
+/// wait that reaches it. Records each timed wait a `Pause` ended.
+struct Script {
+    queue: VecDeque<Scripted>,
+    waits: Vec<Duration>,
+}
+
+impl Script {
+    fn new(steps: impl IntoIterator<Item = Scripted>) -> Script {
+        Script {
+            queue: steps.into_iter().collect(),
+            waits: Vec::new(),
+        }
+    }
+}
+
+impl Events for Script {
+    fn next_event(&mut self, timeout: Option<Duration>) -> io::Result<Option<Event>> {
+        match timeout {
+            Some(Duration::ZERO) => {}
+            Some(timeout) => {
+                if let Some(Scripted::Pause) = self.queue.front() {
+                    self.queue.pop_front();
+                    self.waits.push(timeout);
+                    return Ok(None);
+                }
+            }
+            None => {
+                while let Some(Scripted::Pause) = self.queue.front() {
+                    self.queue.pop_front();
+                }
+            }
+        }
+        match self.queue.pop_front() {
+            Some(Scripted::Event(event)) => Ok(Some(event)),
+            Some(Scripted::Pause) => {
+                self.queue.push_front(Scripted::Pause);
+                Ok(None)
+            }
+            None if timeout == Some(Duration::ZERO) => Ok(None),
+            // A loop that would wait for good fails rather than hangs.
+            None => panic!("the event loop waited past the end of its script"),
+        }
+    }
+}
+
+/// One key press per character of `text`.
+fn typed(text: &str) -> Vec<Scripted> {
+    text.chars().map(|c| key(KeyCode::Char(c))).collect()
+}
+
+fn key(code: KeyCode) -> Scripted {
+    Scripted::Event(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+}
+
+fn ctrl_key(c: char) -> Scripted {
+    Scripted::Event(Event::Key(KeyEvent::new(
+        KeyCode::Char(c),
+        KeyModifiers::CONTROL,
+    )))
+}
+
+/// A `TestBackend` that fails as a terminal does, with `io::Error`, and
+/// keeps every frame drawn to it, as `lines` reads it.
+struct Recording {
+    backend: TestBackend,
+    frames: Vec<Vec<String>>,
+}
+
+impl Recording {
+    fn new(width: u16, height: u16) -> Recording {
+        Recording {
+            backend: TestBackend::new(width, height),
+            frames: Vec::new(),
+        }
+    }
+}
+
+impl Backend for Recording {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.backend.draw(content).map_err(never)
+    }
+
+    fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        self.backend.append_lines(n).map_err(never)
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.backend.hide_cursor().map_err(never)
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.backend.show_cursor().map_err(never)
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        self.backend.get_cursor_position().map_err(never)
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        self.backend.set_cursor_position(position).map_err(never)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.backend.clear().map_err(never)
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        self.backend.clear_region(clear_type).map_err(never)
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        self.backend.size().map_err(never)
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        self.backend.window_size().map_err(never)
+    }
+
+    /// `Terminal::draw` flushes once per frame, so this is where a frame ends.
+    fn flush(&mut self) -> io::Result<()> {
+        self.backend.flush().map_err(never)?;
+        self.frames.push(lines(self.backend.buffer()));
+        Ok(())
+    }
+}
+
+/// The `io::Error` a `TestBackend` call can't fail with.
+fn never(error: Infallible) -> io::Error {
+    match error {}
+}
+
+/// What a run of `event_loop` over a script did.
+struct Ran {
+    returned: Option<ResumeCommand>,
+    /// Every frame drawn, in order.
+    frames: Vec<Vec<String>>,
+    /// The timed waits a `Pause` ended.
+    waits: Vec<Duration>,
+}
+
+/// Runs `event_loop` on `palette` over `script` in a 120×40 terminal.
+fn run_script(palette: &mut Palette, script: impl IntoIterator<Item = Scripted>) -> Ran {
+    let mut terminal = Terminal::new(Recording::new(120, 40)).unwrap();
+    let mut script = Script::new(script);
+    let returned = event_loop(palette, &mut terminal, &mut script).unwrap();
+    Ran {
+        returned,
+        frames: std::mem::take(&mut terminal.backend_mut().frames),
+        waits: script.waits,
+    }
+}
+
+/// Whether `frame` is the startup frame: the empty query's placeholder and
+/// all three of `Histories::three()`'s sessions.
+fn is_startup(frame: &[String]) -> bool {
+    query_text(frame).starts_with("search everything") && rows_with(frame, &TITLES).len() == 3
+}
+
 /// The rows whose title starts with one of `titles`, in frame order.
 fn rows_with<'f>(frame: &'f [String], titles: &[&str]) -> Vec<&'f String> {
     frame
@@ -420,6 +613,40 @@ fn typing_a_filter_narrows_the_rows_and_the_count() {
     assert_eq!(rows_with(&retry, &TITLES).len(), 1, "{retry:#?}");
     assert_eq!(rows_with(&retry, &["Retry"]).len(), 1);
     assert!(retry[1].trim_end_matches('│').trim_end().ends_with("1 / 3"));
+}
+
+#[test]
+fn deleting_clearing_or_completing_after_a_search_finds_every_session_it_matches() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let rows = |palette: &mut Palette| {
+        let drawn = frame(palette, 120, 40);
+        rows_with(&drawn, &TITLES).len()
+    };
+
+    keys(&mut palette, "ret");
+    assert_eq!(rows(&mut palette), 1);
+    press(&mut palette, KeyCode::Backspace);
+    assert_eq!(rows(&mut palette), 2);
+
+    keys(&mut palette, "lease");
+    assert_eq!(rows(&mut palette), 1);
+    ctrl(&mut palette, 'u');
+    assert_eq!(rows(&mut palette), 3);
+
+    keys(&mut palette, "release");
+    assert_eq!(rows(&mut palette), 1);
+    press(&mut palette, KeyCode::Esc);
+    assert_eq!(rows(&mut palette), 3);
+
+    // `!re` leaves out two sessions, behind the ways to finish it;
+    // finishing it as `!recap` leaves out none.
+    keys(&mut palette, "!re");
+    frame(&mut palette, 120, 40);
+    press(&mut palette, KeyCode::Tab);
+    let completed = frame(&mut palette, 120, 40);
+    assert!(completed[1].contains("!recap"), "{completed:#?}");
+    assert_eq!(rows_with(&completed, &TITLES).len(), 3, "{completed:#?}");
 }
 
 /// The title of the selected row: the one whose first title cell is drawn
@@ -3653,4 +3880,501 @@ fn the_background_thread_waits_after_a_pass_and_runs_another_on_ctrl_r() {
         assert!(Instant::now() < deadline, "Ctrl+R started no second pass");
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn a_paste_draws_once_with_the_whole_query_and_its_results() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = typed("retry")
+        .into_iter()
+        .chain([Scripted::Pause, ctrl_key('c')]);
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    assert_eq!(frames.len(), 2, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    let pasted = &frames[1];
+    assert_eq!(query_text(pasted), "retry", "{pasted:#?}");
+    assert!(
+        pasted[1]
+            .trim_end_matches('│')
+            .trim_end()
+            .ends_with("1 / 3"),
+        "{pasted:#?}"
+    );
+    assert_eq!(rows_with(pasted, &TITLES).len(), 1, "{pasted:#?}");
+    assert_eq!(rows_with(pasted, &["Retry the billing job"]).len(), 1);
+}
+
+#[test]
+fn ctrl_c_in_a_batch_quits_without_applying_the_keys_after_it() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = typed("ab")
+        .into_iter()
+        .chain([ctrl_key('c')])
+        .chain(typed("xy"));
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    assert_eq!(frames.len(), 1, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    let after = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&after), "ab", "{after:#?}");
+}
+
+#[test]
+fn a_confirmed_resume_in_a_batch_ends_the_loop_without_applying_the_keys_after_it() {
+    let histories = Histories::three();
+    histories.pi(PI, "/usr", "Sort the inbox");
+    let bin = bin_with(&["claude", "codex", "pi"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    let script = typed("#pi ").into_iter().chain([
+        key(KeyCode::Enter),
+        key(KeyCode::Enter),
+        key(KeyCode::Esc),
+    ]);
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(
+        returned,
+        Some(ResumeCommand {
+            program: "pi".to_string(),
+            args: vec!["--session".to_string(), PI.to_string()],
+            cwd: PathBuf::from("/usr"),
+        })
+    );
+    assert_eq!(frames.len(), 1, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    let dialog = frame(&mut palette, 120, 40);
+    assert!(
+        dialog[1].starts_with("│ Resume \"Sort the inbox\""),
+        "{dialog:#?}"
+    );
+}
+
+#[test]
+fn with_no_keys_waiting_the_loop_redraws_when_the_toast_ends() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = [ctrl_key('t'), Scripted::Pause, ctrl_key('c')];
+    let Ran {
+        returned,
+        frames,
+        waits,
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    assert_eq!(frames.len(), 3, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    assert!(
+        frames[1][38].contains("Searching tool calls too"),
+        "{:#?}",
+        frames[1]
+    );
+    assert_eq!(waits.len(), 1, "{waits:?}");
+    assert!(
+        waits[0] > Duration::ZERO && waits[0] <= Duration::from_secs(3),
+        "{waits:?}"
+    );
+}
+
+#[test]
+fn a_resize_or_another_event_in_a_batch_just_redraws() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = [
+        Scripted::Event(Event::Resize(120, 40)),
+        key(KeyCode::Char('r')),
+        Scripted::Event(Event::FocusGained),
+        key(KeyCode::Char('e')),
+        Scripted::Pause,
+        ctrl_key('c'),
+    ];
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    assert_eq!(frames.len(), 2, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    assert_eq!(query_text(&frames[1]), "re", "{:#?}", frames[1]);
+}
+
+#[test]
+fn a_key_that_acts_on_results_in_a_batch_acts_on_the_batch_query() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = typed("retry")
+        .into_iter()
+        .chain([ctrl_key('x'), Scripted::Pause, ctrl_key('c')]);
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    // The batch's frame, then the one the toast's timed wait brings.
+    assert_eq!(frames.len(), 3, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    let hid = &frames[1];
+    assert!(hid[38].contains("Hid “Retry the billing job”"), "{hid:#?}");
+    assert!(rows_with(hid, &["Retry"]).is_empty(), "{hid:#?}");
+}
+
+#[test]
+fn a_typed_key_shows_on_the_next_frame_and_its_results_once_found() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, mut searcher) = histories.palette_searching();
+    let startup = frame(&mut palette, 80, 24);
+    assert!(is_startup(&startup), "{startup:#?}");
+
+    keys(&mut palette, "retry");
+    let typed = frame(&mut palette, 80, 24);
+    assert_eq!(query_text(&typed), "retry", "{typed:#?}");
+    assert_eq!(count(&typed), "3 / 3", "{typed:#?}");
+    assert_eq!(rows_with(&typed, &TITLES).len(), 3, "{typed:#?}");
+
+    assert!(searcher.step());
+    let found = frame(&mut palette, 80, 24);
+    assert_eq!(count(&found), "1 / 3", "{found:#?}");
+    assert_eq!(rows_with(&found, &TITLES), rows_with(&found, &["Retry"]));
+    assert_eq!(rows_with(&found, &["Retry"]).len(), 1, "{found:#?}");
+}
+
+#[test]
+fn results_for_a_query_no_longer_typed_are_never_drawn() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, mut searcher) = histories.palette_searching();
+    frame(&mut palette, 80, 24);
+
+    keys(&mut palette, "release");
+    assert!(searcher.step());
+    // Back to `r` and on to `retry`, never through the empty query, whose
+    // answer needs no search and would take the place of `release`'s.
+    for _ in 1.."release".len() {
+        press(&mut palette, KeyCode::Backspace);
+    }
+    keys(&mut palette, "etry");
+    let typed = frame(&mut palette, 80, 24);
+    assert_eq!(query_text(&typed), "retry", "{typed:#?}");
+    assert_eq!(count(&typed), "3 / 3", "{typed:#?}");
+    assert_eq!(rows_with(&typed, &TITLES).len(), 3, "{typed:#?}");
+
+    // Every query from `releas` to `retr` was replaced before its search started.
+    assert!(searcher.step());
+    assert!(!searcher.step());
+    let found = frame(&mut palette, 80, 24);
+    assert_eq!(count(&found), "1 / 3", "{found:#?}");
+    assert_eq!(rows_with(&found, &TITLES), rows_with(&found, &["Retry"]));
+}
+
+#[test]
+fn keys_act_on_the_results_drawn_while_new_ones_are_searched_for() {
+    let histories = Histories::three();
+    histories.catalog();
+    let bin = bin_with(&["claude", "codex"]);
+    let (catalog, _searcher) = catalog_finding_in(&histories, bin.path()).searching_stepped();
+    let mut palette = Palette::new(catalog, Colour::Accent, Path::new("/"));
+    frame(&mut palette, 80, 24);
+    press(&mut palette, KeyCode::Down);
+    assert_eq!(selected(&draw(&mut palette, 80, 24)), Some("Retry"));
+
+    // Through `#codex `, whose answer needs no search, to Tidy, the only
+    // Codex session; neither is drawn before `Enter`.
+    keys(&mut palette, "#codex tidy");
+    press(&mut palette, KeyCode::Enter);
+    let dialog = frame(&mut palette, 80, 24);
+    assert!(
+        dialog[1].starts_with("│ Resume \"Retry the billing job\""),
+        "{dialog:#?}"
+    );
+}
+
+#[test]
+fn a_key_in_a_batch_acts_on_the_results_drawn_before_it() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, _searcher) = histories.palette_searching();
+    let script = [key(KeyCode::Down), Scripted::Pause]
+        .into_iter()
+        .chain(typed("#codex "))
+        .chain([ctrl_key('o'), Scripted::Pause, ctrl_key('c')]);
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    // The startup frame, the one with Retry selected, then the batch's.
+    assert_eq!(frames.len(), 3, "{frames:#?}");
+    let reading = &frames[2];
+    assert!(reading[1].contains("Retry the billing job"), "{reading:#?}");
+}
+
+/// Writes Claude Code session `CLAUDE_NEW`, "Draft the changelog", a day
+/// later than the three, so it sorts above both Claude Code sessions.
+fn draft(histories: &Histories) {
+    histories.claude_records(
+        CLAUDE_NEW,
+        "/usr",
+        &[json!({
+            "type": "user",
+            "message": { "content": "Draft the changelog" },
+            "timestamp": "2026-10-21T10:00:00Z",
+        })],
+    );
+}
+
+#[test]
+fn new_results_keep_the_selected_session_when_it_is_still_listed() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, mut searcher, mut indexer) = histories.palette_searching_indexing();
+    keys(&mut palette, "the");
+    assert!(searcher.step());
+    let found = frame(&mut palette, 80, 24);
+    assert_eq!(rows_with(&found, &TITLES).len(), 2, "{found:#?}");
+    press(&mut palette, KeyCode::Down);
+    assert_eq!(selected(&draw(&mut palette, 80, 24)), Some("Retry"));
+
+    draft(&histories);
+    finish(&mut indexer);
+    frame(&mut palette, 80, 24);
+    assert!(searcher.step());
+    let buffer = draw(&mut palette, 80, 24);
+    let after = lines(&buffer);
+    assert!(after[4].starts_with("│ Draft the changelog"), "{after:#?}");
+    assert_eq!(rows_with(&after, &["Draft", "Retry", "Tidy"]).len(), 3);
+    assert_eq!(selected(&buffer), Some("Retry"), "{after:#?}");
+}
+
+#[test]
+fn a_search_that_fails_says_why_in_the_footer_and_keeps_the_rows() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, mut searcher) = histories.palette_searching();
+    let startup = frame(&mut palette, 80, 24);
+    // The catalog keeps the index it opened; the worker opens its own.
+    let index = histories.data().index();
+    fs::remove_file(&index).unwrap();
+    fs::create_dir(&index).unwrap();
+
+    keys(&mut palette, "retry");
+    assert!(searcher.step());
+    let failed = frame(&mut palette, 80, 24);
+    assert!(
+        footer(&failed).contains("can't use the index"),
+        "{failed:#?}"
+    );
+    assert_eq!(rows_with(&failed, &TITLES), rows_with(&startup, &TITLES));
+}
+
+#[test]
+fn sessions_indexed_while_typing_are_searched_for_the_query_typed() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, mut searcher, mut indexer) = histories.palette_searching_indexing();
+    keys(&mut palette, "draft");
+    assert!(searcher.step());
+    assert_eq!(count(&frame(&mut palette, 80, 24)), "1 / 3");
+
+    draft(&histories);
+    finish(&mut indexer);
+    frame(&mut palette, 80, 24);
+    assert!(searcher.step());
+    let after = frame(&mut palette, 80, 24);
+    assert_eq!(count(&after), "2 / 4", "{after:#?}");
+    assert_eq!(rows_with(&after, &["Draft", "Release"]).len(), 2);
+}
+
+#[test]
+fn quitting_with_a_search_in_flight_returns_at_once() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, _searcher) = histories.palette_searching();
+    let script = typed("retry")
+        .into_iter()
+        .chain([Scripted::Pause, ctrl_key('c')]);
+    let Ran {
+        returned, waits, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    // The search tick's wait, which the search never ends.
+    assert_eq!(waits.len(), 1, "{waits:?}");
+    assert!(waits[0] <= Duration::from_millis(10), "{waits:?}");
+}
+
+#[test]
+fn resuming_with_a_search_in_flight_resumes_the_session_drawn() {
+    let histories = Histories::three();
+    histories.catalog();
+    let bin = bin_with(&["claude", "codex"]);
+    let (catalog, _searcher) = catalog_finding_in(&histories, bin.path()).searching_stepped();
+    let mut palette = Palette::new(catalog, Colour::Accent, Path::new("/"));
+    frame(&mut palette, 80, 24);
+    press(&mut palette, KeyCode::Down);
+    assert_eq!(selected(&draw(&mut palette, 80, 24)), Some("Retry"));
+
+    keys(&mut palette, "tidy");
+    press(&mut palette, KeyCode::Enter);
+    let step = press(&mut palette, KeyCode::Enter);
+    let Step::Resume(command) = step else {
+        panic!("{step:?}");
+    };
+    assert_eq!(command.program, "claude");
+    assert!(
+        command.args.contains(&CLAUDE_RETRY.to_string()),
+        "{command:?}"
+    );
+}
+
+#[test]
+fn dropping_the_palette_mid_search_returns_and_leaves_the_index_consistent() {
+    let histories = Histories::three();
+    histories.many(300);
+    histories.catalog();
+    let catalog = Catalog::cached(&histories.roots(), &histories.data())
+        .unwrap()
+        .searching_in_background();
+    let mut palette = Palette::new(catalog, Colour::Accent, Path::new("/"));
+    frame(&mut palette, 80, 24);
+
+    keys(&mut palette, "synthetic");
+    // As `run` does before the command replaces the process.
+    drop(palette);
+
+    let listed = list(&histories.roots(), &histories.data()).unwrap();
+    let rebuilt = rebuild(&histories.roots(), &histories.data()).unwrap();
+    let ids = |sessions: &[yapkeeper::Listed]| -> Vec<String> {
+        sessions
+            .iter()
+            .map(|listed| listed.session.id.clone())
+            .collect()
+    };
+    assert_eq!(ids(&listed.sessions), ids(&rebuilt.sessions));
+    assert_eq!(listed.sessions.len(), 303);
+}
+
+#[test]
+fn searching_shows_on_the_query_line_only_once_a_search_runs_a_while() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, mut searcher) = histories.palette_searching();
+    frame(&mut palette, 80, 24);
+    keys(&mut palette, "retry");
+
+    let start = Instant::now();
+    let first = frame_at(&mut palette, start);
+    assert!(!first[1].contains("searching"), "{first:#?}");
+    let soon = frame_at(&mut palette, start + Duration::from_millis(50));
+    assert!(!soon[1].contains("searching"), "{soon:#?}");
+    let later = start + Duration::from_millis(200);
+    let slow = frame_at(&mut palette, later);
+    assert!(slow[1].contains("searching · 3 / 3"), "{slow:#?}");
+    assert_eq!(palette.redraw_at(), Some(later + Duration::from_millis(10)));
+
+    assert!(searcher.step());
+    let done = frame_at(&mut palette, later + Duration::from_millis(10));
+    assert!(!done[1].contains("searching"), "{done:#?}");
+    assert_eq!(count(&done), "1 / 3", "{done:#?}");
+    assert_eq!(palette.redraw_at(), None);
+}
+
+#[test]
+fn a_query_typed_through_the_worker_finds_what_a_search_from_scratch_finds() {
+    let histories = Histories::three();
+    histories.claude(
+        "aaaaaaaa-0000-4000-8000-000000000501",
+        "/usr",
+        "Why is this test flaky? Add a Retry.",
+    );
+    histories.claude(
+        "aaaaaaaa-0000-4000-8000-000000000502",
+        "/usr",
+        "Please retry the flaky upload",
+    );
+    histories.codex(
+        "eeeeeeee-0000-7000-8000-000000000502",
+        "/usr",
+        "flaky retry in codex",
+    );
+    histories.pi(PI, "/usr", "Another flaky test");
+    let scratch = histories.catalog();
+    let (mut palette, mut searcher) = histories.palette_searching();
+    // As `tests/search.rs` types them: words and excluded words growing and
+    // shrinking, case, filters, and clearing.
+    let typed = [
+        "flaky retry",
+        "flaky !test !upload",
+        "flaky !test !u",
+        "Retry f",
+        "retry F",
+        "flaky #claude !is:pr",
+        "flaky #codex",
+        "flaky is:temp",
+        "fla",
+        "",
+        "is:pr",
+        "xq flaky",
+        "flaky",
+    ];
+    let mut line = String::new();
+    let mut pressed = 0;
+    let check = |palette: &mut Palette, searcher: &mut SearchStepper, line: &str| {
+        while searcher.step() {}
+        let drawn = frame(palette, 120, 40);
+        if !line.is_empty() {
+            assert_eq!(query_text(&drawn).trim_end(), line.trim_end(), "{drawn:#?}");
+        }
+        let found = scratch.search(&scratch.parse(line)).unwrap().sessions.len();
+        assert_eq!(
+            count(&drawn),
+            format!("{found} / 7"),
+            "{line:?}: {drawn:#?}"
+        );
+    };
+    for text in typed {
+        let common = line
+            .chars()
+            .zip(text.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let presses = (common..line.chars().count())
+            .map(|_| KeyCode::Backspace)
+            .chain(text.chars().skip(common).map(KeyCode::Char));
+        for code in presses {
+            press(&mut palette, code);
+            match code {
+                KeyCode::Char(c) => line.push(c),
+                _ => drop(line.pop()),
+            }
+            pressed += 1;
+            if pressed % 3 == 0 {
+                check(&mut palette, &mut searcher, &line);
+            }
+        }
+        check(&mut palette, &mut searcher, &line);
+    }
+}
+
+#[test]
+fn a_filter_typed_is_accented_on_the_next_frame_before_its_results() {
+    let histories = Histories::three();
+    histories.catalog();
+    let (mut palette, _searcher) = histories.palette_searching();
+    frame(&mut palette, 120, 40);
+    keys(&mut palette, "tidy #codex");
+
+    let buffer = draw(&mut palette, 120, 40);
+    let drawn = lines(&buffer);
+    assert_eq!(count(&drawn), "3 / 3", "{drawn:#?}");
+    let accented: Vec<bool> = (0..11)
+        .map(|x| buffer[(QUERY_X + x, 1)].fg == Color::Indexed(108))
+        .collect();
+    let expected: Vec<bool> = "tidy #codex"
+        .char_indices()
+        .map(|(at, _)| at >= 5)
+        .collect();
+    assert_eq!(accented, expected, "{drawn:#?}");
 }

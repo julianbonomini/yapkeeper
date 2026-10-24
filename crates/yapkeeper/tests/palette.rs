@@ -17,6 +17,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Position;
 use ratatui::style::{Color, Modifier};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -255,6 +256,10 @@ fn ctrl(palette: &mut Palette, c: char) -> Step {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL),
         Instant::now(),
     )
+}
+
+fn alt(palette: &mut Palette, code: KeyCode) -> Step {
+    palette.handle(KeyEvent::new(code, KeyModifiers::ALT), Instant::now())
 }
 
 /// Types each character of `text` into the query.
@@ -667,6 +672,199 @@ fn the_cursor_moves_past_each_typed_space() {
     let after_space = terminal.get_cursor_position().unwrap();
     assert_eq!(after_space.x, after_word.x + 1);
     assert_eq!(after_space.y, 1);
+}
+
+/// Where `palette` puts the terminal cursor in a `width`×`height` frame,
+/// or nothing when it hides it.
+fn cursor(palette: &mut Palette, width: u16, height: u16) -> Option<Position> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| palette.render(frame, Instant::now()))
+        .unwrap();
+    let backend = terminal.backend();
+    backend.cursor_visible().then(|| backend.cursor_position())
+}
+
+/// The column of the query line's first character: after the border and
+/// the prompt.
+const QUERY_X: u16 = 4;
+
+#[test]
+fn the_cursor_moves_and_edits_anywhere_in_the_query() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "retry #codex");
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X + 12, 1))
+    );
+
+    press(&mut palette, KeyCode::Home);
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X, 1))
+    );
+    press(&mut palette, KeyCode::Right);
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X + 1, 1))
+    );
+    alt(&mut palette, KeyCode::Char('f'));
+    keys(&mut palette, " @usr");
+    let drawn = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&drawn), "retry @usr #codex", "{drawn:#?}");
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X + 10, 1))
+    );
+
+    press(&mut palette, KeyCode::Delete);
+    press(&mut palette, KeyCode::Backspace);
+    let drawn = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&drawn), "retry @us#codex", "{drawn:#?}");
+    ctrl(&mut palette, 'w');
+    let drawn = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&drawn), "retry #codex", "{drawn:#?}");
+    ctrl(&mut palette, 'k');
+    let drawn = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&drawn), "retry", "{drawn:#?}");
+}
+
+#[test]
+fn both_forms_of_each_alt_key_move_or_delete_a_word() {
+    let histories = Histories::three();
+    for (back, forward) in [
+        (KeyCode::Left, KeyCode::Right),
+        (KeyCode::Char('b'), KeyCode::Char('f')),
+    ] {
+        let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+        keys(&mut palette, "retry @usr #codex");
+        alt(&mut palette, back);
+        alt(&mut palette, back);
+        assert_eq!(
+            cursor(&mut palette, 120, 40),
+            Some(Position::new(QUERY_X + 6, 1))
+        );
+        alt(&mut palette, forward);
+        assert_eq!(
+            cursor(&mut palette, 120, 40),
+            Some(Position::new(QUERY_X + 10, 1))
+        );
+    }
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "retry @usr #codex");
+    alt(&mut palette, KeyCode::Backspace);
+    press(&mut palette, KeyCode::Home);
+    alt(&mut palette, KeyCode::Char('d'));
+    let drawn = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&drawn), " @usr", "{drawn:#?}");
+}
+
+#[test]
+fn a_filter_inserted_in_the_middle_is_accented_and_narrows_the_rows() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "t tidy");
+    press(&mut palette, KeyCode::Home);
+    press(&mut palette, KeyCode::Right);
+    keys(&mut palette, " #codex");
+
+    let buffer = draw(&mut palette, 120, 40);
+    let drawn = lines(&buffer);
+    assert_eq!(query_text(&drawn), "t #codex tidy", "{drawn:#?}");
+    let accented: Vec<bool> = (0..13)
+        .map(|x| buffer[(QUERY_X + x, 1)].fg == Color::Indexed(108))
+        .collect();
+    let expected: Vec<bool> = "t #codex tidy"
+        .char_indices()
+        .map(|(at, _)| (2..8).contains(&at))
+        .collect();
+    assert_eq!(accented, expected, "{drawn:#?}");
+    assert_eq!(rows_with(&drawn, &TITLES).len(), 1, "{drawn:#?}");
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X + 8, 1))
+    );
+}
+
+#[test]
+fn ctrl_u_clears_the_query_from_its_end_and_deletes_to_the_start_from_the_middle() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "retry #codex");
+    alt(&mut palette, KeyCode::Left);
+    ctrl(&mut palette, 'u');
+    let drawn = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&drawn), "#codex", "{drawn:#?}");
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X, 1))
+    );
+
+    ctrl(&mut palette, 'e');
+    ctrl(&mut palette, 'u');
+    let drawn = frame(&mut palette, 120, 40);
+    assert!(
+        query_text(&drawn).starts_with("search everything"),
+        "{drawn:#?}"
+    );
+    assert_eq!(rows_with(&drawn, &TITLES).len(), 3, "{drawn:#?}");
+}
+
+#[test]
+fn a_query_wider_than_its_line_scrolls_to_keep_the_cursor_in_view() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let query = format!("first {}last", "retry ".repeat(20));
+    keys(&mut palette, &query);
+    // The count, `0 / 3`, and the space before it end the line.
+    let count_x = 59 - 5;
+
+    let drawn = frame(&mut palette, 60, 20);
+    assert!(drawn[1].starts_with("│ › …"), "{drawn:#?}");
+    assert!(drawn[1].contains("last 0 / 3"), "{drawn:#?}");
+    let at = cursor(&mut palette, 60, 20).unwrap();
+    assert!(at.x < count_x, "{at:?} {drawn:#?}");
+
+    press(&mut palette, KeyCode::Home);
+    let drawn = frame(&mut palette, 60, 20);
+    assert!(drawn[1].starts_with("│ › first retry"), "{drawn:#?}");
+    assert!(drawn[1].contains("… 0 / 3"), "{drawn:#?}");
+    assert_eq!(
+        cursor(&mut palette, 60, 20),
+        Some(Position::new(QUERY_X, 1))
+    );
+}
+
+#[test]
+fn the_cursor_shows_only_on_the_query_line() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude", "codex"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    assert_eq!(
+        cursor(&mut palette, 80, 24),
+        Some(Position::new(QUERY_X, 1))
+    );
+
+    ctrl(&mut palette, 'o');
+    assert_eq!(cursor(&mut palette, 80, 24), None);
+    press(&mut palette, KeyCode::Enter);
+    assert_eq!(cursor(&mut palette, 80, 24), None);
+    press(&mut palette, KeyCode::Esc);
+    press(&mut palette, KeyCode::Esc);
+    press(&mut palette, KeyCode::Enter);
+    assert_eq!(cursor(&mut palette, 80, 24), None);
+    press(&mut palette, KeyCode::Esc);
+    ctrl(&mut palette, 's');
+    assert_eq!(cursor(&mut palette, 80, 24), None);
+    press(&mut palette, KeyCode::Esc);
+    press(&mut palette, KeyCode::Tab);
+    assert_eq!(cursor(&mut palette, 80, 24), None);
+    press(&mut palette, KeyCode::Esc);
+    assert_eq!(
+        cursor(&mut palette, 80, 24),
+        Some(Position::new(QUERY_X, 1))
+    );
 }
 
 #[test]
@@ -1555,7 +1753,7 @@ fn long_session(histories: &Histories) {
 }
 
 #[test]
-fn right_opens_the_conversation_and_esc_or_left_returns_unchanged() {
+fn ctrl_o_opens_the_conversation_and_esc_or_left_returns_unchanged() {
     let histories = Histories::three();
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     // Every title has a "t", so all three rows stay.
@@ -1565,7 +1763,7 @@ fn right_opens_the_conversation_and_esc_or_left_returns_unchanged() {
     assert_eq!(selected(&draw(&mut palette, 80, 24)), Some("Retry"));
 
     for back in [KeyCode::Esc, KeyCode::Left] {
-        assert_eq!(press(&mut palette, KeyCode::Right), Step::Continue);
+        assert_eq!(ctrl(&mut palette, 'o'), Step::Continue);
         let reading = frame(&mut palette, 80, 24);
         assert!(reading[1].contains("Retry the billing job"), "{reading:#?}");
         let body = conversation_body(&reading);
@@ -1579,19 +1777,49 @@ fn right_opens_the_conversation_and_esc_or_left_returns_unchanged() {
 }
 
 #[test]
+fn right_at_the_end_of_the_query_does_nothing_and_ctrl_o_reads_at_any_width() {
+    let histories = Histories::three();
+    for (width, height) in [(120, 40), (60, 20)] {
+        let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+        keys(&mut palette, "t");
+        let before = frame(&mut palette, width, height);
+        assert_eq!(press(&mut palette, KeyCode::Right), Step::Continue);
+        assert_eq!(frame(&mut palette, width, height), before);
+
+        ctrl(&mut palette, 'o');
+        let reading = frame(&mut palette, width, height);
+        assert!(
+            conversation_body(&reading)[0].starts_with("you"),
+            "{reading:#?}"
+        );
+        assert!(footer(&reading).contains("Esc back"), "{reading:#?}");
+    }
+}
+
+#[test]
+fn the_footer_names_ctrl_o_for_reading_at_any_width() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    for (width, height) in [(120, 40), (60, 20)] {
+        let frame = frame(&mut palette, width, height);
+        assert!(footer(&frame).contains("↵ resume  ^O read"), "{frame:#?}");
+    }
+}
+
+#[test]
 fn printable_keys_leave_the_query_alone_while_reading() {
     let histories = Histories::three();
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     let palette_frame = frame(&mut palette, 80, 24);
 
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
     let reading = frame(&mut palette, 80, 24);
     keys(&mut palette, "xyz");
     assert_eq!(frame(&mut palette, 80, 24), reading);
     press(&mut palette, KeyCode::Esc);
     assert_eq!(frame(&mut palette, 80, 24), palette_frame);
 
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
     assert_eq!(ctrl(&mut palette, 'c'), Step::Quit);
 }
 
@@ -1600,7 +1828,7 @@ fn arrows_and_page_keys_scroll_the_conversation() {
     let histories = Histories::new();
     long_session(&histories);
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
     let first_row = |palette: &mut Palette| conversation_body(&frame(palette, 80, 24))[0].clone();
 
     assert!(first_row(&mut palette).contains("turn 0 asks"));
@@ -1636,7 +1864,7 @@ fn a_page_down_moves_the_last_row_to_the_top() {
     let histories = Histories::new();
     long_session(&histories);
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
 
     let before = conversation_body(&frame(&mut palette, 80, 24));
     press(&mut palette, KeyCode::PageDown);
@@ -1658,7 +1886,7 @@ fn n_and_shift_n_move_between_matches_and_wrap_around() {
     long_session(&histories);
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     keys(&mut palette, "needle");
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
 
     // Opening shows the first match; each one is the only match a page holds.
     let reading = frame(&mut palette, 80, 24);
@@ -1695,7 +1923,7 @@ fn matches_are_highlighted_in_the_conversation() {
     long_session(&histories);
     let mut palette = Palette::new(histories.catalog(), Colour::Mono, Path::new("/"));
     keys(&mut palette, "needle");
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
 
     let buffer = draw(&mut palette, 80, 24);
     let frame = lines(&buffer);
@@ -1718,7 +1946,7 @@ fn a_tool_call_reads_as_one_line() {
     let histories = Histories::new();
     long_session(&histories);
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
 
     let body = conversation_body(&frame(&mut palette, 80, 24));
     let call = body.iter().position(|row| row.contains("Bash")).unwrap();
@@ -1727,13 +1955,13 @@ fn a_tool_call_reads_as_one_line() {
 }
 
 #[test]
-fn at_60_columns_right_opens_the_conversation_inside_the_border() {
+fn at_60_columns_ctrl_o_opens_the_conversation_inside_the_border() {
     let histories = Histories::new();
     let long = format!("{} then the needle at last", "padding words ".repeat(20));
     histories.claude(CLAUDE_RETRY, "/usr", &long);
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     keys(&mut palette, "needle");
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
 
     let reading = frame(&mut palette, 60, 20);
     for row in &reading[1..19] {
@@ -2267,7 +2495,7 @@ fn no_icons_leave_no_gap_where_the_icon_was() {
         .unwrap_or_else(|| panic!("{:#?}", lines(&buffer)));
     assert_eq!(cells(&buffer, dir_line, column + 1..column + 6), " /usr");
 
-    press(&mut none, KeyCode::Right);
+    ctrl(&mut none, 'o');
     let reading = frame(&mut none, 120, 40);
     assert!(reading[2].contains(" ago · /usr"), "{reading:#?}");
     press(&mut none, KeyCode::Esc);
@@ -2572,7 +2800,7 @@ fn enter_while_reading_opens_the_dialog_and_esc_steps_back() {
     let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
     press(&mut palette, KeyCode::Down);
     let palette_frame = frame(&mut palette, 80, 24);
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
     let reading = frame(&mut palette, 80, 24);
 
     assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
@@ -2886,7 +3114,7 @@ fn the_footer_names_enter_for_resume_under_the_results_and_while_reading() {
         footer(&results).contains("↑↓ move  ↵ resume"),
         "{results:#?}"
     );
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
     let reading = frame(&mut palette, 120, 40);
     assert!(
         footer(&reading).contains("↑↓ scroll  ↵ resume"),
@@ -2944,7 +3172,7 @@ fn an_update_keeps_the_open_conversation_where_it_was_read() {
     // Tidy, Retry, then the long session, which isn't the first row.
     press(&mut palette, KeyCode::Down);
     press(&mut palette, KeyCode::Down);
-    press(&mut palette, KeyCode::Right);
+    ctrl(&mut palette, 'o');
     for _ in 0..4 {
         press(&mut palette, KeyCode::Down);
     }

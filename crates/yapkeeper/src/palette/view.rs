@@ -223,12 +223,13 @@ fn too_small(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), message);
 }
 
-/// The prompt, the query with the cursor after it, and the match count on
+/// The prompt, the query with the cursor in it unless the location list
+/// has the focus, and the match count on
 /// the right, after `indexing` while a pass has run a while and after how
 /// many temp sessions the query left out, each while that leaves the query
 /// `QUERY_ROOM` cells, and followed by `+tools` in the accent while searches
 /// read tool calls.
-fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
+fn query_line(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let mut count = vec![Span::styled(
         format!("{} / {}", palette.found.len(), palette.catalog.indexed()),
         theme.dim,
@@ -255,12 +256,12 @@ fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let count_cells: usize = count.iter().map(Span::width).sum();
     // One space keeps the query off the count.
     let room = width.saturating_sub(PROMPT.width() + count_cells + 1);
-    // The cursor sits after what was typed, or at the placeholder's start.
-    let (typed, typed_cells) = match palette.query.is_empty() {
+    // Over an empty query the cursor sits at the placeholder's start.
+    let (typed, cursor_cells) = match palette.query.text().is_empty() {
         true => (vec![Span::styled(fit(PLACEHOLDER, room), theme.dim)], 0),
         false => typed_query(palette, theme, room),
     };
-    let cursor_x = area.x + (PROMPT.width() + typed_cells) as u16;
+    let cursor_x = area.x + (PROMPT.width() + cursor_cells) as u16;
     let typed_width: usize = typed.iter().map(Span::width).sum();
     let gap = width.saturating_sub(PROMPT.width() + typed_width + count_cells);
     let mut spans = vec![Span::styled(PROMPT, theme.accent)];
@@ -269,15 +270,18 @@ fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     spans.extend(count);
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
-    frame.set_cursor_position(Position::new(cursor_x, area.y));
+    let choosing_location = palette.completions.iter().any(|c| c.location.is_some());
+    if !choosing_location {
+        frame.set_cursor_position(Position::new(cursor_x, area.y));
+    }
 }
 
-/// The query as typed, in at most `cells` cells, keeping its end and
-/// starting with `…` when cut, and how many cells it takes. Each filter
-/// token is in the accent, as the query parser read it; words and the spaces
-/// between tokens stay plain, every space kept so the cursor moves with it.
-fn typed_query<'a>(palette: &Palette, theme: &Theme, cells: usize) -> (Vec<Span<'a>>, usize) {
-    let query = &palette.query;
+/// The part of the query that keeps the cursor in view in `cells` cells,
+/// with a `…` where text is left out on either side, and how many cells
+/// from its start the cursor sits. Each filter token is in the accent, as
+/// the query parser read it; words and the spaces between tokens stay plain.
+fn typed_query<'a>(palette: &mut Palette, theme: &Theme, cells: usize) -> (Vec<Span<'a>>, usize) {
+    let visible = palette.query.visible(cells);
     let style_at = |at: usize| {
         let token = palette
             .parsed
@@ -289,30 +293,22 @@ fn typed_query<'a>(palette: &Palette, theme: &Theme, cells: usize) -> (Vec<Span<
             _ => Style::new(),
         }
     };
-    let chars: Vec<(char, Style)> = query
-        .char_indices()
-        .filter(|(_, c)| !c.is_control())
-        .map(|(at, c)| (c, style_at(at)))
-        .collect();
-    // Cut as `fit_left` cuts the plain text, keeping as many characters
-    // from the end.
-    let plain: String = chars.iter().map(|&(c, _)| c).collect();
-    let fitted = fit_left(&plain, cells);
-    // In no cells at all there is no room for the `…` either.
-    let ellipsis = fitted != plain && cells > 0;
-    let kept = &chars[chars.len() - (fitted.chars().count() - usize::from(ellipsis))..];
     let mut spans: Vec<Span> = Vec::new();
-    for &(c, style) in kept {
+    if visible.clipped_start {
+        spans.push(Span::raw("…"));
+    }
+    let shown = &palette.query.text()[visible.range.clone()];
+    for (at, c) in shown.char_indices() {
+        let style = style_at(visible.range.start + at);
         match spans.last_mut() {
             Some(span) if span.style == style => span.content.to_mut().push(c),
             _ => spans.push(Span::styled(c.to_string(), style)),
         }
     }
-    if ellipsis {
-        spans.insert(0, Span::raw("…"));
+    if visible.clipped_end {
+        spans.push(Span::raw("…"));
     }
-    let used = spans.iter().map(Span::width).sum();
-    (spans, used)
+    (spans, visible.cursor_cells)
 }
 
 /// One line per way to finish the filter being typed: a location-list row
@@ -572,7 +568,7 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
         frame.render_widget(Paragraph::new(format!(" {text}")), area);
         return;
     }
-    let esc = match palette.query.is_empty() {
+    let esc = match palette.query.text().is_empty() {
         true => "quit",
         false => "clear",
     };
@@ -613,9 +609,9 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
         (None, (false, false, true)) => vec![
             Some(("↑↓", "move")),
             palette.selected().map(|_| ("↵", "resume")),
+            palette.selected().map(|_| ("^O", "read")),
             Some(("Tab", "locations")),
             Some(("Esc", esc)),
-            Some(("^U", "clear")),
             palette.launch_token.as_ref().map(|_| ("^L", "here")),
             Some(("^X", hide)),
             Some(("^T", "tools")),

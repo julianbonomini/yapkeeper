@@ -8,8 +8,8 @@ The palette fills the terminal inside a single rounded border. From top to botto
 
 1. The query line, with the match count on the right (`2 / 783`), after `indexing ·` while a background pass runs.
 2. A rule.
-3. Results on the left (48%) and the preview on the right (52%) when the palette is at least 80 columns wide. Below that width the preview is dropped and `→` opens the conversation.
-4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action. Under the results the hints include `Tab locations` and `^S settings`; while a completion list is open, `Tab insert`.
+3. Results on the left (48%) and the preview on the right (52%) when the palette is at least 80 columns wide. Below that width the preview is dropped; `Ctrl+O` opens the conversation at any width.
+4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action. Under the results the hints include `^O read`, `Tab locations` and `^S settings`; while a completion list is open, `Tab insert`.
 
 There is no permanent location sidebar. The query line handles locations (see below).
 
@@ -76,7 +76,7 @@ The preview shows, in order:
 7. Opening: the first prompt.
 8. Latest: the last prompt and the replies after it.
 
-`→` opens the full conversation in place of the query line, results and preview, with the session's title and where it ran above it. Every message is shown whole, with the search words highlighted, and each tool call is one line. `↑` `↓` scroll by a line, `PgUp` `PgDn` by a page less one line, and `Home` `End` jump to either end. It opens at the first match. `n` and `N` move to the next and previous match, wrapping past the last and the first, and the title line shows which one (`match 2 / 3`). `Enter` there opens the resume dialog. `Esc` or `←` returns to the palette with the query and selection unchanged.
+`Ctrl+O` opens the full conversation in place of the query line, results and preview, with the session's title and where it ran above it. Every message is shown whole, with the search words highlighted, and each tool call is one line. `↑` `↓` scroll by a line, `PgUp` `PgDn` by a page less one line, and `Home` `End` jump to either end. It opens at the first match. `n` and `N` move to the next and previous match, wrapping past the last and the first, and the title line shows which one (`match 2 / 3`). `Enter` there opens the resume dialog. `Esc` or `←` returns to the palette with the query and selection unchanged.
 
 Recaps cost nothing extra: Claude Code writes `away_summary` records into its session files. On the real histories, 180 of 783 sessions had one and 100 had a `pr-link` record. Codex and Pi sessions have no recap. Writing a summary for every session would need a model call during indexing; that is deferred (see open questions).
 
@@ -114,21 +114,28 @@ Settings change the palette only; `yapkeeper list` and `search` always use these
 
 | Key | Action |
 |---|---|
-| Typing | Edit the query |
+| Typing | Insert at the cursor |
+| `←` `→` | Move the cursor one character |
+| `Alt+←` `Alt+→`, `Alt+B` `Alt+F` | Move the cursor one word |
+| `Home` `End`, `Ctrl+A` `Ctrl+E` | Move the cursor to the start or end of the query |
+| `Backspace` `Delete` | Delete the character before or after the cursor |
+| `Ctrl+W` or `Alt+Backspace`, `Alt+D` | Delete the word before or after the cursor |
+| `Ctrl+U`, `Ctrl+K` | Delete to the start or end of the query |
 | `↑` `↓`, `Ctrl+P` `Ctrl+N` | Move the selection |
 | `Enter` | Resume dialog |
-| `→` | Read the whole conversation |
+| `Ctrl+O` | Read the whole conversation |
 | `Tab` | Location list |
 | `Ctrl+L` | Insert the launch directory's `@` token |
 | `Ctrl+X` | Hide or unhide the selected session |
 | `Ctrl+T` | Include tool calls in search |
 | `Ctrl+S` | Settings |
 | `Ctrl+R` | Refresh the index now |
-| `Ctrl+U` | Clear the query |
 | `Esc` | Clear the query, then quit |
 | `Ctrl+C` | Quit |
 
 The selection stops at the first and last rows and returns to the first row whenever the query changes.
+
+The query line edits like a one-line text field, with the terminal's own cursor; it shows only there, and not while the location list is open, in the conversation, the settings or the resume dialog. A word is a run of non-space characters, so one word key covers a whole filter such as `@acme-api:billing-retry`. A character is what reads as one: a combining accent or a joined emoji moves and deletes with the character it belongs to, and a wide character takes two cells. Terminals send `Alt` keys either with an `Alt` modifier or as `Esc` before the key, and both work: `Alt+←` may arrive as either, or as `Esc b`, which reads as `Alt+B`. `Ctrl+U` at the end of the query clears it, as it did before the cursor could move. A query wider than its line scrolls sideways to keep the cursor in view, as little as it must, with `…` where text is left out on either side. There is no undo, and the mouse does not place the cursor.
 
 `Ctrl+R` works on every screen and has no footer hint: the periodic refresh covers the common case, so the hint would only crowd the footer.
 
@@ -186,7 +193,6 @@ The help footer names each provider's history directory and the index and prefer
 
 ## Open questions
 
-- Cursor movement inside the query, so a filter in the middle can be edited.
 - Fuzzy matching for search words and locations.
 - Summaries for sessions without a recap: an opt-in, cached model call during indexing, which costs tokens and sends conversation text to a model.
 - Behavior at 60 columns and 80×24 was built (the preview drops below 80 columns, and a "terminal too small" message appears below 48×12) but not reviewed by the user on real data.

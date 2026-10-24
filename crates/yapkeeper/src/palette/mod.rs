@@ -11,6 +11,7 @@ mod reading;
 mod resuming;
 mod settings;
 mod terminal;
+mod text_field;
 mod view;
 
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ use ratatui::widgets::ListState;
 use self::reading::Reading;
 use self::resuming::Resuming;
 use self::settings::SettingsScreen;
+use self::text_field::TextField;
 use crate::Snapshot;
 use crate::indexer::Indexing;
 use crate::{
@@ -44,7 +46,7 @@ pub struct Palette {
     launch_dir: PathBuf,
     /// The `@` token `Ctrl+L` adds: where the palette was launched.
     launch_token: Option<String>,
-    query: String,
+    query: TextField,
     /// Whether searches also read tool calls, tool output and subagent
     /// transcripts.
     tools: bool,
@@ -153,7 +155,7 @@ impl Palette {
             home: line::home(),
             launch_dir: launch_dir.to_path_buf(),
             launch_token: location_token(launch_dir),
-            query: String::new(),
+            query: TextField::default(),
             tools: false,
             parsed: Query::default(),
             found: Vec::new(),
@@ -235,7 +237,7 @@ impl Palette {
         }
         match key.code {
             KeyCode::Char('c') if ctrl => return Step::Quit,
-            KeyCode::Char('u') if ctrl => self.set_query(String::new()),
+            KeyCode::Char('o') if ctrl => self.open_reading(),
             KeyCode::Char('l') if ctrl => self.insert_launch_location(),
             KeyCode::Char('x') if ctrl => self.toggle_hidden(now),
             KeyCode::Char('t') if ctrl => self.toggle_tools(now),
@@ -244,7 +246,6 @@ impl Palette {
             KeyCode::Char('n') if ctrl => self.move_selection(Direction::Down),
             KeyCode::Up => self.move_selection(Direction::Up),
             KeyCode::Down => self.move_selection(Direction::Down),
-            KeyCode::Right => self.open_reading(),
             KeyCode::Tab | KeyCode::Enter => {
                 let chosen = self.completion.selected().map(|row| &self.completions[row]);
                 match chosen {
@@ -253,17 +254,13 @@ impl Palette {
                     None => self.open_resuming(),
                 }
             }
-            KeyCode::Esc if self.query.is_empty() => return Step::Quit,
+            KeyCode::Esc if self.query.text().is_empty() => return Step::Quit,
             KeyCode::Esc => self.set_query(String::new()),
-            KeyCode::Backspace => {
-                let mut query = self.query.clone();
-                query.pop();
-                self.set_query(query);
+            _ => {
+                if self.query.handle(key) {
+                    self.reapply();
+                }
             }
-            KeyCode::Char(c) if (key.modifiers - KeyModifiers::SHIFT).is_empty() => {
-                self.set_query(format!("{}{c}", self.query));
-            }
-            _ => {}
         }
         Step::Continue
     }
@@ -375,7 +372,7 @@ impl Palette {
             .or_else(|| self.found.len().checked_sub(1).map(|last| row.min(last)));
         self.selection = ListState::default().with_offset(offset);
         self.select(row);
-        self.completions = self.catalog.completions(&self.query);
+        self.completions = self.catalog.completions(self.query.text());
         let kept = self
             .completions
             .iter()
@@ -384,9 +381,10 @@ impl Palette {
         self.completion = ListState::default().with_selected(kept.or(first));
     }
 
+    /// Replaces the query with `query`, the cursor at its end.
     fn set_query(&mut self, query: String) {
-        if query != self.query {
-            self.query = query;
+        if query != self.query.text() {
+            self.query.set(&query);
             self.reapply();
         }
     }
@@ -404,7 +402,7 @@ impl Palette {
     /// ways to finish it, as after the query or the settings change.
     fn reapply(&mut self) {
         self.search(0);
-        self.completions = self.catalog.completions(&self.query);
+        self.completions = self.catalog.completions(self.query.text());
         let first = (!self.completions.is_empty()).then_some(0);
         self.completion = ListState::default().with_selected(first);
     }
@@ -415,7 +413,7 @@ impl Palette {
         let Some(token) = &self.launch_token else {
             return;
         };
-        let query = match self.query.trim_end() {
+        let query = match self.query.text().trim_end() {
             "" => format!("{token} "),
             typed => format!("{typed} {token} "),
         };
@@ -426,12 +424,13 @@ impl Palette {
     /// list; nothing when the query already ends in a bare `@`, so a second
     /// `Tab` over an empty list types no second one.
     fn open_locations(&mut self) {
-        if self.query.split_whitespace().next_back() == Some("@") {
+        let typed = self.query.text();
+        if typed.split_whitespace().next_back() == Some("@") {
             return;
         }
-        let query = match self.query.is_empty() || self.query.ends_with(char::is_whitespace) {
-            true => format!("{}@", self.query),
-            false => format!("{} @", self.query),
+        let query = match typed.is_empty() || typed.ends_with(char::is_whitespace) {
+            true => format!("{typed}@"),
+            false => format!("{typed} @"),
         };
         self.set_query(query);
     }
@@ -501,7 +500,10 @@ impl Palette {
 
     /// Searches the catalog for the query, leaving the selection to the caller.
     fn find(&mut self) {
-        self.parsed = self.catalog.parse(&self.query).including_tools(self.tools);
+        self.parsed = self
+            .catalog
+            .parse(self.query.text())
+            .including_tools(self.tools);
         match self.catalog.search(&self.parsed) {
             Ok(found) => {
                 self.found = found.sessions;

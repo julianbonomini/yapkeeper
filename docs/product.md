@@ -41,7 +41,7 @@ The prototype settled the interface; [interface.md](interface.md) records the de
 - Distinguishing similar sessions: title, location (`project › worktree` or path) with a kind icon, age, and an `orphaned` or `unavailable` label on the row; provider, message count, PRs, and full directory in the preview.
 - Recognizing a session: the provider recap when present, then matching passages while searching, then the opening prompt and latest exchange.
 - Hidden, orphaned, and unavailable sessions: found with `is:hidden`, `is:orphaned`, and `is:unavailable`. Orphans sort after live sessions by default and say so in the row and preview.
-- Narrow terminals: the preview drops below 80 columns and `→` opens the conversation; below 48×12 the palette shows a "terminal too small" message. Not yet reviewed on real data.
+- Narrow terminals: the preview drops below 80 columns and `Ctrl+O` opens the conversation; below 48×12 the palette shows a "terminal too small" message. Not yet reviewed on real data.
 
 The list and preview should occupy stable space. Use flat separators and avoid nested borders or repeated status markers. Keyboard navigation, terminal restoration, width-aware text handling, and a plain CLI mode remain implementation requirements.
 

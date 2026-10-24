@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,7 +20,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 use yapkeeper::palette::{Colour, Palette, Restore, Step};
-use yapkeeper::{Catalog, DataDir, Roots, State, hide};
+use yapkeeper::{Catalog, DataDir, ResumeCommand, Roots, State, hide};
 
 #[cfg(unix)]
 use support::Locked;
@@ -1520,7 +1522,7 @@ fn right_opens_the_conversation_and_esc_or_left_returns_unchanged() {
 }
 
 #[test]
-fn printable_keys_and_enter_leave_the_query_alone_while_reading() {
+fn printable_keys_leave_the_query_alone_while_reading() {
     let histories = Histories::three();
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     let palette_frame = frame(&mut palette, 80, 24);
@@ -1528,7 +1530,6 @@ fn printable_keys_and_enter_leave_the_query_alone_while_reading() {
     press(&mut palette, KeyCode::Right);
     let reading = frame(&mut palette, 80, 24);
     keys(&mut palette, "xyz");
-    assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
     assert_eq!(frame(&mut palette, 80, 24), reading);
     press(&mut palette, KeyCode::Esc);
     assert_eq!(frame(&mut palette, 80, 24), palette_frame);
@@ -2308,8 +2309,6 @@ fn preferences_from_before_settings_keep_their_hides_and_take_settings() {
 #[cfg(unix)]
 #[test]
 fn a_setting_that_cannot_be_saved_says_so_and_stays_as_it_was() {
-    use std::os::unix::fs::PermissionsExt;
-
     let histories = Histories::three();
     let catalog = histories.catalog();
     let dir = histories.data().prefs().parent().unwrap().to_path_buf();
@@ -2372,5 +2371,439 @@ fn settings_give_way_in_narrow_and_short_terminals() {
             .iter()
             .any(|row| row.trim() == "terminal too small"),
         "{too_small:#?}"
+    );
+}
+
+/// A directory holding an executable stand-in for each of `programs`, for
+/// the palette to find them on.
+fn bin_with(programs: &[&str]) -> TempDir {
+    let bin = tempfile::tempdir().unwrap();
+    for program in programs {
+        let path = bin.path().join(program);
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// The palette over `histories`, finding providers only in `bin`,
+/// launched from `launch_dir`.
+fn finding_in(histories: &Histories, bin: &Path, launch_dir: &Path) -> Palette {
+    Palette::new(
+        catalog_finding_in(histories, bin),
+        Colour::Accent,
+        launch_dir,
+    )
+}
+
+/// The catalog over `histories`, finding providers only in `bin`.
+fn catalog_finding_in(histories: &Histories, bin: &Path) -> Catalog {
+    histories
+        .catalog()
+        .finding_programs_in(bin.as_os_str().to_owned())
+}
+
+/// What the dialog's line labelled `label` says after it, or `None` when
+/// no line starts with that label.
+fn field(frame: &[String], label: &str) -> Option<String> {
+    frame.iter().find_map(|row| {
+        let inner = row.trim_start_matches('│').trim_end_matches('│');
+        let rest = inner.strip_prefix(&format!(" {label} "))?;
+        Some(rest.trim().to_string())
+    })
+}
+
+#[test]
+fn enter_shows_the_claude_command_and_directory_and_esc_goes_back() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude", "codex"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    press(&mut palette, KeyCode::Down);
+    let before = frame(&mut palette, 120, 40);
+
+    assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
+    let dialog = frame(&mut palette, 120, 40);
+    assert!(
+        dialog[1].starts_with("│ Resume \"Retry the billing job\""),
+        "{dialog:#?}"
+    );
+    assert_eq!(
+        field(&dialog, "directory").as_deref(),
+        Some("/usr"),
+        "{dialog:#?}"
+    );
+    assert_eq!(
+        field(&dialog, "command"),
+        Some(format!("claude --resume {CLAUDE_RETRY}")),
+        "{dialog:#?}"
+    );
+
+    assert_eq!(press(&mut palette, KeyCode::Esc), Step::Continue);
+    assert_eq!(frame(&mut palette, 120, 40), before);
+}
+
+#[test]
+fn enter_shows_the_codex_command_and_directory() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude", "codex"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    press(&mut palette, KeyCode::Enter);
+    let dialog = frame(&mut palette, 120, 40);
+    assert_eq!(
+        field(&dialog, "directory").as_deref(),
+        Some("/usr/bin"),
+        "{dialog:#?}"
+    );
+    assert_eq!(
+        field(&dialog, "command"),
+        Some(format!("codex resume {CODEX} -C /usr/bin")),
+        "{dialog:#?}"
+    );
+}
+
+#[test]
+fn a_second_enter_gives_the_command_to_start() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude", "codex"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Enter);
+    assert_eq!(
+        press(&mut palette, KeyCode::Enter),
+        Step::Resume(ResumeCommand {
+            program: "claude".to_string(),
+            args: vec!["--resume".to_string(), CLAUDE_RETRY.to_string()],
+            cwd: PathBuf::from("/usr"),
+        })
+    );
+}
+
+#[test]
+fn enter_while_reading_opens_the_dialog_and_esc_steps_back() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude", "codex"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    press(&mut palette, KeyCode::Down);
+    let palette_frame = frame(&mut palette, 80, 24);
+    press(&mut palette, KeyCode::Right);
+    let reading = frame(&mut palette, 80, 24);
+
+    assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
+    let dialog = frame(&mut palette, 80, 24);
+    assert!(
+        dialog[1].starts_with("│ Resume \"Retry the billing job\""),
+        "{dialog:#?}"
+    );
+    assert_eq!(field(&dialog, "directory").as_deref(), Some("/usr"));
+
+    press(&mut palette, KeyCode::Esc);
+    assert_eq!(frame(&mut palette, 80, 24), reading);
+    press(&mut palette, KeyCode::Esc);
+    assert_eq!(frame(&mut palette, 80, 24), palette_frame);
+
+    press(&mut palette, KeyCode::Enter);
+    assert_eq!(ctrl(&mut palette, 'c'), Step::Quit);
+}
+
+/// The footer of a frame `height` rows tall: the row above the bottom border.
+fn footer(frame: &[String]) -> &str {
+    &frame[frame.len() - 2]
+}
+
+#[test]
+fn an_orphaned_claude_session_resumes_in_the_launch_directory_only_after_c() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude", "codex"]);
+    let launch = live_dir();
+    let launched = launch.path().display().to_string();
+    let mut palette = finding_in(&histories, bin.path(), launch.path());
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Enter);
+
+    let dialog = frame(&mut palette, 240, 40);
+    let orphaned = field(&dialog, "orphaned").unwrap_or_else(|| panic!("{dialog:#?}"));
+    assert!(orphaned.contains("The folder is gone"), "{orphaned}");
+    assert!(
+        orphaned.contains(&format!("c resumes in {launched} instead")),
+        "{orphaned}"
+    );
+    assert!(footer(&dialog).contains("c here"), "{dialog:#?}");
+    assert!(!footer(&dialog).contains("↵ resume"), "{dialog:#?}");
+    assert_eq!(field(&dialog, "warning"), None, "{dialog:#?}");
+    assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
+
+    press(&mut palette, KeyCode::Char('c'));
+    let elsewhere = frame(&mut palette, 240, 40);
+    assert_eq!(
+        field(&elsewhere, "directory"),
+        Some(format!("{launched} (launch directory)")),
+        "{elsewhere:#?}"
+    );
+    let warning = field(&elsewhere, "warning").unwrap_or_else(|| panic!("{elsewhere:#?}"));
+    assert!(warning.contains("may not find this one"), "{warning}");
+    assert!(footer(&elsewhere).contains("↵ resume"), "{elsewhere:#?}");
+    assert!(!footer(&elsewhere).contains("c here"), "{elsewhere:#?}");
+
+    press(&mut palette, KeyCode::Char('x'));
+    assert_eq!(frame(&mut palette, 240, 40), elsewhere);
+    assert_eq!(
+        press(&mut palette, KeyCode::Enter),
+        Step::Resume(ResumeCommand {
+            program: "claude".to_string(),
+            args: vec!["--resume".to_string(), CLAUDE_GONE.to_string()],
+            cwd: launch.path().to_path_buf(),
+        })
+    );
+}
+
+#[test]
+fn an_orphaned_codex_session_resumes_elsewhere_without_a_warning() {
+    let histories = Histories::new();
+    histories.codex(CODEX, "/synthetic/gone", "Tidy the lint config");
+    let bin = bin_with(&["claude", "codex"]);
+    let launch = live_dir();
+    let launched = launch.path().display().to_string();
+    let mut palette = finding_in(&histories, bin.path(), launch.path());
+    press(&mut palette, KeyCode::Enter);
+    press(&mut palette, KeyCode::Char('c'));
+
+    let dialog = frame(&mut palette, 240, 40);
+    assert_eq!(field(&dialog, "warning"), None, "{dialog:#?}");
+    assert_eq!(
+        press(&mut palette, KeyCode::Enter),
+        Step::Resume(ResumeCommand {
+            program: "codex".to_string(),
+            args: vec![
+                "resume".to_string(),
+                CODEX.to_string(),
+                "-C".to_string(),
+                launched,
+            ],
+            cwd: launch.path().to_path_buf(),
+        })
+    );
+}
+
+#[test]
+fn resuming_elsewhere_says_when_the_launch_directory_is_gone_too() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude", "codex"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/synthetic/also-gone"));
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Enter);
+    press(&mut palette, KeyCode::Char('c'));
+
+    let dialog = frame(&mut palette, 120, 40);
+    assert!(
+        dialog.iter().any(
+            |row| row.contains("orphaned") && row.contains("The launch directory is gone too.")
+        ),
+        "{dialog:#?}"
+    );
+    assert!(!footer(&dialog).contains("↵ resume"), "{dialog:#?}");
+    assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
+}
+
+#[cfg(unix)]
+#[test]
+fn r_checks_an_unavailable_folder_again_and_updates_the_dialog() {
+    let live = live_dir();
+    let locked = live.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    let histories = Histories::new();
+    histories.claude(CLAUDE_RETRY, locked.to_str().unwrap(), "Locked work");
+    let bin = bin_with(&["claude", "codex"]);
+    let lock = Locked::new(&locked);
+    // Root reads the folder anyway, so it is never unavailable.
+    if !lock.denies_access() {
+        return;
+    }
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    press(&mut palette, KeyCode::Enter);
+
+    let dialog = frame(&mut palette, 120, 40);
+    let unavailable = field(&dialog, "unavailable").unwrap_or_else(|| panic!("{dialog:#?}"));
+    assert!(unavailable.contains("can't be inspected"), "{unavailable}");
+    assert!(footer(&dialog).contains("c here"), "{dialog:#?}");
+    assert!(footer(&dialog).contains("r check again"), "{dialog:#?}");
+    assert!(!footer(&dialog).contains("↵ resume"), "{dialog:#?}");
+    assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
+
+    press(&mut palette, KeyCode::Char('r'));
+    let checked = frame(&mut palette, 120, 40);
+    assert!(
+        checked
+            .iter()
+            .any(|row| row.contains("Checked again: still can't inspect it.")),
+        "{checked:#?}"
+    );
+
+    drop(lock);
+    press(&mut palette, KeyCode::Char('r'));
+    let available = frame(&mut palette, 120, 40);
+    assert_eq!(field(&available, "unavailable"), None, "{available:#?}");
+    assert!(
+        !available.iter().any(|row| row.contains("Checked again")),
+        "{available:#?}"
+    );
+    assert!(
+        !footer(&available).contains("r check again"),
+        "{available:#?}"
+    );
+    assert!(footer(&available).contains("↵ resume"), "{available:#?}");
+    assert_eq!(
+        press(&mut palette, KeyCode::Enter),
+        Step::Resume(ResumeCommand {
+            program: "claude".to_string(),
+            args: vec!["--resume".to_string(), CLAUDE_RETRY.to_string()],
+            cwd: locked,
+        })
+    );
+}
+
+#[test]
+fn a_running_session_shows_a_warning_and_still_resumes() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude", "codex"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Enter);
+    let dialog = frame(&mut palette, 120, 40);
+    assert_eq!(field(&dialog, "running"), None, "{dialog:#?}");
+
+    let sessions = histories.roots().claude.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let record = json!({ "pid": 4242, "sessionId": CLAUDE_RETRY, "cwd": "/usr", "status": "idle" });
+    fs::write(sessions.join("4242.json"), record.to_string()).unwrap();
+    press(&mut palette, KeyCode::Esc);
+    press(&mut palette, KeyCode::Enter);
+    let dialog = frame(&mut palette, 120, 40);
+    let running = field(&dialog, "running").unwrap_or_else(|| panic!("{dialog:#?}"));
+    assert!(running.contains("lists this session as open"), "{running}");
+    assert!(footer(&dialog).contains("↵ resume"), "{dialog:#?}");
+    assert!(matches!(
+        press(&mut palette, KeyCode::Enter),
+        Step::Resume(_)
+    ));
+}
+
+/// The dialog on the Claude Code `/usr` session, finding providers in `bin`.
+fn claude_dialog(histories: &Histories, bin: &Path) -> Palette {
+    let mut palette = finding_in(histories, bin, Path::new("/"));
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Enter);
+    palette
+}
+
+#[test]
+fn a_provider_not_on_path_says_so_and_cannot_resume() {
+    let histories = Histories::three();
+    let empty = bin_with(&[]);
+    let mut palette = claude_dialog(&histories, empty.path());
+    let dialog = frame(&mut palette, 120, 40);
+    assert_eq!(
+        field(&dialog, "not found").as_deref(),
+        Some("claude isn't on PATH, so it can't start."),
+        "{dialog:#?}"
+    );
+    assert!(!footer(&dialog).contains("↵ resume"), "{dialog:#?}");
+    assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
+
+    let installed = bin_with(&["claude"]);
+    let mut palette = claude_dialog(&histories, installed.path());
+    assert_eq!(field(&frame(&mut palette, 120, 40), "not found"), None);
+    assert!(matches!(
+        press(&mut palette, KeyCode::Enter),
+        Step::Resume(_)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_provider_that_is_not_executable_is_not_found() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude"]);
+    fs::set_permissions(bin.path().join("claude"), fs::Permissions::from_mode(0o644)).unwrap();
+    let mut palette = claude_dialog(&histories, bin.path());
+    let dialog = frame(&mut palette, 120, 40);
+    assert!(field(&dialog, "not found").is_some(), "{dialog:#?}");
+    assert_eq!(press(&mut palette, KeyCode::Enter), Step::Continue);
+}
+
+#[test]
+fn the_dialog_keeps_one_border_wraps_long_paths_and_has_no_colour_in_mono() {
+    let histories = Histories::three();
+    let bin = bin_with(&["claude", "codex"]);
+    let mut palette = claude_dialog(&histories, bin.path());
+    for (width, height) in [(120, 40), (80, 24), (60, 20)] {
+        let dialog = frame(&mut palette, width, height);
+        let corners: usize = dialog.iter().map(|row| row.matches('╭').count()).sum();
+        assert_eq!(corners, 1, "{dialog:#?}");
+        assert_eq!(field(&dialog, "directory").as_deref(), Some("/usr"));
+    }
+    let too_small = frame(&mut palette, 47, 11);
+    let shown: Vec<&str> = too_small
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty())
+        .collect();
+    assert_eq!(shown, ["terminal too small", "need at least 48×12"]);
+
+    let long = format!("/synthetic/{}end", "abcdefghij/".repeat(13));
+    let histories = Histories::new();
+    histories.claude(CLAUDE_GONE, &long, "Release notes draft");
+    let mut palette = dialog_on_first(&histories, bin.path(), Colour::Accent);
+    let dialog = frame(&mut palette, 60, 20);
+    let start = dialog
+        .iter()
+        .position(|row| row.starts_with("│ directory "))
+        .unwrap_or_else(|| panic!("{dialog:#?}"));
+    let pieces: Vec<&str> = dialog[start..]
+        .iter()
+        .enumerate()
+        .take_while(|(n, row)| *n == 0 || row.starts_with(&format!("│{}", " ".repeat(14))))
+        .map(|(_, row)| {
+            row.trim_matches('│')
+                .trim()
+                .trim_start_matches("directory")
+                .trim()
+        })
+        .collect();
+    assert!(pieces.len() > 1, "{dialog:#?}");
+    assert_eq!(pieces.concat(), long, "{dialog:#?}");
+
+    let mut palette = dialog_on_first(&histories, bin.path(), Colour::Mono);
+    let buffer = draw(&mut palette, 80, 24);
+    for cell in buffer.content() {
+        assert_eq!(cell.fg, Color::Reset, "{cell:?}");
+        assert_eq!(cell.bg, Color::Reset, "{cell:?}");
+    }
+}
+
+/// The dialog on the first session listed, drawn in `colour`, finding
+/// providers in `bin`.
+fn dialog_on_first(histories: &Histories, bin: &Path, colour: Colour) -> Palette {
+    let mut palette = Palette::new(catalog_finding_in(histories, bin), colour, Path::new("/"));
+    press(&mut palette, KeyCode::Enter);
+    palette
+}
+
+#[test]
+fn the_footer_names_enter_for_resume_under_the_results_and_while_reading() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let results = frame(&mut palette, 120, 40);
+    assert!(
+        footer(&results).contains("↑↓ move  ↵ resume"),
+        "{results:#?}"
+    );
+    press(&mut palette, KeyCode::Right);
+    let reading = frame(&mut palette, 120, 40);
+    assert!(
+        footer(&reading).contains("↑↓ scroll  ↵ resume"),
+        "{reading:#?}"
     );
 }

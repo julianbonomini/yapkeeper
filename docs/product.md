@@ -47,7 +47,7 @@ The list and preview should occupy stable space. Use flat separators and avoid n
 
 ## Implementation and reuse
 
-The selected stack is Rust, Ratatui, and SQLite. The README records the measurement-based rationale; the disposable benchmark code and reports have been removed. Actual TUI startup and behavior still need validation in the prototype.
+The selected stack is Rust, Ratatui, and SQLite. The README records the measurement-based rationale; the disposable benchmark code and reports have been removed. The palette's startup and behavior still need validation on real histories.
 
 Two candidates merit a focused evaluation:
 
@@ -58,12 +58,13 @@ No backend or library reuse decision has been made. Verify current licenses and 
 
 ## Resume questions
 
-Resolve these before making resume executable:
+The resume dialog answers most of these; [interface.md](interface.md#resume-dialog) records how:
 
-- What recovery action should be offered for an orphaned session? Ordinary resume must not silently use another directory.
-- How should a selected session that is already active be handled?
-- What metadata is authoritative when a source contains several working directories or metadata records?
-- How should unavailable providers and unreadable directories appear?
+- An orphaned session resumes in the launch directory only after an explicit `c`. Ordinary resume never uses another directory.
+- A session Claude Code lists as running gets a warning, and resuming it is still allowed.
+- A provider missing from `PATH` disables resume with a `not found` row; an unavailable directory offers `r` to check again.
+
+Still open: what metadata is authoritative when a source contains several working directories or metadata records?
 
 Construct provider arguments as an argument array with an explicit process working directory. Do not execute shell commands taken from transcript text or generated display strings.
 
@@ -71,7 +72,7 @@ Construct provider arguments as an argument array with an explicit process worki
 
 Goals and their Tickets are written directly with `vago goal new` and `vago ticket add`.
 
-The UI prototype is done (see [interface.md](interface.md)). Next work is slicing the implementation goal into tickets. Avoid maintaining a second Wayfinder decision map unless the planning grows beyond what this workspace can track.
+The UI prototype is done (see [interface.md](interface.md)), and the palette is built from it. Avoid maintaining a second Wayfinder decision map unless the planning grows beyond what this workspace can track.
 
 Both workflows use Claude Code with Claude Opus 5.5. Reviews run as fresh agent steps. Terminal UI work must use `tui-design`; use `emil-design-eng` only when its interaction-polish principles help within terminal constraints.
 

@@ -759,6 +759,14 @@ mod tests {
                 cwd: working_dir.to_path_buf(),
             }
         }
+
+        fn is_running(&self, _id: &str) -> bool {
+            false
+        }
+
+        fn resumes_by_directory(&self) -> bool {
+            false
+        }
     }
 
     #[test]

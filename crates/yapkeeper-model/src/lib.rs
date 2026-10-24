@@ -45,6 +45,13 @@ pub trait Adapter {
     fn read(&self, source: &Path, from: u64) -> Reading;
     /// The exact process that resumes session `id` in `working_dir`.
     fn resume(&self, id: &str, working_dir: &Path) -> ResumeCommand;
+    /// Whether the provider's own metadata says session `id` is open right
+    /// now. Reads at call time and keeps nothing. Never fails: metadata that
+    /// is missing or can't be read means not running.
+    fn is_running(&self, id: &str) -> bool;
+    /// Whether the provider finds a session by the directory it is started
+    /// in, so resuming it from another directory may not find it.
+    fn resumes_by_directory(&self) -> bool;
 }
 
 /// What one call to `Adapter::read` found.

@@ -28,3 +28,4 @@ A second, in-memory path in the model (`scan`) that read every file from 0 and a
 - Any change to a fold rule bumps `FOLD_VERSION`, and the next run then rereads every file once.
 - Any change to what `read` gives from the same bytes bumps that adapter's parser version, and the next run rereads that provider's files.
 - Any change in a provider's files assembles that provider's sessions again from all of its digests, at one small row per file.
+- Adapters may also answer questions from provider metadata at call time (`is_running`) or about the provider's fixed behaviour (`resumes_by_directory`). They still keep no state.

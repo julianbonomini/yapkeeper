@@ -3,8 +3,9 @@
 //! each one is rooted and where Yapkeeper keeps its own files, keeps the
 //! index of every session up to date, finds sessions by what was said and
 //! by the query language's filters, reads each session's location from
-//! the disk when it is listed, and keeps the user's hides and settings apart
-//! from the index. A `Catalog` loads all of that once so it can be searched
+//! the disk when it is listed, keeps the user's hides and settings apart
+//! from the index, and says what resuming a session would do now, and
+//! starts it. A `Catalog` loads all of that once so it can be searched
 //! many times, by the settings, and record hides and settings, as the
 //! `palette` does while the person types;
 //! `line` holds how a session reads as one line of terminal text, for the
@@ -18,12 +19,14 @@ mod location;
 pub mod palette;
 mod prefs;
 mod query;
+mod resume;
 mod settings;
 
 use prefs::Choice;
 
 use std::collections::HashSet;
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -36,6 +39,7 @@ pub use location::*;
 pub use query::{
     Completion, LocationRow, LocationRowKind, Query, State, Token, TokenKind, location_token,
 };
+pub use resume::{Caution, ResumeDir, ResumePlan, launch};
 pub use settings::*;
 pub use yapkeeper_model::*;
 
@@ -269,8 +273,8 @@ fn listing(catalog: &Catalog, query: &Query) -> Result<Listing, DataError> {
 
 /// Every indexed session as of `Catalog::open`, with its location and
 /// whether it is hidden, ready to be searched many times without
-/// refreshing the index or rereading the disk, and to record hides and
-/// settings.
+/// refreshing the index or rereading the disk, to record hides and
+/// settings, and to say what resuming one would do.
 pub struct Catalog {
     index: index::Index,
     /// Every session in the index, in no particular order; shared with what
@@ -281,6 +285,10 @@ pub struct Catalog {
     /// Where the index and the preferences live.
     data: DataDir,
     providers: Vec<&'static str>,
+    /// One per provider, to say how each of its sessions resumes.
+    adapters: Vec<Box<dyn Adapter>>,
+    /// Where `resume` looks for providers' programs.
+    path: OsString,
     malformed_lines: usize,
     searched: Vec<PathBuf>,
     files_read: usize,
@@ -315,6 +323,8 @@ impl Catalog {
             settings: prefs.settings,
             data: data.clone(),
             providers: roots.providers(),
+            adapters: adapters(roots).into(),
+            path: std::env::var_os("PATH").unwrap_or_default(),
             malformed_lines: refreshed.malformed_lines,
             searched: refreshed.searched,
             files_read: refreshed.files_read,
@@ -412,6 +422,23 @@ impl Catalog {
         prefs::record_settings(&self.data.prefs(), &settings)?;
         self.settings = settings;
         Ok(())
+    }
+
+    /// What resuming `session` in `dir` would do, read from the disk, the
+    /// provider's metadata and this catalog's `PATH` now. Never fails.
+    pub fn resume(&self, session: &Session, dir: ResumeDir) -> ResumePlan {
+        let adapter = self
+            .adapters
+            .iter()
+            .find(|adapter| adapter.provider() == session.provider)
+            .expect("every catalog session comes from one of its adapters");
+        resume::plan(adapter.as_ref(), session, dir, &self.path)
+    }
+
+    /// This catalog, finding providers' programs on `path` rather than
+    /// the `PATH` this process had when it opened.
+    pub fn finding_programs_in(self, path: OsString) -> Catalog {
+        Catalog { path, ..self }
     }
 
     /// Every session in the index, whether or not a query keeps it.

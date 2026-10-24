@@ -17,11 +17,16 @@ use ratatui::crossterm::terminal::{
 };
 
 use super::{Palette, Step};
+use crate::ResumeCommand;
 
 /// Takes over the terminal (raw mode, alternate screen), runs `palette`
 /// until it quits, and restores the terminal on return, on error and on
-/// panic. Fails when the terminal can't be set up, drawn to or read from.
-pub fn run(mut palette: Palette) -> io::Result<()> {
+/// panic, and returns the command the person confirmed, if any. By the
+/// time it returns, the palette and its catalog are dropped, raw mode is
+/// off, the alternate screen is gone, the cursor shows and the previous
+/// panic hook is back. Fails when the terminal can't be set up, drawn to
+/// or read from.
+pub fn run(mut palette: Palette) -> io::Result<Option<ResumeCommand>> {
     enable_raw_mode()?;
     // Held before anything else changes, so every later failure restores.
     let _restore = Restore::new(stdout());
@@ -43,7 +48,9 @@ pub fn run(mut palette: Palette) -> io::Result<()> {
     result
 }
 
-fn event_loop(palette: &mut Palette) -> io::Result<()> {
+/// Draws and reads keys until the person quits, giving `None`, or
+/// confirms resuming, giving the command.
+fn event_loop(palette: &mut Palette) -> io::Result<Option<ResumeCommand>> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     loop {
         terminal.draw(|frame| palette.render(frame, Instant::now()))?;
@@ -54,10 +61,12 @@ fn event_loop(palette: &mut Palette) -> io::Result<()> {
             continue;
         }
         // A resize, or any other event, just redraws.
-        if let Event::Key(key) = event::read()?
-            && palette.handle(key, Instant::now()) == Step::Quit
-        {
-            return Ok(());
+        if let Event::Key(key) = event::read()? {
+            match palette.handle(key, Instant::now()) {
+                Step::Continue => {}
+                Step::Quit => return Ok(None),
+                Step::Resume(command) => return Ok(Some(command)),
+            }
         }
     }
 }

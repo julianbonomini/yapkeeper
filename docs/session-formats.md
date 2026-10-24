@@ -11,10 +11,10 @@ Observed read-only on 2026-10-23. These are structural findings from local sampl
 - `parentUuid` also links ordinary messages; it does not prove that a transcript belongs to a subagent.
 - `message.content` can be a string or an array of blocks. Observed blocks include `text`, `thinking`, `tool_use`, and `tool_result`.
 - Title records include `custom-title` with `customTitle`, and `ai-title` with `aiTitle`. A `system` record with `subtype: away_summary` holds a recap in `content`; Yapkeeper keeps the latest. `pr-link` records carry `prNumber`, `prUrl`, and `prRepository`. Administrative and API records coexist with conversation records.
-- Optional running-session metadata exists under `~/.claude/sessions/*.json`; it is not the historical source.
+- Optional running-session metadata exists under `~/.claude/sessions/<pid>.json`; it is not the historical source. Each file carries `pid`, `sessionId`, `cwd` and `status`. Yapkeeper reads only the top-level `sessionId`, at most 64 KiB per regular `.json` file, to warn that a session is running. A listed pid isn't checked for liveness, so a stale file only adds a warning.
 - No `sessions-index.json` was found locally. Discovery must work without one.
 
-Installed CLI help supports `claude --resume <session-id>`. Launch it with the selected working directory as the process `cwd`. `--fork-session` creates a separate session and is not ordinary resume.
+Installed CLI help supports `claude --resume <session-id>`. Launch it with the selected working directory as the process `cwd`. Claude Code looks sessions up by project directory, so resuming one from another directory may not find it. `--fork-session` creates a separate session and is not ordinary resume.
 
 ## Codex
 

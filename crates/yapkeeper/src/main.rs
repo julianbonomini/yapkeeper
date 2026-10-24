@@ -129,7 +129,8 @@ fn main() -> ExitCode {
 }
 
 /// Opens the palette over the index, brought up to date first, until the
-/// person quits it.
+/// person quits it or confirms resuming a session, which then replaces
+/// this process.
 fn open_palette() -> ExitCode {
     let (roots, data) = match environment() {
         Ok(environment) => environment,
@@ -139,10 +140,20 @@ fn open_palette() -> ExitCode {
         Ok(catalog) => catalog,
         Err(error) => return data_failure(error),
     };
-    // A launch folder that is gone has no location to offer `Ctrl+L`.
+    // A launch directory that is gone has no location to offer `Ctrl+L`.
     let launch_dir = std::env::current_dir().unwrap_or_default();
     match palette::run(Palette::new(catalog, Colour::from_env(), &launch_dir)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(None) => ExitCode::SUCCESS,
+        // The terminal is restored by now; nothing else may run before this.
+        Ok(Some(command)) => {
+            let error = yapkeeper::launch(&command);
+            eprintln!(
+                "yapkeeper: can't start {} in {}: {error}",
+                command.program,
+                command.cwd.display()
+            );
+            ExitCode::from(EXIT_FAILURE)
+        }
         Err(error) => {
             eprintln!("yapkeeper: {error}");
             ExitCode::from(EXIT_FAILURE)

@@ -213,3 +213,24 @@ fn a_subagent_transcript_names_its_session_as_its_parent() {
         })
     );
 }
+
+#[test]
+fn a_session_is_running_only_while_a_sessions_file_names_it() {
+    let config = tempfile::tempdir().unwrap();
+    let claude = ClaudeCode::at(config.path().to_path_buf());
+    assert!(!claude.is_running(LAUNCH), "no sessions folder");
+
+    let sessions = config.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    let record = |id: &str| {
+        format!(r#"{{"pid":4242,"sessionId":"{id}","cwd":"/synthetic","status":"idle"}}"#)
+    };
+    fs::write(sessions.join("4242.json"), record(BUILD)).unwrap();
+    fs::write(sessions.join("4243.json"), "{not json").unwrap();
+    fs::write(sessions.join("4244.txt"), record(LAUNCH)).unwrap();
+    assert!(!claude.is_running(LAUNCH));
+    assert!(claude.is_running(BUILD));
+
+    fs::write(sessions.join("4245.json"), record(LAUNCH)).unwrap();
+    assert!(claude.is_running(LAUNCH));
+}

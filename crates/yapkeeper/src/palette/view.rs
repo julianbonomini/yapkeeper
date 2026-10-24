@@ -2,10 +2,12 @@
 //! draws, from the query line, its filters in the accent, down to the
 //! completions or the results and the footer, plus the too-small state,
 //! and how each accent and icon set looks. The preview's lines, the whole
-//! conversation's and the settings screen's are their own modules'.
+//! conversation's, the settings screen's and the resume dialog's are their
+//! own modules'.
 
 mod preview;
 mod reading;
+mod resuming;
 mod settings;
 
 use std::path::Path;
@@ -164,7 +166,7 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     // Reading, a title and where the session ran take the query's place.
-    let reading = palette.reading.is_some();
+    let reading = palette.reading.is_some() && palette.resuming.is_none();
     let [top, rule, body, footer] = Layout::vertical([
         Constraint::Length(if reading { 2 } else { 1 }),
         Constraint::Length(1),
@@ -177,6 +179,10 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
         rule,
     );
     footer_line(palette, &theme, frame, footer);
+    if palette.resuming.is_some() {
+        resuming::render(palette, &theme, frame, top, body);
+        return;
+    }
     if palette.settings.is_some() {
         settings::render(palette, &theme, frame, top, body);
         return;
@@ -567,22 +573,34 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
         palette.reading.is_some(),
         palette.completions.is_empty(),
     );
-    let hints = match open {
-        (true, _, _) => vec![
+    let hints = match (&palette.resuming, open) {
+        (Some(resuming), _) => vec![
+            resuming.plan.can_start().then_some(("↵", "resume")),
+            resuming.plan.offers_elsewhere().then_some(("c", "here")),
+            resuming
+                .plan
+                .offers_recheck()
+                .then_some(("r", "check again")),
+            Some(("Esc", "back")),
+            Some(("^C", "quit")),
+        ],
+        (None, (true, _, _)) => vec![
             Some(("↑↓", "move")),
             Some(("←→", "change")),
             Some(("Esc", "back")),
             Some(("^C", "quit")),
         ],
-        (false, true, _) => vec![
+        (None, (false, true, _)) => vec![
             Some(("↑↓", "scroll")),
+            Some(("↵", "resume")),
             Some(("n N", "match")),
             Some(("PgDn", "page")),
             Some(("Esc", "back")),
             Some(("^C", "quit")),
         ],
-        (false, false, true) => vec![
+        (None, (false, false, true)) => vec![
             Some(("↑↓", "move")),
+            palette.selected().map(|_| ("↵", "resume")),
             Some(("Tab", "locations")),
             Some(("Esc", esc)),
             Some(("^U", "clear")),
@@ -592,7 +610,7 @@ fn footer_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) 
             Some(("^S", "settings")),
             Some(("^C", "quit")),
         ],
-        (false, false, false) => vec![
+        (None, (false, false, false)) => vec![
             Some(("↑↓", "choose")),
             Some(("Tab", "insert")),
             Some(("Esc", esc)),

@@ -44,7 +44,7 @@ A query token that isn't a search word: `@where`, `#provider` or `is:state`, opt
 Tool calls, tool output and subagent transcripts: text that belongs to a session but is not the person and the assistant talking. Searched only on request.
 
 **Adapter**:
-The provider-specific part of Yapkeeper that names the directory a provider's history is under, discovers the history files there, reads it without modifying it by turning each record into facts, and builds the resume command. The shared model folds facts into sessions; the index stores those sessions with each file's messages, and the interface sees only sessions.
+The provider-specific part of Yapkeeper that names the directory a provider's history is under, discovers the history files there, reads it without modifying it by turning each record into facts, builds the resume command, and says whether the provider lists a session as running and whether it finds sessions by directory. The shared model folds facts into sessions; the index stores those sessions with each file's messages, and the interface sees only sessions.
 
 **Index**:
 Yapkeeper's rebuildable copy of every session and its searchable text, in `index.sqlite`. Deleting it loses nothing; the next listing builds it again.
@@ -59,7 +59,13 @@ The preferences set with `Ctrl+S` that change what the palette lists and how it 
 The name shown for a session: the one the user set, else the one the provider generated, else the first prompt the user typed. Injected context never counts as a prompt.
 
 **Palette**:
-The full-screen view `yapkeeper` opens on a terminal: a query line, the matching sessions, and key hints, searched live as the user types.
+The full-screen view `yapkeeper` opens on a terminal: a query line, the matching sessions, a preview of the selected one, and key hints, searched live as the user types.
 
 **Preview**:
 The conversation text displayed for a selected session before resuming it.
+
+**Launch directory**:
+The directory `yapkeeper` was started in. `Ctrl+L` inserts its `@` token, and `c` in the resume dialog resumes there.
+
+**Resume dialog**:
+What `Enter` opens on a session: the exact command and directory resuming would use, any warnings, and why it can't start when it can't.

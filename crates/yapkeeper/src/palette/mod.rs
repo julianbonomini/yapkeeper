@@ -1,12 +1,14 @@
 //! The command palette: a query line searched live as the person types,
 //! the sessions it matches or the ways to finish the filter being typed, a
 //! preview of the selected session and key hints, over a `Catalog` loaded
-//! once; or, in their place, the selected session's whole conversation or
-//! a settings screen. It owns every terminal decision (keys, layout, theme
-//! and the terminal's lifecycle) and reaches the index and the preferences,
-//! settings included, only through the catalog.
+//! once; or, in their place, the selected session's whole conversation, a
+//! settings screen or the resume dialog. It owns every terminal decision
+//! (keys, layout, theme and the terminal's lifecycle) and reaches the
+//! index, the preferences, settings included, and what resuming would do
+//! only through the catalog.
 
 mod reading;
+mod resuming;
 mod settings;
 mod terminal;
 mod view;
@@ -20,8 +22,12 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
 use self::reading::Reading;
+use self::resuming::Resuming;
 use self::settings::SettingsScreen;
-use crate::{Catalog, Completion, LeftOut, Listed, Message, Query, Settings, line, location_token};
+use crate::{
+    Catalog, Completion, LeftOut, Listed, Message, Query, ResumeCommand, Settings, line,
+    location_token,
+};
 
 pub use terminal::{Restore, run};
 
@@ -32,6 +38,8 @@ pub struct Palette {
     colour: Colour,
     /// Shown as `~` at the start of a folder's path.
     home: Option<PathBuf>,
+    /// Where the palette was launched; `c` in the resume dialog resumes here.
+    launch_dir: PathBuf,
     /// The `@` token `Ctrl+L` adds: where the palette was launched.
     launch_token: Option<String>,
     query: String,
@@ -57,6 +65,9 @@ pub struct Palette {
     /// While the settings are open, in place of the query, the results and
     /// the preview, which stay as they were.
     settings: Option<SettingsScreen>,
+    /// While the resume dialog is open, in place of the query, the results
+    /// and the preview, or of the conversation, which stay as they were.
+    resuming: Option<Resuming>,
     /// Why the last search, or the selected session's conversation, failed
     /// to read; cleared by the next search that succeeds. After a failed
     /// search the rows are the last ones that didn't fail.
@@ -85,11 +96,14 @@ enum Confirmation {
 }
 
 /// Whether the palette is still open after a key press.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     Continue,
     /// The person asked to leave; the caller closes the palette.
     Quit,
+    /// The person confirmed resuming; the caller closes the palette,
+    /// restores the terminal, then starts this.
+    Resume(ResumeCommand),
 }
 
 /// `Accent` draws in the accent the settings choose; `Mono` draws no colour
@@ -119,6 +133,7 @@ impl Palette {
             catalog,
             colour,
             home: line::home(),
+            launch_dir: launch_dir.to_path_buf(),
             launch_token: location_token(launch_dir),
             query: String::new(),
             tools: false,
@@ -131,6 +146,7 @@ impl Palette {
             conversation: Vec::new(),
             reading: None,
             settings: None,
+            resuming: None,
             error: None,
             toast: None,
         };
@@ -145,6 +161,18 @@ impl Palette {
             return Step::Continue;
         }
         let ctrl = key.modifiers == KeyModifiers::CONTROL;
+        if let Some(resuming) = &mut self.resuming {
+            match key.code {
+                KeyCode::Char('c') if ctrl => return Step::Quit,
+                KeyCode::Esc => self.resuming = None,
+                _ => {
+                    if let Some(command) = resuming.handle(key, &self.catalog, &self.launch_dir) {
+                        return Step::Resume(command);
+                    }
+                }
+            }
+            return Step::Continue;
+        }
         if let Some(screen) = &mut self.settings {
             match key.code {
                 KeyCode::Char('c') if ctrl => return Step::Quit,
@@ -162,6 +190,7 @@ impl Palette {
             match key.code {
                 KeyCode::Char('c') if ctrl => return Step::Quit,
                 KeyCode::Esc | KeyCode::Left => self.reading = None,
+                KeyCode::Enter => self.open_resuming(),
                 _ => reading.handle(key),
             }
             return Step::Continue;
@@ -183,7 +212,7 @@ impl Palette {
                 match chosen {
                     Some(chosen) => self.set_query(chosen.query.clone()),
                     None if key.code == KeyCode::Tab => self.open_locations(),
-                    None => {}
+                    None => self.open_resuming(),
                 }
             }
             KeyCode::Esc if self.query.is_empty() => return Step::Quit,
@@ -311,6 +340,14 @@ impl Palette {
     fn open_reading(&mut self) {
         if self.completions.is_empty() && self.selected().is_some() {
             self.reading = Some(Reading::new());
+        }
+    }
+
+    /// Opens the resume dialog on the selected session; nothing when no
+    /// session is selected.
+    fn open_resuming(&mut self) {
+        if let Some(listed) = self.selected() {
+            self.resuming = Some(Resuming::open(&self.catalog, &listed.session));
         }
     }
 

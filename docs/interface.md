@@ -119,7 +119,7 @@ Settings change the palette only; `yapkeeper list` and `search` always use these
 | `Enter` | Resume dialog |
 | `→` | Read the whole conversation |
 | `Tab` | Location list |
-| `Ctrl+L` | Insert the launch location |
+| `Ctrl+L` | Insert the launch directory's `@` token |
 | `Ctrl+X` | Hide or unhide the selected session |
 | `Ctrl+T` | Include tool calls in search |
 | `Ctrl+S` | Settings |
@@ -129,13 +129,28 @@ Settings change the palette only; `yapkeeper list` and `search` always use these
 
 The selection stops at the first and last rows and returns to the first row whenever the query changes.
 
-Every printable key goes to the query, so all actions use `Enter`, arrows, `Tab`, or `Ctrl` keys. This is why hide has no undo key in the palette: the toast points to `is:hidden` instead.
+While the query line shows, every printable key goes to the query, so all actions use `Enter`, arrows, `Tab`, or `Ctrl` keys. This is why hide has no undo key in the palette: the toast points to `is:hidden` instead.
+
+The resume dialog has no query line, so it takes letters: `Enter` resumes, `c` resumes in the launch directory instead, `r` checks an unavailable folder again, and `Esc` goes back.
 
 ## Resume dialog
 
-`Enter` on a result opens a dialog with the directory and the exact command, for example `claude --resume <id>` or `codex resume <id> -C <dir>`. A second `Enter` exits the TUI and starts the provider in that directory; the prototype only prints the command.
+`Enter` on a result, or in the conversation, opens the resume dialog in place of the query line, results and preview, inside the palette's one border. Its title line reads `Resume "<title>"` with the provider on the right. Below the rule come `directory`, where the provider would start, and `command`, the exact program and arguments the adapter gives, for example `claude --resume <id>` or `codex resume <id> -C <dir>`. Both wrap and are never cut. An argument a shell would split or read as syntax is shown single-quoted; the command itself never goes through a shell. Below them is one row per state that applies, each with a word label, so it reads the same under `NO_COLOR`:
 
-For an orphaned session the dialog explains that the folder is gone and offers `c` to resume in the launch directory instead. Resume never moves to another directory without that explicit choice. For Claude Code the dialog warns that the session may not be found from another directory, because Claude Code looks sessions up by project directory. For an unavailable folder (one that exists but cannot be inspected) it also offers `r` to check again.
+| Label | When |
+|---|---|
+| `orphaned` | The session's folder is gone, so it can't resume there. While on offer, the row says `c` resumes in the launch directory instead. |
+| `unavailable` | The folder exists but can't be inspected (permissions, or a volume not mounted). The row offers `c` as above, and `r` to check again. |
+| `orphaned` or `unavailable` | After `c`, the launch directory is gone too, or can't be inspected either. |
+| `running` | Claude Code's running-session metadata lists the session as open. Resuming is still allowed. |
+| `warning` | After `c`, for a provider that looks sessions up by directory (Claude Code): it may not find this session from another directory. |
+| `not found` | The provider's program isn't on `PATH`, so it can't start. |
+
+Resume never moves to another directory without `c`. `c` is offered while the session's own folder is orphaned or unavailable, and it is one-way: `Esc` and opening the dialog again start from the recorded folder. `r` checks an unavailable folder again and redraws the dialog; when it is still unavailable, the dialog says `Checked again: still can't inspect it.` The result row keeps its label until the next launch. Directory and command come first, so a short terminal drops state rows from the bottom.
+
+A second `Enter` resumes, unless the program isn't found or the directory can't be used; then the dialog's own rows say why and `Enter` does nothing. Yapkeeper restores the terminal, closes the index, and the provider **replaces** Yapkeeper in the same terminal, started with its arguments as separate words and no shell, in that directory. The provider gets the terminal, signals and exit status directly, and nothing of Yapkeeper is left running. If it can't be started, Yapkeeper says why on stderr and exits 1.
+
+`Esc` closes the dialog and returns to the results or the conversation it opened from, unchanged. `Ctrl+C` quits. The footer shows `↵ resume` only while resuming would start, `c here` and `r check again` only while they are offered, then `Esc back` and `^C quit`. Other keys do nothing.
 
 ## Loading
 

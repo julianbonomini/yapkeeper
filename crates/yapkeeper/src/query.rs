@@ -73,6 +73,7 @@ pub enum State {
     Orphaned,
     Temp,
     Git,
+    Worktree,
     Folder,
     Pr,
     Recap,
@@ -82,10 +83,11 @@ pub enum State {
 
 impl State {
     /// Every state, in the order the interface doc lists them.
-    pub const ALL: [State; 8] = [
+    pub const ALL: [State; 9] = [
         State::Orphaned,
         State::Temp,
         State::Git,
+        State::Worktree,
         State::Folder,
         State::Pr,
         State::Recap,
@@ -99,6 +101,7 @@ impl State {
             State::Orphaned => "orphaned",
             State::Temp => "temp",
             State::Git => "git",
+            State::Worktree => "worktree",
             State::Folder => "folder",
             State::Pr => "pr",
             State::Recap => "recap",
@@ -118,6 +121,7 @@ impl State {
                 location.place,
                 Place::MainCheckout { .. } | Place::Worktree { .. }
             ),
+            State::Worktree => matches!(location.place, Place::Worktree { .. }),
             State::Folder => location.place == Place::Folder,
             State::Pr => !listed.session.linked_prs.is_empty(),
             State::Recap => listed.session.recap.is_some(),
@@ -238,13 +242,14 @@ impl Query {
                 .all(|word| self.excluded_words.iter().any(|mine| word.implies(mine)))
     }
 
-    /// Keeps the sessions every non-word filter and both defaults admit,
+    /// Keeps the sessions every non-word filter and the defaults admit,
     /// then orders them: orphaned last, each group most recent
     /// `last_active` first, ties by provider then id. Temp sessions are
     /// left out unless the query has a non-negated `is:temp`, and hidden
     /// ones unless it has `is:hidden`; returns how many sessions every
     /// filter admits each default left out. The query's settings can turn
-    /// off leaving temp sessions out and listing orphaned ones last.
+    /// off leaving temp sessions out and listing orphaned ones last, and
+    /// can leave orphaned ones out unless the query has `is:orphaned`.
     pub(crate) fn select<L: Borrow<Listed>>(&self, sessions: &mut Vec<L>) -> LeftOut {
         let asked = |state| {
             self.conditions.iter().any(|condition| {
@@ -252,6 +257,7 @@ impl Query {
             })
         };
         let (temp_asked, hidden_asked) = (asked(State::Temp), asked(State::Hidden));
+        let orphaned_asked = asked(State::Orphaned);
         let mut left_out = LeftOut::default();
         sessions.retain(|listed| {
             let listed = listed.borrow();
@@ -261,9 +267,12 @@ impl Query {
                 .all(|condition| condition.filter.admits(listed) != condition.negated);
             let temp = self.settings.hide_temp && !temp_asked && State::Temp.of(listed);
             let hidden = !hidden_asked && State::Hidden.of(listed);
+            let orphaned =
+                self.settings.hide_orphans && !orphaned_asked && State::Orphaned.of(listed);
             left_out.temp += usize::from(admitted && temp);
             left_out.hidden += usize::from(admitted && hidden);
-            admitted && !temp && !hidden
+            left_out.orphaned += usize::from(admitted && orphaned);
+            admitted && !temp && !hidden && !orphaned
         });
         let orphaned = |listed: &Listed| self.settings.orphans_last && State::Orphaned.of(listed);
         sessions.sort_by(|a, b| {

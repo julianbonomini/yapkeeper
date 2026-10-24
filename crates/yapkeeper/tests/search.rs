@@ -648,6 +648,15 @@ fn is_git_finds_checkouts_and_worktrees_and_is_folder_the_rest() {
 }
 
 #[test]
+fn is_worktree_finds_linked_worktrees_and_not_worktree_the_rest() {
+    let histories = places();
+
+    assert_eq!(histories.found("is:worktree"), [WORKTREE]);
+    assert_eq!(sorted(histories.found("not:worktree")), [SCRATCH, MAIN]);
+    assert_eq!(sorted(histories.found("!worktree")), [SCRATCH, MAIN]);
+}
+
+#[test]
 fn is_pr_finds_sessions_with_a_linked_pull_request() {
     let histories = Histories::new();
     histories.claude(A, &[prompt("Open the pull request"), pr_link()]);

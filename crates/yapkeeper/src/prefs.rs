@@ -146,11 +146,12 @@ fn icon_set_spelling(set: IconSet) -> &'static str {
 }
 
 /// Each setting's row as the file spells it, name then value.
-fn setting_rows(settings: &Settings) -> [(&'static str, &'static str); 5] {
+fn setting_rows(settings: &Settings) -> [(&'static str, &'static str); 6] {
     [
         ("hide_temp", toggle_spelling(settings.hide_temp)),
         ("hide_missing", toggle_spelling(settings.hide_missing)),
         ("orphans_last", toggle_spelling(settings.orphans_last)),
+        ("hide_orphans", toggle_spelling(settings.hide_orphans)),
         ("accent", accent_spelling(settings.accent)),
         ("icons", icon_set_spelling(settings.icons)),
     ]
@@ -177,6 +178,9 @@ fn read_setting(settings: &mut Settings, name: &str, value: &str) {
         }
         "orphans_last" => {
             settings.orphans_last = named(&TOGGLES, toggle_spelling, value, settings.orphans_last)
+        }
+        "hide_orphans" => {
+            settings.hide_orphans = named(&TOGGLES, toggle_spelling, value, settings.hide_orphans)
         }
         "accent" => settings.accent = named(&Accent::ALL, accent_spelling, value, settings.accent),
         "icons" => settings.icons = named(&IconSet::ALL, icon_set_spelling, value, settings.icons),

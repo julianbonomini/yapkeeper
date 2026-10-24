@@ -27,8 +27,8 @@ Words search conversation text, titles, and provider recaps. Every other token i
 |---|---|---|
 | `@where` | Location: project, `project:worktree`, or any part of a path | `@acme-api`, `@acme-api:billing-retry`, `@scratch` |
 | `#provider` | Provider | `#claude`, `#codex`, `#pi` |
-| `is:state` | Session state | `is:orphaned`, `is:temp`, `is:git`, `is:folder`, `is:pr`, `is:recap`, `is:unavailable`, `is:hidden` |
-| `!x`, `not:x` | Exclude a filter, a provider or state by name, or a word | `!codex`, `!temp`, `!@scratch`, `!is:pr`, `not:orphaned`, `!flaky` |
+| `is:state` | Session state | `is:orphaned`, `is:temp`, `is:git`, `is:worktree`, `is:folder`, `is:pr`, `is:recap`, `is:unavailable`, `is:hidden` |
+| `!x`, `not:x` | Exclude a filter, a provider or state by name, or a word | `!codex`, `!temp`, `!@scratch`, `!is:pr`, `not:orphaned`, `not:worktree`, `!flaky` |
 
 Rules:
 
@@ -91,6 +91,7 @@ Recaps cost nothing extra: Claude Code writes `away_summary` records into its se
 | Hide sessions in temp folders (`/private/tmp`, `/tmp`, `/var/folders`, `/private/var/folders`) | On | 59 of 783 real sessions were scratch work in temp folders. The header shows how many are hidden, and `is:temp` shows them anyway. |
 | Hide missing folders in the location list | On | 46 of 82 real recorded folders no longer exist. They still appear when the user types a name after `@`. |
 | List orphaned sessions after the rest | On | 501 of 783 real sessions were orphaned and crowded out live ones. They stay searchable. |
+| Hide orphaned sessions | Off | For users who never want orphans: they are left out of the results and their missing places out of the location list, even after typing past `@`. `is:orphaned` shows them anyway. |
 | Accent | Sage (256-color index 108), soft grey selection bar (index 237) | Chosen from cyan, amber, violet, sky, sage, and monochrome. |
 | Location icons | Nerd Font | Chosen over plain Unicode (`▣ ⎇ ▢ ⊘`), text tags, and none. |
 
@@ -103,10 +104,11 @@ The settings screen takes the place of the query line, the results and the previ
 | Hide temp-folder sessions | `on`, `off` |
 | Hide missing folders in locations | `on`, `off` |
 | List orphans last | `on`, `off` |
+| Hide orphaned sessions | `off`, `on` |
 | Accent | Sage (108, grey bar 237), Cyan (the terminal's cyan, reversed selection), Amber (214), Violet (141), Sky (75), Mono; each but Cyan and Mono has the grey bar |
 | Location icons | Nerd Font, Unicode (`▣ ⎇ ▢ ⊘`), Text tags (`git wt dir gone`), None; each shows its four icons so the user can check their font |
 
-Below the rows, `index` and `preferences` name the two files' paths, cut from the left when they don't fit. `↑` `↓` or `Ctrl+P` `Ctrl+N` move between rows, `→` or `Enter` picks the next value, `←` the previous, `Esc` or `Ctrl+S` goes back to the palette, `Ctrl+R` refreshes the index, and `Ctrl+C` quits. Other keys do nothing, so typing never reaches the query. Each change is saved to `prefs.sqlite` and shows at once; the palette searches again from the first row. When it can't be saved, the footer says so and the setting stays as it was.
+Below the rows, `index` and `preferences` name the two files' paths, cut from the left when they don't fit; in a terminal too short for both, they are left out rather than any setting. `↑` `↓` or `Ctrl+P` `Ctrl+N` move between rows, `→` or `Enter` picks the next value, `←` the previous, `Esc` or `Ctrl+S` goes back to the palette, `Ctrl+R` refreshes the index, and `Ctrl+C` quits. Other keys do nothing, so typing never reaches the query. Each change is saved to `prefs.sqlite` and shows at once; the palette searches again from the first row. When it can't be saved, the footer says so and the setting stays as it was.
 
 While temp sessions are hidden, the query line shows `N temp hidden ·` before the match count: how many sessions the query matched that are left out for being in a temp folder. It is dropped first when the query needs the room. Under `NO_COLOR` the accent row reads, for example, `Amber · off: NO_COLOR`: the choice is kept but nothing is drawn in color. With the icon set None, the icon and the space after it are left out, so the text starts where the icon would.
 

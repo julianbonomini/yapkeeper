@@ -1414,6 +1414,7 @@ fn each_filter_prefix_opens_its_completions_with_session_counts() {
                 ("is:orphaned", 1),
                 ("is:temp", 0),
                 ("is:git", 0),
+                ("is:worktree", 0),
                 ("is:folder", 3),
                 ("is:pr", 0),
                 ("is:recap", 0),
@@ -2461,10 +2462,11 @@ fn ctrl_t_searches_tool_calls_too_and_says_so_on_the_query_line() {
 }
 
 /// The settings screen's labels, in order.
-const SETTINGS: [&str; 5] = [
+const SETTINGS: [&str; 6] = [
     "Hide temp-folder sessions",
     "Hide missing folders in locations",
     "List orphans last",
+    "Hide orphaned sessions",
     "Accent",
     "Location icons",
 ];
@@ -2516,8 +2518,8 @@ fn ctrl_s_opens_settings_with_the_defaults_and_where_the_files_live() {
         .iter()
         .map(|label| setting(&frame, label))
         .collect();
-    assert_eq!(values[..4], ["on", "on", "on", "Sage"], "{frame:#?}");
-    assert!(values[4].starts_with("Nerd Font"), "{frame:#?}");
+    assert_eq!(values[..5], ["on", "on", "on", "off", "Sage"], "{frame:#?}");
+    assert!(values[5].starts_with("Nerd Font"), "{frame:#?}");
     let data = histories.data();
     assert!(shows_path(&frame, "index", &data.index()), "{frame:#?}");
     assert!(
@@ -2599,17 +2601,17 @@ fn settings_keep_the_palette_as_it_was_and_swallow_printable_keys() {
     }
     assert_eq!(
         selected_setting(&draw(&mut palette, 80, 24)),
-        Some(SETTINGS[4])
+        Some(SETTINGS[5])
     );
     press(&mut palette, KeyCode::Down);
     assert_eq!(
         selected_setting(&draw(&mut palette, 80, 24)),
-        Some(SETTINGS[4])
+        Some(SETTINGS[5])
     );
     ctrl(&mut palette, 'p');
     assert_eq!(
         selected_setting(&draw(&mut palette, 80, 24)),
-        Some(SETTINGS[3])
+        Some(SETTINGS[4])
     );
     assert_eq!(ctrl(&mut palette, 'c'), Step::Quit);
 }
@@ -2726,24 +2728,62 @@ fn orphans_last_off_lists_an_orphaned_session_by_its_age() {
 }
 
 #[test]
+fn hide_orphaned_sessions_leaves_them_and_their_missing_places_out() {
+    let (histories, _live) = locations_fixture();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    change_setting(&mut palette, SETTINGS[1], KeyCode::Right);
+    change_setting(&mut palette, SETTINGS[3], KeyCode::Right);
+
+    let results = frame(&mut palette, 120, 40);
+    assert!(
+        rows_with(&results, &["Gone notes"]).is_empty(),
+        "{results:#?}"
+    );
+    assert_eq!(
+        rows_with(&results, &["Usr folder"]).len(),
+        1,
+        "{results:#?}"
+    );
+
+    press(&mut palette, KeyCode::Tab);
+    let locations = location_rows(&frame(&mut palette, 120, 40));
+    assert!(
+        locations
+            .iter()
+            .all(|row| !row.detail.starts_with("missing")),
+        "{locations:#?}"
+    );
+    assert_documented_order(&locations);
+
+    keys(&mut palette, "gone");
+    let typed = location_rows(&frame(&mut palette, 120, 40));
+    assert!(typed.is_empty(), "{typed:#?}");
+
+    press(&mut palette, KeyCode::Esc);
+    keys(&mut palette, "is:orphaned ");
+    let asked = frame(&mut palette, 120, 40);
+    assert_eq!(rows_with(&asked, &["Gone notes"]).len(), 1, "{asked:#?}");
+}
+
+#[test]
 fn the_accent_cycles_through_every_theme_and_colours_the_palette() {
     let histories = Histories::three();
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     ctrl(&mut palette, 's');
-    for _ in 0..3 {
+    for _ in 0..4 {
         press(&mut palette, KeyCode::Down);
     }
     for accent in ["Cyan", "Amber", "Violet", "Sky", "Mono", "Sage"] {
         press(&mut palette, KeyCode::Right);
-        assert_eq!(setting(&frame(&mut palette, 80, 24), SETTINGS[3]), accent);
+        assert_eq!(setting(&frame(&mut palette, 80, 24), SETTINGS[4]), accent);
     }
     press(&mut palette, KeyCode::Left);
-    assert_eq!(setting(&frame(&mut palette, 80, 24), SETTINGS[3]), "Mono");
+    assert_eq!(setting(&frame(&mut palette, 80, 24), SETTINGS[4]), "Mono");
 
     // The accent is saved, so a fresh history starts from Sage again.
     let histories = Histories::three();
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
-    change_setting(&mut palette, SETTINGS[3], KeyCode::Right);
+    change_setting(&mut palette, SETTINGS[4], KeyCode::Right);
     let cyan = draw(&mut palette, 80, 24);
     assert!(
         cyan[(2, 3)].modifier.contains(Modifier::REVERSED),
@@ -2751,7 +2791,7 @@ fn the_accent_cycles_through_every_theme_and_colours_the_palette() {
     );
     assert_eq!(selected(&cyan), Some("Tidy"));
 
-    change_setting(&mut palette, SETTINGS[3], KeyCode::Right);
+    change_setting(&mut palette, SETTINGS[4], KeyCode::Right);
     keys(&mut palette, "#claude ");
     let amber = draw(&mut palette, 80, 24);
     assert_eq!(amber[(2, 1)].symbol(), "›");
@@ -2764,8 +2804,8 @@ fn the_accent_cycles_through_every_theme_and_colours_the_palette() {
 fn no_color_overrides_the_chosen_accent_and_says_so() {
     let histories = Histories::three();
     let mut palette = Palette::new(histories.catalog(), Colour::Mono, Path::new("/"));
-    change_setting(&mut palette, SETTINGS[3], KeyCode::Right);
-    change_setting(&mut palette, SETTINGS[3], KeyCode::Right);
+    change_setting(&mut palette, SETTINGS[4], KeyCode::Right);
+    change_setting(&mut palette, SETTINGS[4], KeyCode::Right);
 
     let buffer = draw(&mut palette, 80, 24);
     for cell in buffer.content() {
@@ -2780,7 +2820,7 @@ fn no_color_overrides_the_chosen_accent_and_says_so() {
         assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{cell:?}");
     }
     assert_eq!(
-        setting(&lines(&screen), SETTINGS[3]),
+        setting(&lines(&screen), SETTINGS[4]),
         "Amber · off: NO_COLOR"
     );
 }
@@ -2790,18 +2830,18 @@ fn the_icon_set_cycles_and_shows_sample_glyphs() {
     let histories = Histories::three();
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     ctrl(&mut palette, 's');
-    for _ in 0..4 {
+    for _ in 0..5 {
         press(&mut palette, KeyCode::Down);
     }
     for set in ["Unicode ▣ ⎇ ▢ ⊘", "Text tags git wt dir gone", "None"] {
         press(&mut palette, KeyCode::Right);
         assert_eq!(
-            words(&setting(&frame(&mut palette, 80, 24), SETTINGS[4])),
+            words(&setting(&frame(&mut palette, 80, 24), SETTINGS[5])),
             set
         );
     }
     press(&mut palette, KeyCode::Right);
-    let nerd_font = setting(&frame(&mut palette, 80, 24), SETTINGS[4]);
+    let nerd_font = setting(&frame(&mut palette, 80, 24), SETTINGS[5]);
     assert!(nerd_font.starts_with("Nerd Font"), "{nerd_font}");
 }
 
@@ -2810,7 +2850,7 @@ fn the_icon_set_cycles_and_shows_sample_glyphs() {
 fn icons_palette(histories: &Histories, steps: usize) -> Palette {
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     for _ in 0..steps {
-        change_setting(&mut palette, SETTINGS[4], KeyCode::Right);
+        change_setting(&mut palette, SETTINGS[5], KeyCode::Right);
     }
     palette
 }
@@ -2828,7 +2868,7 @@ fn unicode_and_text_tag_icons_mark_locations_and_results() {
         ["▣ ", "⎇ ", "▢ ", "⊘ "],
         ["git  ", "wt   ", "dir  ", "gone "],
     ] {
-        change_setting(&mut palette, SETTINGS[4], KeyCode::Right);
+        change_setting(&mut palette, SETTINGS[5], KeyCode::Right);
         ctrl(&mut palette, 'u');
         let results = frame(&mut palette, 120, 40);
         let usr = rows_with(&results, &["Usr"]);
@@ -2896,7 +2936,7 @@ fn no_icons_leave_no_gap_where_the_icon_was() {
 }
 
 /// Each setting's value once `change_every_setting` has run.
-const CHANGED: [&str; 5] = ["off", "off", "off", "Cyan", "Unicode ▣ ⎇ ▢ ⊘"];
+const CHANGED: [&str; 6] = ["off", "off", "off", "on", "Cyan", "Unicode ▣ ⎇ ▢ ⊘"];
 
 /// Changes every setting from its default to the value `CHANGED` names.
 fn change_every_setting(palette: &mut Palette) {
@@ -2961,7 +3001,7 @@ fn preferences_from_before_settings_keep_their_hides_and_take_settings() {
     assert!(rows_with(&opened, &["Retry"]).is_empty(), "{opened:#?}");
     ctrl(&mut palette, 's');
     let screen = frame(&mut palette, 80, 24);
-    assert_eq!(setting(&screen, SETTINGS[3]), "Sage", "{screen:#?}");
+    assert_eq!(setting(&screen, SETTINGS[4]), "Sage", "{screen:#?}");
     press(&mut palette, KeyCode::Right);
     let changed = frame(&mut palette, 80, 24);
     assert_eq!(setting(&changed, SETTINGS[0]), "off", "{changed:#?}");
@@ -3003,8 +3043,8 @@ fn a_setting_that_cannot_be_saved_says_so_and_stays_as_it_was() {
 fn settings_give_way_in_narrow_and_short_terminals() {
     let histories = Histories::three();
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
-    change_setting(&mut palette, SETTINGS[4], KeyCode::Right);
-    change_setting(&mut palette, SETTINGS[4], KeyCode::Right);
+    change_setting(&mut palette, SETTINGS[5], KeyCode::Right);
+    change_setting(&mut palette, SETTINGS[5], KeyCode::Right);
     ctrl(&mut palette, 's');
     let data = histories.data();
 
@@ -3012,7 +3052,7 @@ fn settings_give_way_in_narrow_and_short_terminals() {
     let narrow = frame(&mut palette, 60, 20);
     assert_eq!(setting(&narrow, SETTINGS[1]), "on", "{narrow:#?}");
     assert_eq!(
-        words(&setting(&narrow, SETTINGS[4])),
+        words(&setting(&narrow, SETTINGS[5])),
         "Text tags git wt dir gone"
     );
     for (label, path) in [("index", data.index()), ("preferences", data.prefs())] {
@@ -3025,12 +3065,16 @@ fn settings_give_way_in_narrow_and_short_terminals() {
     }
 
     let short = frame(&mut palette, 48, 12);
-    for label in &SETTINGS[..4] {
+    for label in &SETTINGS {
         assert!(!setting(&short, label).is_empty(), "{short:#?}");
     }
-    assert!(short[7].starts_with("│ Location icons"), "{short:#?}");
-    assert!(short[8].starts_with("│ index "), "{short:#?}");
-    assert!(short[9].starts_with("│ preferences "), "{short:#?}");
+    assert!(short[8].starts_with("│ Location icons"), "{short:#?}");
+    assert!(short[9].trim_matches('│').trim().is_empty(), "{short:#?}");
+
+    let paths = frame(&mut palette, 48, 13);
+    assert!(paths[8].starts_with("│ Location icons"), "{paths:#?}");
+    assert!(paths[9].starts_with("│ index "), "{paths:#?}");
+    assert!(paths[10].starts_with("│ preferences "), "{paths:#?}");
 
     let too_small = frame(&mut palette, 47, 12);
     assert!(

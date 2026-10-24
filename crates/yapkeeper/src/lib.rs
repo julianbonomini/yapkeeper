@@ -173,11 +173,14 @@ pub struct Listing {
 
 /// How many sessions every filter admitted that each default left out: temp
 /// sessions unless the query has `is:temp` (none while `hide_temp` is off),
-/// and hidden ones unless it has `is:hidden`. A session can count in both.
+/// hidden ones unless it has `is:hidden`, and orphaned ones unless it has
+/// `is:orphaned` (none while `hide_orphans` is off). A session can count in
+/// more than one.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LeftOut {
     pub temp: usize,
     pub hidden: usize,
+    pub orphaned: usize,
 }
 
 /// A session with its location and whether it is hidden, as of this listing.
@@ -447,8 +450,8 @@ impl Catalog {
 
     /// `text` read as the query language, with this catalog's providers,
     /// following its settings: temp sessions are left out only while
-    /// `hide_temp` is on, and orphaned ones come last only while
-    /// `orphans_last` is on. `Query::parse` always follows the defaults.
+    /// `hide_temp` is on, orphaned ones only while `hide_orphans` is on, and
+    /// orphaned ones come last only while `orphans_last` is on. `Query::parse` always follows the defaults.
     pub fn parse(&self, text: &str) -> Query {
         Query::parse(text, &self.providers).following(self.settings)
     }

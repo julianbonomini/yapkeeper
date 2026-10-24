@@ -17,8 +17,8 @@ use crate::palette::{Colour, Palette};
 /// Wide enough for `preferences` and two spaces, so both paths line up.
 const PATH_LABEL_CELLS: usize = 13;
 
-/// Below this many body lines the blank line before the paths goes.
-const ROOMY_BODY: u16 = 8;
+/// The `index` and `preferences` lines.
+const PATH_LINES: u16 = 2;
 
 /// Draws the screen's title into `top`, and its rows and paths into `body`.
 pub(super) fn render(palette: &Palette, theme: &Theme, frame: &mut Frame, top: Rect, body: Rect) {
@@ -43,11 +43,19 @@ pub(super) fn render(palette: &Palette, theme: &Theme, frame: &mut Frame, top: R
             ]))
         })
         .collect();
-    let blank = u16::from(body.height >= ROOMY_BODY);
+    // The blank line goes first in a short terminal, then both paths, so
+    // no setting is ever cut.
+    let setting_lines = Setting::ALL.len() as u16;
+    let room = body.height.saturating_sub(setting_lines);
+    let path_lines = match room >= PATH_LINES {
+        true => PATH_LINES,
+        false => 0,
+    };
+    let blank = u16::from(room > PATH_LINES);
     let [rows, _, paths] = Layout::vertical([
-        Constraint::Length(Setting::ALL.len() as u16),
+        Constraint::Length(setting_lines),
         Constraint::Length(blank),
-        Constraint::Length(2),
+        Constraint::Length(path_lines),
     ])
     .areas(body);
     let mut selected = ListState::default().with_selected(Some(screen.row()));
@@ -75,6 +83,7 @@ fn label(setting: Setting) -> &'static str {
         Setting::HideTemp => "Hide temp-folder sessions",
         Setting::HideMissing => "Hide missing folders in locations",
         Setting::OrphansLast => "List orphans last",
+        Setting::HideOrphans => "Hide orphaned sessions",
         Setting::Accent => "Accent",
         Setting::Icons => "Location icons",
     }
@@ -91,6 +100,7 @@ fn value(setting: Setting, settings: Settings, colour: Colour) -> String {
         Setting::HideTemp => toggle(settings.hide_temp),
         Setting::HideMissing => toggle(settings.hide_missing),
         Setting::OrphansLast => toggle(settings.orphans_last),
+        Setting::HideOrphans => toggle(settings.hide_orphans),
         Setting::Accent => match colour {
             Colour::Accent => settings.accent.name().to_string(),
             Colour::Mono => format!("{} · off: NO_COLOR", settings.accent.name()),

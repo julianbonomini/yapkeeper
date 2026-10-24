@@ -836,7 +836,7 @@ fn search_names_the_valid_choices_for_an_unknown_provider_or_state_and_succeeds(
     let stderr = stderr(&output);
     for hint in [
         "yapkeeper: \"#opencode\" names no provider (claude, codex, pi)\n",
-        "yapkeeper: \"is:bogus\" names no state (orphaned, temp, git, folder, pr, recap, unavailable, hidden)\n",
+        "yapkeeper: \"is:bogus\" names no state (orphaned, temp, git, worktree, folder, pr, recap, unavailable, hidden)\n",
     ] {
         assert!(stderr.contains(hint), "{hint:?} is missing from {stderr}");
     }

@@ -470,6 +470,9 @@ fn rows(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
         if palette.left_out.hidden > 0 {
             lines.push(Line::styled(" is:hidden shows hidden ones", theme.dim));
         }
+        if palette.left_out.orphaned > 0 {
+            lines.push(Line::styled(" is:orphaned shows orphaned ones", theme.dim));
+        }
         let has_words = palette
             .parsed
             .tokens()

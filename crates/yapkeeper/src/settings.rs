@@ -4,7 +4,7 @@
 //! each looks is the palette's.
 
 /// What the user can set with `Ctrl+S`. `Default` is docs/interface.md's
-/// defaults: on, on, on, Sage, Nerd Font.
+/// defaults: on, on, on, off, Sage, Nerd Font.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     /// Leave out sessions in temp folders unless the query has `is:temp`.
@@ -13,6 +13,9 @@ pub struct Settings {
     pub hide_missing: bool,
     /// List orphaned sessions after the rest.
     pub orphans_last: bool,
+    /// Leave out orphaned sessions, and so missing places in the location
+    /// list, unless the query has `is:orphaned`.
+    pub hide_orphans: bool,
     pub accent: Accent,
     pub icons: IconSet,
 }
@@ -23,6 +26,7 @@ impl Default for Settings {
             hide_temp: true,
             hide_missing: true,
             orphans_last: true,
+            hide_orphans: false,
             accent: Accent::Sage,
             icons: IconSet::NerdFont,
         }

@@ -11,16 +11,18 @@ pub(super) enum Setting {
     HideTemp,
     HideMissing,
     OrphansLast,
+    HideOrphans,
     Accent,
     Icons,
 }
 
 impl Setting {
     /// Every setting, in the order the screen lists them.
-    pub(super) const ALL: [Setting; 5] = [
+    pub(super) const ALL: [Setting; 6] = [
         Setting::HideTemp,
         Setting::HideMissing,
         Setting::OrphansLast,
+        Setting::HideOrphans,
         Setting::Accent,
         Setting::Icons,
     ];
@@ -59,6 +61,7 @@ impl SettingsScreen {
             Setting::HideTemp => changed.hide_temp = !settings.hide_temp,
             Setting::HideMissing => changed.hide_missing = !settings.hide_missing,
             Setting::OrphansLast => changed.orphans_last = !settings.orphans_last,
+            Setting::HideOrphans => changed.hide_orphans = !settings.hide_orphans,
             Setting::Accent => changed.accent = cycle(&Accent::ALL, settings.accent, by),
             Setting::Icons => changed.icons = cycle(&IconSet::ALL, settings.icons, by),
         }

@@ -56,7 +56,6 @@ jobs:
             os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     env:
-      TAG: ${{ needs.version.outputs.tag }}
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v5
@@ -76,7 +75,8 @@ jobs:
           cargo "$build" --release --locked -p yapkeeper --target "$TARGET"
       - name: Package
         run: |
-          name="yapkeeper-$TAG-$TARGET"
+          # Unversioned names keep releases/latest/download URLs stable for install.sh.
+          name="yapkeeper-$TARGET"
           mkdir "$name"
           cp "target/$TARGET/release/yapkeeper" README.md LICENSE "$name/"
           tar -czf "$name.tar.gz" "$name"
@@ -105,3 +105,32 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "$TAG" \
             --generate-notes
+
+  homebrew:
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      # HOMEBREW_TAP_KEY is the private half of a write deploy key on julianbonomini/homebrew-tap.
+      - env:
+          TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+        run: |
+          key="$RUNNER_TEMP/tap_key"
+          printf '%s\n' "$TAP_KEY" > "$key"
+          chmod 600 "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:julianbonomini/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          sh scripts/homebrew-formula.sh "${TAG#v}" dist > tap/Formula/yapkeeper.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/yapkeeper.rb
+          git commit -m "Update yapkeeper to $TAG"
+          git push

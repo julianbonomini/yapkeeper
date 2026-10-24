@@ -6,6 +6,30 @@ Yapkeeper is a local CLI/TUI for finding, browsing, and resuming Claude Code, Co
 
 Run `yapkeeper` in a terminal to open the palette: type to search your Claude Code, Codex and Pi sessions, preview one, and press `Enter` twice to resume it in its own directory. `yapkeeper list` and `yapkeeper search` print the same sessions one line each for scripts, and `yapkeeper --help` covers the query language and where Yapkeeper keeps its files.
 
+## Install
+
+Yapkeeper runs on macOS and Linux.
+
+With [Homebrew](https://brew.sh):
+
+```sh
+brew install julianbonomini/tap/yapkeeper
+```
+
+With the install script, which puts the binary in `~/.local/bin` after checking its SHA-256 checksum:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/julianbonomini/yapkeeper/main/install.sh | sh
+```
+
+Set `YAPKEEPER_INSTALL_DIR` to install somewhere else, or `YAPKEEPER_VERSION=v0.1.1` to install a specific release. Prebuilt binaries for Apple Silicon and Intel Macs and static Linux binaries for x86_64 and arm64 are also on the [releases page](https://github.com/julianbonomini/yapkeeper/releases).
+
+From source, with a recent stable Rust:
+
+```sh
+cargo install --locked --git https://github.com/julianbonomini/yapkeeper yapkeeper
+```
+
 On 1.91 GB of local histories, disposable benchmarks indexed in 2.75 seconds with 50 MiB peak RAM in Rust, versus 2.87 seconds and 235 MiB in Bun/TypeScript. We chose Rust with Ratatui for comparable indexing speed and a smaller memory footprint.
 
 - [Product scope and open decisions](docs/product.md)
@@ -28,4 +52,4 @@ The benchmark reads your own histories only with `--real-histories`, and only wi
 
 ## Releasing
 
-Releases are cut from the version in the root `Cargo.toml`. Bump `version` under `[workspace.package]` and merge to `main`. The release workflow sees a version with no tag, runs the checks, builds macOS (Apple Silicon and Intel) and static Linux (x86_64 and arm64) binaries, and publishes a GitHub Release tagged `v<version>` with tarballs and SHA-256 checksums. A push that leaves the version unchanged releases nothing.
+Releases are cut from the version in the root `Cargo.toml`. Bump `version` under `[workspace.package]`, run `cargo check` so `Cargo.lock` picks up the new version, and merge both to `main`. The release workflow sees a version with no tag, runs the checks, builds macOS (Apple Silicon and Intel) and static Linux (x86_64 and arm64) binaries, publishes a GitHub Release tagged `v<version>` with tarballs and SHA-256 checksums, and updates the formula in [julianbonomini/homebrew-tap](https://github.com/julianbonomini/homebrew-tap). A push that leaves the version unchanged releases nothing.

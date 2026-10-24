@@ -406,11 +406,17 @@ impl Word {
     /// Whether `text` contains this word, ignoring case unless the word has
     /// an uppercase letter. Never true unless `fold(text)` contains `key()`.
     pub(crate) fn matches(&self, text: &str) -> bool {
-        if self.matches_case() {
-            text.contains(&self.text)
-        } else {
-            fold(text).contains(&self.key)
+        match self.as_typed() {
+            Some(typed) => text.contains(typed),
+            None => fold(text).contains(&self.key),
         }
+    }
+
+    /// The word as typed when case counts (it has an uppercase letter): a text
+    /// matches the word when it contains this. `None` when case is ignored: a
+    /// text matches when its `fold` contains `key()`.
+    pub(crate) fn as_typed(&self) -> Option<&str> {
+        self.matches_case().then_some(self.text.as_str())
     }
 
     /// Every range of `text`, whose fold is `folded`, that this word

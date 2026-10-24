@@ -448,6 +448,46 @@ fn an_index_filled_with_garbage_is_built_again() {
 }
 
 #[test]
+fn an_index_from_the_previous_version_is_rebuilt_keeping_hides_and_settings() {
+    let histories = Histories::new();
+    let shown = "aaaaaaaa-0000-4000-8000-000000000114";
+    let hidden = "aaaaaaaa-0000-4000-8000-000000000115";
+    histories.claude_session(shown, "Move the qz tables", "/synthetic/one");
+    histories.claude_session(hidden, "Plan the release", "/synthetic/two");
+    histories.list();
+    hide(&histories.roots(), &histories.data(), hidden).unwrap();
+    let prefs = histories.data().prefs();
+    let contents = fs::read(&prefs).unwrap();
+    // Stands in for an index the previous version wrote: its schema version
+    // is all that opening an index checks.
+    rusqlite::Connection::open(histories.data().index())
+        .unwrap()
+        .execute_batch("PRAGMA user_version = 3")
+        .unwrap();
+
+    let listing = histories.list();
+    assert_eq!(listing.files_read, 2);
+    let listed: Vec<&str> = listing
+        .sessions
+        .iter()
+        .map(|listed| listed.session.id.as_str())
+        .collect();
+    assert_eq!(listed, [shown]);
+    let found = |text: &str| {
+        let query = Query::parse(text, &histories.roots().providers());
+        let listing = search(&histories.roots(), &histories.data(), &query).unwrap();
+        listing
+            .sessions
+            .into_iter()
+            .map(|listed| listed.session.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(found("qz"), [shown]);
+    assert_eq!(found("is:hidden"), [hidden]);
+    assert_eq!(fs::read(&prefs).unwrap(), contents);
+}
+
+#[test]
 fn malformed_lines_are_still_counted_when_nothing_is_read() {
     let histories = Histories::new();
     let path = histories.claude_session(

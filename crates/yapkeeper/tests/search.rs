@@ -374,6 +374,126 @@ fn search_after_rebuild_finds_the_same_sessions() {
     assert_eq!(histories.found("canary"), before);
 }
 
+#[test]
+fn short_words_are_found_in_titles_recaps_and_messages() {
+    let histories = Histories::new();
+    histories.claude(
+        A,
+        &[
+            prompt("Plan the release"),
+            json!({ "type": "custom-title", "customTitle": "Go live" }),
+        ],
+    );
+    histories.claude(
+        B,
+        &[
+            prompt("Plan the release"),
+            json!({ "type": "system", "subtype": "away_summary", "content": "Let it go" }),
+        ],
+    );
+    histories.claude(C, &[prompt("Plan the release"), reply("GO when ready")]);
+    histories.claude(D, &[prompt("Plan the release")]);
+
+    for found in [Histories::found, Histories::found_with_tools] {
+        assert_eq!(sorted(found(&histories, "go")), [A, B, C]);
+        assert_eq!(found(&histories, "Go"), [A]);
+        assert_eq!(found(&histories, "GO"), [C]);
+    }
+}
+
+/// A Claude Code assistant record calling the Read tool on `file_path`.
+fn read_call(file_path: &str) -> Value {
+    said(
+        "assistant",
+        json!([{ "type": "tool_use", "name": "Read", "input": { "file_path": file_path } }]),
+    )
+}
+
+#[test]
+fn short_words_in_tool_text_are_found_only_with_tools() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Read the log"), read_call("/synthetic/Qz.log")]);
+    histories.claude(
+        B,
+        &[
+            prompt("Read the log"),
+            said(
+                "user",
+                json!([{ "type": "tool_result", "tool_use_id": "t1", "content": "Qz sighted" }]),
+            ),
+        ],
+    );
+    histories.claude(C, &[prompt("Plan the release")]);
+    histories.claude_subagent(C, "x", &[prompt("Look for Qz")]);
+    histories.claude(D, &[prompt("Read the log"), read_call("/synthetic/qz.log")]);
+
+    for word in ["qz", "Qz"] {
+        assert!(histories.found(word).is_empty(), "{word}");
+    }
+    assert_eq!(sorted(histories.found_with_tools("qz")), [A, B, C, D]);
+    assert_eq!(sorted(histories.found_with_tools("Qz")), [A, B, C]);
+}
+
+#[test]
+fn a_short_word_never_spans_two_messages() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Bring"), reply("only once")]);
+
+    for found in [Histories::found, Histories::found_with_tools] {
+        assert!(found(&histories, "go").is_empty());
+        assert_eq!(found(&histories, "g"), [A]);
+    }
+}
+
+#[test]
+fn a_short_uppercase_word_matches_case_beyond_ascii() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Échec du build")]);
+    histories.claude(B, &[prompt("Encore un échec")]);
+    histories.claude(C, &[prompt("ÉCHEC TOTAL")]);
+
+    assert_eq!(sorted(histories.found("É")), [A, C]);
+    assert_eq!(sorted(histories.found("é")), [A, B, C]);
+    assert_eq!(histories.found("ÉC"), [C]);
+}
+
+#[test]
+fn short_words_follow_files_that_grow_are_rewritten_or_disappear() {
+    let histories = Histories::new();
+    let path = histories.claude(A, &[prompt("Plan the release")]);
+    histories.claude(B, &[prompt("Another plan")]);
+    assert!(histories.found("qz").is_empty());
+
+    let grown = format!("{}\n", reply("A qz appeared"));
+    fs::File::options()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(grown.as_bytes())
+        .unwrap();
+    assert_eq!(histories.found("qz"), [A]);
+
+    // Shorter than what was read, so it is read again from the start.
+    write_records(&path, &[prompt("Plan it")]);
+    assert!(histories.found("qz").is_empty());
+
+    write_records(&path, &[prompt("Plan it"), reply("A qz again")]);
+    assert_eq!(histories.found("qz"), [A]);
+    fs::remove_file(&path).unwrap();
+    assert!(histories.found("qz").is_empty());
+}
+
+#[test]
+fn a_negated_short_word_leaves_out_its_sessions() {
+    let histories = Histories::new();
+    histories.claude(A, &[prompt("Use qz here")]);
+    histories.claude(B, &[prompt("Read the log"), read_call("/synthetic/qz.log")]);
+    histories.claude(C, &[prompt("Plan the release")]);
+
+    assert_eq!(sorted(histories.found("!qz")), [B, C]);
+    assert_eq!(histories.found_with_tools("!qz"), [C]);
+}
+
 /// A Claude Code prompt recorded in `cwd`.
 fn prompt_in(cwd: &str, text: &str) -> Value {
     prompt_at(cwd, "2026-10-20T10:00:00Z", text)

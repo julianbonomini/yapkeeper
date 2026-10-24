@@ -13,3 +13,15 @@ On 1.91 GB of local histories, disposable benchmarks indexed in 2.75 seconds wit
 - [Domain glossary](GLOSSARY.md)
 
 Vago builds Yapkeeper with Claude Code and Claude Opus 5.5 by default. Run a Goal from the repository root with `vago run <goal>`. The workflows use Cargo formatting, lint, and test checks, with unsafe Rust forbidden in workspace code; publishing steps still need review before execution.
+
+## Measuring launch and search
+
+`yapkeeper-bench` measures how fast the palette opens over a warm index and how fast it answers a query, against the 200 ms and 50 ms targets in [docs/product.md](docs/product.md#speed-and-refresh). It writes a synthetic corpus from a seed, indexes it into a temporary folder, and prints p50 and p95 for each measurement on stdout. Run it from the repository root in a release build:
+
+```sh
+cargo run --release -p yapkeeper-bench
+```
+
+The corpus takes about 1 GB in a hidden folder inside `--dir` (default: the current directory) while it runs and is deleted at the end. `--dir` must not be under a system temp folder such as `/tmp`, where every session would count as temp. `--seed`, `--sessions`, `--subagents`, `--megabytes` and `--runs` change what is measured; `--help` lists them. The checks don't run it.
+
+The benchmark reads your own histories only with `--real-histories`, and only with your authorization. It reads the Claude Code, Codex and Pi directories this environment names without writing to them, builds a temporary private index that is deleted at the end, and prints counts and timings only. Keep its output out of commits and pull requests.

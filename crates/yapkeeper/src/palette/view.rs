@@ -224,9 +224,10 @@ fn too_small(frame: &mut Frame, area: Rect) {
 }
 
 /// The prompt, the query with the cursor after it, and the match count on
-/// the right, after how many temp sessions the query left out while that
-/// leaves the query `QUERY_ROOM` cells, and followed by `+tools` in the
-/// accent while searches read tool calls.
+/// the right, after `indexing` while a pass has run a while and after how
+/// many temp sessions the query left out, each while that leaves the query
+/// `QUERY_ROOM` cells, and followed by `+tools` in the accent while searches
+/// read tool calls.
 fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let mut count = vec![Span::styled(
         format!("{} / {}", palette.found.len(), palette.catalog.indexed()),
@@ -237,11 +238,18 @@ fn query_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
         count.push(Span::styled("+tools", theme.accent));
     }
     let width = usize::from(area.width);
+    // The query keeps its room first; the temp count goes before
+    // `indexing`, and `indexing` before the query would.
+    let fits = |count: &[Span], more: &str| {
+        let count_cells: usize = count.iter().map(Span::width).sum();
+        PROMPT.width() + 1 + QUERY_ROOM + more.width() + count_cells <= width
+    };
+    let indexing = format!("indexing{SEPARATOR}");
+    if palette.shows_indexing() && fits(&count, &indexing) {
+        count.insert(0, Span::styled(indexing, theme.dim));
+    }
     let temp = format!("{} temp hidden{SEPARATOR}", palette.left_out.temp);
-    let count_cells: usize = count.iter().map(Span::width).sum();
-    // The query keeps its room first; the temp count goes before it would.
-    let room_for_temp = PROMPT.width() + 1 + QUERY_ROOM + temp.width() + count_cells <= width;
-    if palette.left_out.temp > 0 && room_for_temp {
+    if palette.left_out.temp > 0 && fits(&count, &temp) {
         count.insert(0, Span::styled(temp, theme.dim));
     }
     let count_cells: usize = count.iter().map(Span::width).sum();
@@ -446,7 +454,11 @@ fn location_icon(row: &LocationRow, set: IconSet) -> &'static str {
 /// One line per session, or what to try when there are none.
 fn rows(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     if palette.catalog.indexed() == 0 {
-        frame.render_widget(Paragraph::new(" No sessions found."), area);
+        let empty = match palette.running_since {
+            Some(_) => " Indexing histories…",
+            None => " No sessions found.",
+        };
+        frame.render_widget(Paragraph::new(empty), area);
         return;
     }
     if palette.found.is_empty() {

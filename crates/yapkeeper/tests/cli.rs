@@ -1378,3 +1378,61 @@ fn list_shows_no_tilde_with_an_empty_home() {
     );
     assert!(!stdout.contains('~'), "{stdout:?}");
 }
+
+/// Writes `count` sessions run in `/usr` under `$HOME/.claude`.
+fn write_many_home_sessions(home: &Path, count: usize) {
+    for n in 0..count {
+        let id = format!("aaaaaaaa-0000-4000-8000-{:012}", 2000 + n);
+        write_home_session(home, &id, &format!("Prompt {n}"), Path::new("/usr"), "");
+    }
+}
+
+/// `yapkeeper list` over `$HOME`, started and not waited for.
+fn spawn_list(home: &Path) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .arg("list")
+        .env_clear()
+        .env("HOME", home)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn a_list_killed_mid_index_leaves_an_index_the_next_list_reads_consistently() {
+    let home = tempfile::tempdir().unwrap();
+    write_many_home_sessions(home.path(), 300);
+    let index = home.path().join(".local/share/yapkeeper/index.sqlite");
+    let mut child = spawn_list(home.path());
+    // Killed once it has started writing the index, or after it finished.
+    while !index.exists() && child.try_wait().unwrap().is_none() {
+        std::thread::yield_now();
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    let after = yapkeeper(&["list"], home.path(), None);
+    assert!(after.status.success(), "{}", stderr(&after));
+    assert!(yapkeeper(&["rebuild"], home.path(), None).status.success());
+    let rebuilt = yapkeeper(&["list"], home.path(), None);
+    assert_eq!(stdout(&after), stdout(&rebuilt));
+    assert_eq!(stdout(&after).lines().count(), 300);
+}
+
+#[test]
+fn two_lists_at_once_both_succeed_with_the_same_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    write_many_home_sessions(home.path(), 300);
+    let first = spawn_list(home.path());
+    let second = spawn_list(home.path());
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert_eq!(stdout(&first), stdout(&second));
+    let later = yapkeeper(&["list"], home.path(), None);
+    assert_eq!(stdout(&later), stdout(&first));
+    assert_eq!(stdout(&first).lines().count(), 300);
+}

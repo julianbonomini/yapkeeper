@@ -14,8 +14,8 @@ use unicode_width::UnicodeWidthStr;
 use yapkeeper::line::{age, availability_label, fit, home, one_line, place, without_controls};
 use yapkeeper::palette::{self, Colour, Palette};
 use yapkeeper::{
-    Catalog, DataDir, DataError, Listed, MissingHome, Query, Roots, State, TokenKind, hide,
-    rebuild, search, unhide,
+    Catalog, DataDir, DataError, Indexer, Listed, MissingHome, Query, Roots, State, TokenKind,
+    hide, rebuild, search, unhide,
 };
 
 /// Wide enough for most titles; what follows may wrap on an 80-column terminal.
@@ -128,21 +128,24 @@ fn main() -> ExitCode {
     }
 }
 
-/// Opens the palette over the index, brought up to date first, until the
-/// person quits it or confirms resuming a session, which then replaces
-/// this process.
+/// Opens the palette over the index, brought up to date in the background,
+/// until the person quits it or confirms resuming a session, which then
+/// replaces this process.
 fn open_palette() -> ExitCode {
     let (roots, data) = match environment() {
         Ok(environment) => environment,
         Err(code) => return code,
     };
-    let catalog = match Catalog::open(&roots, &data) {
+    // Before the indexer starts, so a missing index is created only here.
+    let catalog = match Catalog::cached(&roots, &data) {
         Ok(catalog) => catalog,
         Err(error) => return data_failure(error),
     };
     // A launch directory that is gone has no location to offer `Ctrl+L`.
     let launch_dir = std::env::current_dir().unwrap_or_default();
-    match palette::run(Palette::new(catalog, Colour::from_env(), &launch_dir)) {
+    let palette = Palette::new(catalog, Colour::from_env(), &launch_dir)
+        .indexing(Indexer::start(&roots, &data));
+    match palette::run(palette) {
         Ok(None) => ExitCode::SUCCESS,
         // The terminal is restored by now; nothing else may run before this.
         Ok(Some(command)) => {

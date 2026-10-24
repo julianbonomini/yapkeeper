@@ -49,6 +49,15 @@ impl Hides {
         // Built once per call, as a set can't be probed with borrowed parts.
         self.sessions.contains(&SessionKey::of(session))
     }
+
+    /// Records `session` as hidden, or as shown, in these hides only.
+    pub(crate) fn set(&mut self, session: &Session, hidden: bool) {
+        let key = SessionKey::of(session);
+        match hidden {
+            true => self.sessions.insert(key),
+            false => self.sessions.remove(&key),
+        };
+    }
 }
 
 /// Everything the preferences hold.

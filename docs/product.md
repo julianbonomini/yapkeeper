@@ -29,9 +29,9 @@ Repository and command name: `yapkeeper`. Tagline: "Now, where was I?"
 
 After indexing, opening Yapkeeper should show cached results immediately and searches should return results without perceptible delay. Opening the interface and searching must remain responsive while indexing runs.
 
-Proposed measurement targets are a usable cached launch within 200 ms and search results within 50 ms. These are provisional targets, not measured results. Define the machine, corpus, timing boundaries, and percentiles before comparing implementations.
+Measurement targets are a usable cached launch within 200 ms and search results within 50 ms, at p95. `yapkeeper-bench` defines the rest: a synthetic corpus written from a seed (800 sessions in 870 files, about 1 GB, mixing Claude Code, Codex and Pi, with orphaned and temp sessions), a warm index, launch timed from opening the cached catalog to the palette's first frame, and search timed from the last key of a query to its frame, both drawn off-screen. Process start, starting the background indexer and the terminal's own drawing are outside both. The README says how to run it. Results depend on the machine, so none are committed; record a machine and its numbers here to keep them.
 
-Proposed refresh behavior: show cached results first, scan changed histories in the background on launch, refresh periodically while open, and provide a manual refresh action. The interval, process lifetime, cancellation behavior, and handling of a source change during indexing still need validation. A full archive parse must not be required on each launch.
+Refresh behavior: show cached results first, scan changed histories in the background on launch, refresh periodically while open, and provide a manual refresh action. The indexer lives only as long as the palette. Quitting and resuming cancel it without waiting, and the index stays consistent as of its last batch. A file that changes during a pass is stat'ed before it is read, so the next pass sees the change. A pass starts 10 s after the last one ended and on `Ctrl+R`, which does nothing while one runs; each pass also re-checks orphaned and unavailable folders. [interface.md](interface.md#loading) records the rules. A full archive parse must not be required on each launch.
 
 ## Interface
 

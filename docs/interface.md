@@ -6,7 +6,7 @@ Yapkeeper opens as a full-width command palette: one query line, a result list, 
 
 The palette fills the terminal inside a single rounded border. From top to bottom:
 
-1. The query line, with the match count on the right (`2 / 783`).
+1. The query line, with the match count on the right (`2 / 783`), after `indexing ·` while a background pass runs.
 2. A rule.
 3. Results on the left (48%) and the preview on the right (52%) when the palette is at least 80 columns wide. Below that width the preview is dropped and `→` opens the conversation.
 4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action. Under the results the hints include `Tab locations` and `^S settings`; while a completion list is open, `Tab insert`.
@@ -104,7 +104,7 @@ The settings screen takes the place of the query line, the results and the previ
 | Accent | Sage (108, grey bar 237), Cyan (the terminal's cyan, reversed selection), Amber (214), Violet (141), Sky (75), Mono; each but Cyan and Mono has the grey bar |
 | Location icons | Nerd Font, Unicode (`▣ ⎇ ▢ ⊘`), Text tags (`git wt dir gone`), None; each shows its four icons so the user can check their font |
 
-Below the rows, `index` and `preferences` name the two files' paths, cut from the left when they don't fit. `↑` `↓` or `Ctrl+P` `Ctrl+N` move between rows, `→` or `Enter` picks the next value, `←` the previous, `Esc` or `Ctrl+S` goes back to the palette, and `Ctrl+C` quits. Other keys do nothing, so typing never reaches the query. Each change is saved to `prefs.sqlite` and shows at once; the palette searches again from the first row. When it can't be saved, the footer says so and the setting stays as it was.
+Below the rows, `index` and `preferences` name the two files' paths, cut from the left when they don't fit. `↑` `↓` or `Ctrl+P` `Ctrl+N` move between rows, `→` or `Enter` picks the next value, `←` the previous, `Esc` or `Ctrl+S` goes back to the palette, `Ctrl+R` refreshes the index, and `Ctrl+C` quits. Other keys do nothing, so typing never reaches the query. Each change is saved to `prefs.sqlite` and shows at once; the palette searches again from the first row. When it can't be saved, the footer says so and the setting stays as it was.
 
 While temp sessions are hidden, the query line shows `N temp hidden ·` before the match count: how many sessions the query matched that are left out for being in a temp folder. It is dropped first when the query needs the room. Under `NO_COLOR` the accent row reads, for example, `Amber · off: NO_COLOR`: the choice is kept but nothing is drawn in color. With the icon set None, the icon and the space after it are left out, so the text starts where the icon would.
 
@@ -123,11 +123,14 @@ Settings change the palette only; `yapkeeper list` and `search` always use these
 | `Ctrl+X` | Hide or unhide the selected session |
 | `Ctrl+T` | Include tool calls in search |
 | `Ctrl+S` | Settings |
+| `Ctrl+R` | Refresh the index now |
 | `Ctrl+U` | Clear the query |
 | `Esc` | Clear the query, then quit |
 | `Ctrl+C` | Quit |
 
 The selection stops at the first and last rows and returns to the first row whenever the query changes.
+
+`Ctrl+R` works on every screen and has no footer hint: the periodic refresh covers the common case, so the hint would only crowd the footer.
 
 While the query line shows, every printable key goes to the query, so all actions use `Enter`, arrows, `Tab`, or `Ctrl` keys. This is why hide has no undo key in the palette: the toast points to `is:hidden` instead.
 
@@ -146,7 +149,7 @@ The resume dialog has no query line, so it takes letters: `Enter` resumes, `c` r
 | `warning` | After `c`, for a provider that looks sessions up by directory (Claude Code, Pi): it may not find this session from another directory. |
 | `not found` | The provider's program isn't on `PATH`, so it can't start. |
 
-Resume never moves to another directory without `c`. `c` is offered while the session's own folder is orphaned or unavailable, and it is one-way: `Esc` and opening the dialog again start from the recorded folder. `r` checks an unavailable folder again and redraws the dialog; when it is still unavailable, the dialog says `Checked again: still can't inspect it.` The result row keeps its label until the next launch. Directory and command come first, so a short terminal drops state rows from the bottom.
+Resume never moves to another directory without `c`. `c` is offered while the session's own folder is orphaned or unavailable, and it is one-way: `Esc` and opening the dialog again start from the recorded folder. `r` checks an unavailable folder again and redraws the dialog; when it is still unavailable, the dialog says `Checked again: still can't inspect it.` The result row keeps its label until the next pass. Directory and command come first, so a short terminal drops state rows from the bottom.
 
 A second `Enter` resumes, unless the program isn't found or the directory can't be used; then the dialog's own rows say why and `Enter` does nothing. Yapkeeper restores the terminal, closes the index, and the provider **replaces** Yapkeeper in the same terminal, started with its arguments as separate words and no shell, in that directory. The provider gets the terminal, signals and exit status directly, and nothing of Yapkeeper is left running. If it can't be started, Yapkeeper says why on stderr and exits 1.
 
@@ -154,7 +157,7 @@ A second `Enter` resumes, unless the program isn't found or the directory can't 
 
 ## Loading
 
-`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. The palette loads the index once at launch, refreshing it first as `list` does, and searches that snapshot while the user types. It does not see changes made after launch. Unlike the prototype below, the index keeps tool output, capped like tool calls, so `--tools` can search it.
+`yapkeeper list` reads sessions from the index and reopens only history files whose identity, size or mtime changed since the last run, reading a file that only grew from its last complete line. The palette opens on the sessions already in the index and reads no history file before the first frame. A background pass then reads changed histories in small committed batches, newest first. Each batch's sessions appear in place, keeping the query, the selected session when it is still listed, and the place in an open conversation. Results behind an open conversation or resume dialog update when the user returns to them. `indexing ·` shows dimly before the match count once a pass has run for 150 ms; with an empty index the results read `Indexing histories…`. While the palette is open, a new pass starts 10 s after the last one ended, and `Ctrl+R` starts one at once; pressed during a pass it does nothing, and a file the running pass didn't plan waits for the next one. Each pass, even one that finds no file changed, reads every session's location again, so a deleted or remounted folder shows as `orphaned` or `unavailable`, or stops doing so, after it. A file that grows while it is read is stat'ed before the read, so the next pass reads the rest. Quitting or resuming stops the pass, or the wait for the next one, without waiting: an unfinished batch is discarded, so the index stays as of its last commit. A second Yapkeeper or `yapkeeper list` takes turns with the pass batch by batch, and a pass that finds the index busy for 5 s ends quietly. Unlike the prototype below, the index keeps tool output, capped like tool calls, so `--tools` can search it.
 
 The prototype reads every history file at launch, in parallel threads, without an index. On the real histories (866 files, 1.18 GB) it loaded 783 sessions in about 0.3 s with 55 MB peak memory on the user's Mac. It skips tool results, keeps tool calls as one-line summaries, caps messages at 4,000 characters, and drops injected context such as command caveats, `AGENTS.md` instructions, and environment blocks. Sessions with no user prompt (64) and Codex subagent sessions (19) are left out.
 

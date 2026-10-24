@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use yapkeeper::{DataDir, Location, RecordedGit, Roots};
-use yapkeeper_bench::{Corpus, FRAME, Latency, Measurements, Shape, generate, measure};
+use yapkeeper_bench::{Corpus, FRAME, Measurements, Shape, generate, measure};
 
 /// The targets in docs/product.md: a usable launch and search results.
 const LAUNCH_TARGET: Duration = Duration::from_millis(200);
@@ -23,8 +23,13 @@ const MEBIBYTE: u64 = 1024 * 1024;
 /// Measure Yapkeeper's warm launch and search latency
 ///
 /// By default, writes a synthetic corpus sized like real histories, builds an
-/// index of it, and reports p50 and p95 for opening the palette and for
-/// typing representative queries, against the 200 ms and 50 ms targets.
+/// index of it, and reports p50 and p95 against the 200 ms and 50 ms
+/// targets for: opening the palette, from opening the cached catalog to its
+/// first frame; typing each representative query a key at a time, naming
+/// the prefix whose keystroke was slowest, from its key press to the frame
+/// showing its results; and pasting a query, from the first key pressed to
+/// the frame showing its results. Each typing and paste run starts from an
+/// empty query.
 #[derive(Parser)]
 struct Bench {
     /// Seed the synthetic corpus is written from
@@ -137,7 +142,8 @@ fn describe(corpus: &Corpus, seed: u64) {
     );
 }
 
-/// The index, the timing boundaries, then one row per measurement.
+/// The index, the timing boundaries, then one row per measurement: its
+/// percentiles beside its target, marked `over` when its p95 misses it.
 fn report(measured: &Measurements, runs: NonZeroUsize) {
     println!(
         "Index        {} sessions, built from nothing in {}",
@@ -148,34 +154,48 @@ fn report(measured: &Measurements, runs: NonZeroUsize) {
         "Runs         {runs} per measurement, each up to a frame drawn off-screen at {}x{}",
         FRAME.0, FRAME.1
     );
+    let mut rows = vec![(
+        "Launch, warm index".to_string(),
+        measured.launch,
+        LAUNCH_TARGET,
+    )];
+    for slowest in &measured.slowest_keystrokes {
+        rows.push((
+            format!("Search \"{}\" at \"{}\"", slowest.query, slowest.prefix),
+            slowest.latency,
+            SEARCH_TARGET,
+        ));
+    }
+    rows.push((
+        format!("Paste \"{}\"", measured.paste.query),
+        measured.paste.latency,
+        SEARCH_TARGET,
+    ));
+    // The name column is as wide as the longest name, so the rows fit in 80
+    // columns unless a slowest prefix is unusually long.
+    let name = rows
+        .iter()
+        .map(|(name, ..)| name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
     println!();
     println!(
-        "{:<34}{:>12}{:>12}{:>10}",
+        "{:<name$}{:>10}{:>10}{:>10}",
         "Measurement", "p50", "p95", "Target"
     );
-    row("Launch, warm index", measured.launch, LAUNCH_TARGET);
-    for search in &measured.searches {
-        row(
-            &format!("Search \"{}\"", search.query),
-            search.latency,
-            SEARCH_TARGET,
+    for (measurement, latency, target) in rows {
+        let verdict = match latency.p95 <= target {
+            true => "",
+            false => "  over",
+        };
+        println!(
+            "{measurement:<name$}{:>10}{:>10}{:>10}{verdict}",
+            millis(latency.p50),
+            millis(latency.p95),
+            format!("{} ms", target.as_millis())
         );
     }
-}
-
-/// One measurement's percentiles beside its target, marked `over` when
-/// its p95 misses it.
-fn row(name: &str, latency: Latency, target: Duration) {
-    let verdict = match latency.p95 <= target {
-        true => "",
-        false => "  over",
-    };
-    println!(
-        "{name:<34}{:>12}{:>12}{:>10}{verdict}",
-        millis(latency.p50),
-        millis(latency.p95),
-        format!("{} ms", target.as_millis())
-    );
 }
 
 /// `duration` in milliseconds, to a tenth below 100 ms.

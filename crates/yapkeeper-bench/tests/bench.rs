@@ -45,9 +45,20 @@ fn a_tiny_run_reports_every_measurement_against_its_target() {
         .collect();
     assert_eq!(searches.len(), 4, "{stdout}");
     for search in searches {
+        // Each names its query and the prefix whose keystroke was slowest.
+        let quoted: Vec<&str> = search.split('"').collect();
+        let (query, prefix) = (quoted[1], quoted[3]);
+        assert!(
+            search.starts_with(&format!("Search \"{query}\" at \"")),
+            "{search}"
+        );
+        assert!(!prefix.is_empty() && query.starts_with(prefix), "{search}");
         assert!(search.contains("50 ms"), "{search}");
         assert_eq!(search.matches(" ms").count(), 3, "{search}");
     }
+    let paste = line("Paste \"");
+    assert!(paste.contains("50 ms"), "{paste}");
+    assert_eq!(paste.matches(" ms").count(), 3, "{paste}");
     // The corpus is removed when the run ends.
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }

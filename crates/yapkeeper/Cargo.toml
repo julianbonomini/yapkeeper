@@ -1,7 +1,10 @@
 [package]
 name = "yapkeeper"
-version = "0.1.0"
+description = "Find, browse and resume Claude Code, Codex and Pi sessions from one terminal palette"
+version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 clap.workspace = true

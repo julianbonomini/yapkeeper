@@ -1,0 +1,107 @@
+# Cuts a release whenever main carries a version that has no tag yet.
+# Bump `version` in the root Cargo.toml and merge to release; `gh release create`
+# makes the tag, so no tag push or personal token is needed.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      new: ${{ steps.version.outputs.new }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "yapkeeper") | .version')
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "$tag already exists; nothing to release."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing $tag."
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  check:
+    needs: version
+    if: needs.version.outputs.new == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [version, check]
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Zig cross-compiles the bundled SQLite for static musl binaries.
+      - if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+      - if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Build
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then build=zigbuild; else build=build; fi
+          cargo "$build" --release --locked -p yapkeeper --target "$TARGET"
+      - name: Package
+        run: |
+          name="yapkeeper-$TAG-$TARGET"
+          mkdir "$name"
+          cp "target/$TARGET/release/yapkeeper" README.md LICENSE "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: yapkeeper-*.tar.gz*
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes

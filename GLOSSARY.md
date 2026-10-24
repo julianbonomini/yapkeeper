@@ -17,7 +17,7 @@ The filesystem directory recorded for a session. It may be a Git worktree or an 
 Where a session ran, derived from its working directory: a Git repo's main checkout, one of its linked worktrees, or a plain folder. A project groups a repo's main checkout and its worktrees.
 
 **Location list**:
-The list `Tab` or `@` opens: one row per project, with its worktrees under it, then one per plain folder, each with how many sessions its `@` token lists. Choosing a row inserts that token.
+The list `Tab` or `@` opens: one row per project, with its worktrees under it, then one per plain folder, each with how many sessions its `@` token lists. Choosing a row puts that token in place of the `@` token being typed.
 
 **Orphaned session**:
 A session whose recorded working directory no longer exists. A directory that cannot be inspected makes it an unavailable session instead.
@@ -65,7 +65,7 @@ The full-screen view `yapkeeper` opens on a terminal: a query line, the matching
 The conversation text displayed for a selected session before resuming it.
 
 **Launch directory**:
-The directory `yapkeeper` was started in. `Ctrl+L` inserts its `@` token, and `c` in the resume dialog resumes there.
+The directory `yapkeeper` was started in. `Ctrl+L` puts its `@` token at the cursor, in place of the `@` token there, and `c` in the resume dialog resumes there.
 
 **Resume dialog**:
 What `Enter` opens on a session: the exact command and directory resuming would use, any warnings, and why it can't start when it can't.

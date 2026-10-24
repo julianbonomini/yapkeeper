@@ -8,9 +8,9 @@
 //! as `@where`, `#provider` or `is:state` when it starts with one, otherwise
 //! as a bare provider name, then a bare state name, and otherwise as a word;
 //! a second `!` is just text. Sigils and names ignore case; words keep smart
-//! case. While the last token is a filter being typed, it offers the ways to
+//! case. While the cursor is on a filter being typed, it offers the ways to
 //! finish it, each with how many sessions it lists; after `@` that is the
-//! location list.
+//! location list. It also owns where a finished token goes in the query.
 
 mod locations;
 
@@ -498,14 +498,94 @@ fn fits_a_token(name: &str) -> bool {
     !name.is_empty() && !name.chars().any(char::is_whitespace)
 }
 
-/// One way to finish the filter being typed at the end of a query.
+/// A query after an edit, and where the cursor stands in it: a byte offset
+/// where a character starts, or the end.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Edited {
+    pub text: String,
+    pub cursor: usize,
+}
+
+/// `text` with the bare `@` that opens the location list in place of the
+/// `@` token the cursor touches, else at the cursor but never inside a
+/// token, the cursor right after the `@`. One space parts it from the
+/// tokens either side.
+pub fn start_location(text: &str, cursor: usize) -> Edited {
+    put(text, location_target(text, cursor), "@")
+}
+
+/// `text` with `token`, an `@` token, in place of the `@` token the cursor
+/// touches, so the query never gains a second location, else at the cursor
+/// but never inside a token; one space parts it from the tokens either
+/// side, and the cursor is after the space that follows it.
+pub fn place_location(text: &str, cursor: usize, token: &str) -> Edited {
+    finish(text, location_target(text, cursor), token)
+}
+
+/// What `start_location` and `place_location` replace: the `@` token the
+/// cursor is at the start, inside or at the end of, not one negated; else
+/// the empty range at the cursor, moved to the end of the token it is in so
+/// no token is split.
+fn location_target(text: &str, cursor: usize) -> Range<usize> {
+    let touched = pieces(text)
+        .into_iter()
+        .find(|span| span.start <= cursor && cursor <= span.end);
+    match touched {
+        Some(span) if matches!(sigil(&text[span.clone()]), Some((Sigil::Location, _))) => span,
+        Some(span) if span.start < cursor => span.end..span.end,
+        _ => cursor..cursor,
+    }
+}
+
+/// The byte range of the token the cursor is in or at the end of; `None`
+/// on a space or at a token's start, where typing starts a new token.
+fn token_at(text: &str, cursor: usize) -> Option<Range<usize>> {
+    pieces(text)
+        .into_iter()
+        .find(|span| span.start < cursor && cursor <= span.end)
+}
+
+/// `text` with `token` in place of `span`, one space parting it from the
+/// tokens either side, and the cursor right after it.
+fn put(text: &str, span: Range<usize>, token: &str) -> Edited {
+    let before = text[..span.start].trim_end();
+    let after = text[span.end..].trim_start();
+    let mut edited = before.to_string();
+    if !before.is_empty() {
+        edited.push(' ');
+    }
+    edited.push_str(token);
+    let cursor = edited.len();
+    if !after.is_empty() {
+        edited.push(' ');
+        edited.push_str(after);
+    }
+    Edited {
+        text: edited,
+        cursor,
+    }
+}
+
+/// As `put`, with the cursor past one space after `token`, added at the
+/// end of the query, so the next key typed starts a new token.
+fn finish(text: &str, span: Range<usize>, token: &str) -> Edited {
+    let mut put = put(text, span, token);
+    if put.cursor == put.text.len() {
+        put.text.push(' ');
+    }
+    put.cursor += 1;
+    put
+}
+
+/// One way to finish the filter being typed at the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Completion {
     /// The finished token as it would read, such as `is:pr` or `!#codex`,
     /// keeping its `!` or `not:` and sigil as typed.
     pub token: String,
-    /// The whole query with the token finished and a space after it.
-    pub query: String,
+    /// The whole query with the token finished in place of the one typed,
+    /// one space after it, and the cursor after that space.
+    pub edited: Edited,
     /// How many sessions `token` alone lists, by the same defaults and
     /// settings as a search.
     pub count: usize,
@@ -514,7 +594,7 @@ pub struct Completion {
     pub location: Option<LocationRow>,
 }
 
-/// The ways to finish the filter at the end of `text`, each with how many
+/// The ways to finish the filter at `cursor` in `text`, each with how many
 /// sessions its token lists. After `@`, this is the location list: the
 /// places where the sessions `@` lists ran. Each project comes with its
 /// worktrees after it, then the plain folders. Each group is ordered most
@@ -523,26 +603,27 @@ pub struct Completion {
 /// while nothing follows the `@` and `settings.hide_missing` is on. After
 /// `#`, it is the `providers` starting with what was typed after it; after
 /// `is:`, the states that do; after a bare `!` or `not:`, those providers
-/// then those states. Empty unless the last token starts with `@`, `#`,
-/// `is:`, `!` or `not:` and nothing follows it, so a space never offers any,
+/// then those states. The whole token the cursor is in or at the end of is
+/// what is finished, wherever the cursor is in it. Empty unless that token
+/// starts with `@`, `#`, `is:`, `!` or `not:`, so a space never offers any,
 /// and empty when the token typed is already the only way to finish it.
 /// Counts and rows follow `settings`.
 pub(crate) fn completions(
     text: &str,
+    cursor: usize,
     providers: &[&'static str],
     sessions: &[Rc<Listed>],
     settings: Settings,
 ) -> Vec<Completion> {
-    let Some(last) = pieces(text).pop().filter(|span| span.end == text.len()) else {
+    let Some(span) = token_at(text, cursor) else {
         return Vec::new();
     };
-    let typed_token = &text[last.start..];
+    let typed_token = &text[span.clone()];
     let (negated, rest) = negation(typed_token);
     let named = sigil(rest);
     let typed = named.map_or(rest, |(_, name)| name);
     // What is kept as typed: everything up to the name being finished.
-    let head = &text[..text.len() - typed.len()];
-    let prefix = &text[last.start..head.len()];
+    let prefix = &typed_token[..typed_token.len() - typed.len()];
     let starting = |name: &&str| fold(name).starts_with(&fold(typed));
     let matching_providers = || providers.iter().copied().filter(starting);
     let states = || State::ALL.into_iter().map(State::name).filter(starting);
@@ -564,7 +645,7 @@ pub(crate) fn completions(
             let token = format!("{prefix}{name}");
             Completion {
                 count: listed_by(&token, providers, sessions, settings).len(),
-                query: format!("{head}{name} "),
+                edited: finish(text, span.clone(), &token),
                 token,
                 location,
             }

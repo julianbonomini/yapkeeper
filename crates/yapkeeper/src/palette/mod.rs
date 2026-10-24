@@ -11,6 +11,7 @@ mod reading;
 mod resuming;
 mod settings;
 mod terminal;
+mod text_field;
 mod view;
 
 use std::path::{Path, PathBuf};
@@ -24,11 +25,12 @@ use ratatui::widgets::ListState;
 use self::reading::Reading;
 use self::resuming::Resuming;
 use self::settings::SettingsScreen;
+use self::text_field::{Change, TextField};
 use crate::Snapshot;
 use crate::indexer::Indexing;
 use crate::{
-    Catalog, Completion, Indexer, LeftOut, Listed, Message, Query, ResumeCommand, SessionKey,
-    Settings, line, location_token,
+    Catalog, Completion, Edited, Indexer, LeftOut, Listed, Message, Query, ResumeCommand,
+    SessionKey, Settings, line, location_token, place_location, start_location,
 };
 
 pub use terminal::{Restore, run};
@@ -44,7 +46,7 @@ pub struct Palette {
     launch_dir: PathBuf,
     /// The `@` token `Ctrl+L` adds: where the palette was launched.
     launch_token: Option<String>,
-    query: String,
+    query: TextField,
     /// Whether searches also read tool calls, tool output and subagent
     /// transcripts.
     tools: bool,
@@ -54,8 +56,8 @@ pub struct Palette {
     found: Vec<Rc<Listed>>,
     left_out: LeftOut,
     selection: ListState,
-    /// The ways to finish the filter at the end of `query`; while there are
-    /// any they take the results' place and the arrows move among them.
+    /// The ways to finish the filter at the cursor in `query`; while there
+    /// are any they take the results' place and the arrows move among them.
     completions: Vec<Completion>,
     completion: ListState,
     /// What was said in the selected session, with the tools called, for
@@ -153,7 +155,7 @@ impl Palette {
             home: line::home(),
             launch_dir: launch_dir.to_path_buf(),
             launch_token: location_token(launch_dir),
-            query: String::new(),
+            query: TextField::default(),
             tools: false,
             parsed: Query::default(),
             found: Vec::new(),
@@ -235,7 +237,7 @@ impl Palette {
         }
         match key.code {
             KeyCode::Char('c') if ctrl => return Step::Quit,
-            KeyCode::Char('u') if ctrl => self.set_query(String::new()),
+            KeyCode::Char('o') if ctrl => self.open_reading(),
             KeyCode::Char('l') if ctrl => self.insert_launch_location(),
             KeyCode::Char('x') if ctrl => self.toggle_hidden(now),
             KeyCode::Char('t') if ctrl => self.toggle_tools(now),
@@ -244,26 +246,20 @@ impl Palette {
             KeyCode::Char('n') if ctrl => self.move_selection(Direction::Down),
             KeyCode::Up => self.move_selection(Direction::Up),
             KeyCode::Down => self.move_selection(Direction::Down),
-            KeyCode::Right => self.open_reading(),
             KeyCode::Tab | KeyCode::Enter => {
                 let chosen = self.completion.selected().map(|row| &self.completions[row]);
                 match chosen {
-                    Some(chosen) => self.set_query(chosen.query.clone()),
+                    Some(chosen) => self.set_query(chosen.edited.clone()),
                     None if key.code == KeyCode::Tab => self.open_locations(),
                     None => self.open_resuming(),
                 }
             }
-            KeyCode::Esc if self.query.is_empty() => return Step::Quit,
-            KeyCode::Esc => self.set_query(String::new()),
-            KeyCode::Backspace => {
-                let mut query = self.query.clone();
-                query.pop();
-                self.set_query(query);
+            KeyCode::Esc if self.query.text().is_empty() => return Step::Quit,
+            KeyCode::Esc => self.set_query(Edited::default()),
+            _ => {
+                let change = self.query.handle(key);
+                self.follow(change);
             }
-            KeyCode::Char(c) if (key.modifiers - KeyModifiers::SHIFT).is_empty() => {
-                self.set_query(format!("{}{c}", self.query));
-            }
-            _ => {}
         }
         Step::Continue
     }
@@ -363,10 +359,6 @@ impl Palette {
             .map(|listed| SessionKey::of(&listed.session));
         let row = self.selection.selected().unwrap_or(0);
         let offset = self.selection.offset();
-        let completion = self
-            .completion
-            .selected()
-            .map(|row| self.completions[row].token.clone());
         self.find();
         let row = self
             .found
@@ -375,19 +367,40 @@ impl Palette {
             .or_else(|| self.found.len().checked_sub(1).map(|last| row.min(last)));
         self.selection = ListState::default().with_offset(offset);
         self.select(row);
-        self.completions = self.catalog.completions(&self.query);
+        self.complete();
+    }
+
+    /// Works out the ways to finish the filter at the cursor, keeping the
+    /// selected one when it is still offered, else selecting the first.
+    fn complete(&mut self) {
+        let kept = self
+            .completion
+            .selected()
+            .map(|row| self.completions[row].token.clone());
+        self.completions = self
+            .catalog
+            .completions(self.query.text(), self.query.cursor());
         let kept = self
             .completions
             .iter()
-            .position(|offered| Some(&offered.token) == completion.as_ref());
+            .position(|offered| Some(&offered.token) == kept.as_ref());
         let first = (!self.completions.is_empty()).then_some(0);
         self.completion = ListState::default().with_selected(kept.or(first));
     }
 
-    fn set_query(&mut self, query: String) {
-        if query != self.query {
-            self.query = query;
-            self.reapply();
+    /// Replaces the query and its cursor with `edited`.
+    fn set_query(&mut self, edited: Edited) {
+        let change = self.query.set(&edited.text, edited.cursor);
+        self.follow(change);
+    }
+
+    /// Shows what `change` to the query changes: a new text is searched
+    /// again; a cursor that moved may be on another filter to finish.
+    fn follow(&mut self, change: Change) {
+        match change {
+            Change::Text => self.reapply(),
+            Change::Cursor => self.complete(),
+            Change::Nothing => {}
         }
     }
 
@@ -404,36 +417,27 @@ impl Palette {
     /// ways to finish it, as after the query or the settings change.
     fn reapply(&mut self) {
         self.search(0);
-        self.completions = self.catalog.completions(&self.query);
-        let first = (!self.completions.is_empty()).then_some(0);
-        self.completion = ListState::default().with_selected(first);
+        self.completion = ListState::default();
+        self.complete();
     }
 
-    /// Adds the `@` token for where the palette was launched to the end of
-    /// the query; nothing when that place has no token.
+    /// Puts the `@` token for where the palette was launched at the cursor,
+    /// in place of the `@` token there; nothing when that place has no
+    /// token.
     fn insert_launch_location(&mut self) {
         let Some(token) = &self.launch_token else {
             return;
         };
-        let query = match self.query.trim_end() {
-            "" => format!("{token} "),
-            typed => format!("{typed} {token} "),
-        };
-        self.set_query(query);
+        let edited = place_location(self.query.text(), self.query.cursor(), token);
+        self.set_query(edited);
     }
 
-    /// Starts an `@` token at the end of the query, which opens the location
-    /// list; nothing when the query already ends in a bare `@`, so a second
-    /// `Tab` over an empty list types no second one.
+    /// Starts a bare `@` at the cursor, in place of the `@` token there,
+    /// which opens the location list; on a bare `@` already, a second `Tab`
+    /// over an empty list types no second one.
     fn open_locations(&mut self) {
-        if self.query.split_whitespace().next_back() == Some("@") {
-            return;
-        }
-        let query = match self.query.is_empty() || self.query.ends_with(char::is_whitespace) {
-            true => format!("{}@", self.query),
-            false => format!("{} @", self.query),
-        };
-        self.set_query(query);
+        let edited = start_location(self.query.text(), self.query.cursor());
+        self.set_query(edited);
     }
 
     /// Hides the selected session, or shows it again when it is hidden, and
@@ -501,7 +505,10 @@ impl Palette {
 
     /// Searches the catalog for the query, leaving the selection to the caller.
     fn find(&mut self) {
-        self.parsed = self.catalog.parse(&self.query).including_tools(self.tools);
+        self.parsed = self
+            .catalog
+            .parse(self.query.text())
+            .including_tools(self.tools);
         match self.catalog.search(&self.parsed) {
             Ok(found) => {
                 self.found = found.sessions;

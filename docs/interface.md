@@ -32,8 +32,8 @@ Words search conversation text, titles, and provider recaps. Every other token i
 
 Rules:
 
-- `@`, `#`, `is:`, `!`, and `not:` each open a completion list with session counts. Enter or Tab inserts the selected item.
-- A space never opens a completion list. `is pr` is two search words, so any phrase stays searchable.
+- `@`, `#`, `is:`, `!`, and `not:` each open a completion list with session counts, for the token the cursor is in or at the end of, anywhere in the query. Enter or Tab puts the selected item in place of that whole token, keeps the rest of the query, and leaves the cursor after the one space that follows it.
+- A space never opens a completion list, and neither does the cursor on a space or at a token's start. `is pr` is two search words, so any phrase stays searchable.
 - No space goes between `!` and what it negates: `!codex`, not `! codex`.
 - The query line colors filter tokens with the accent color and leaves search words plain, so the user can see how the query was read.
 - Matching is case-insensitive substring matching with smart case. Fuzzy matching was not tried. A word with an uppercase letter matches case; other words ignore case letter by letter, so the index and the check always agree.
@@ -60,6 +60,8 @@ An orphaned or unavailable session's project is inferred on a best-effort basis.
 The kind words are never cut. In a narrow terminal the path gives way from the left, and a missing folder's `folder no longer exists` from the right.
 
 Typing after `@` matches location names and paths, so `@code` finds every project under `~/code`. Result rows label locations as `project › worktree`; the `project:worktree` form is used only inside `@` tokens. `Ctrl+L` inserts the location Yapkeeper was launched from.
+
+`Tab` and `Ctrl+L` put their `@` token at the cursor, after the token the cursor is in so no word is split, with one space between it and the tokens either side. When the cursor is on an `@` token, from its first character to just after its last, theirs takes its place, so changing location never leaves two location filters; a negated `!@where` is an exclusion and stays. `Tab` leaves the cursor after its `@`, so the list stays open; `Ctrl+L` leaves it after the space that follows the token.
 
 In the location list, a folder that no longer exists cannot be checked for Git, so it is shown as `missing` with its path. A missing folder reads `missing · folder no longer exists`. Missing places are left out while nothing follows `@`, and shown once anything does.
 

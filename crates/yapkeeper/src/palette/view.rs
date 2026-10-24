@@ -224,11 +224,10 @@ fn too_small(frame: &mut Frame, area: Rect) {
 }
 
 /// The prompt, the query with the cursor in it unless the location list
-/// has the focus, and the match count on
-/// the right, after `indexing` while a pass has run a while and after how
-/// many temp sessions the query left out, each while that leaves the query
-/// `QUERY_ROOM` cells, and followed by `+tools` in the accent while searches
-/// read tool calls.
+/// has the focus, and the match count on the right, after `indexing` while
+/// a pass has run a while and after how many temp sessions the query left
+/// out, each while that leaves the query `QUERY_ROOM` cells, and followed
+/// by `+tools` in the accent while searches read tool calls.
 fn query_line(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let mut count = vec![Span::styled(
         format!("{} / {}", palette.found.len(), palette.catalog.indexed()),

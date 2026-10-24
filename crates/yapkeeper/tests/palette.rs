@@ -710,9 +710,9 @@ fn the_cursor_moves_and_edits_anywhere_in_the_query() {
         Some(Position::new(QUERY_X + 1, 1))
     );
     alt(&mut palette, KeyCode::Char('f'));
-    keys(&mut palette, " @usr");
+    keys(&mut palette, " !old");
     let drawn = frame(&mut palette, 120, 40);
-    assert_eq!(query_text(&drawn), "retry @usr #codex", "{drawn:#?}");
+    assert_eq!(query_text(&drawn), "retry !old #codex", "{drawn:#?}");
     assert_eq!(
         cursor(&mut palette, 120, 40),
         Some(Position::new(QUERY_X + 10, 1))
@@ -721,7 +721,7 @@ fn the_cursor_moves_and_edits_anywhere_in_the_query() {
     press(&mut palette, KeyCode::Delete);
     press(&mut palette, KeyCode::Backspace);
     let drawn = frame(&mut palette, 120, 40);
-    assert_eq!(query_text(&drawn), "retry @us#codex", "{drawn:#?}");
+    assert_eq!(query_text(&drawn), "retry !ol#codex", "{drawn:#?}");
     ctrl(&mut palette, 'w');
     let drawn = frame(&mut palette, 120, 40);
     assert_eq!(query_text(&drawn), "retry #codex", "{drawn:#?}");
@@ -738,7 +738,7 @@ fn both_forms_of_each_alt_key_move_or_delete_a_word() {
         (KeyCode::Char('b'), KeyCode::Char('f')),
     ] {
         let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
-        keys(&mut palette, "retry @usr #codex");
+        keys(&mut palette, "retry !old #codex");
         alt(&mut palette, back);
         alt(&mut palette, back);
         assert_eq!(
@@ -752,12 +752,12 @@ fn both_forms_of_each_alt_key_move_or_delete_a_word() {
         );
     }
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
-    keys(&mut palette, "retry @usr #codex");
+    keys(&mut palette, "retry !old #codex");
     alt(&mut palette, KeyCode::Backspace);
     press(&mut palette, KeyCode::Home);
     alt(&mut palette, KeyCode::Char('d'));
     let drawn = frame(&mut palette, 120, 40);
-    assert_eq!(query_text(&drawn), " @usr", "{drawn:#?}");
+    assert_eq!(query_text(&drawn), " !old", "{drawn:#?}");
 }
 
 #[test]
@@ -1294,6 +1294,15 @@ fn a_space_never_opens_completions() {
         let frame = frame(&mut palette, 120, 40);
         assert_eq!(completions(&frame), [], "{typed}: {frame:#?}");
     }
+
+    // Nor does a space in the middle of the query.
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "#c  tidy");
+    press(&mut palette, KeyCode::Home);
+    alt(&mut palette, KeyCode::Right);
+    press(&mut palette, KeyCode::Right);
+    let frame = frame(&mut palette, 120, 40);
+    assert_eq!(completions(&frame), [], "{frame:#?}");
 }
 
 #[test]
@@ -1316,6 +1325,89 @@ fn ctrl_l_inserts_where_the_palette_was_launched() {
         assert_eq!(query_text(&frame), expected, "{frame:#?}");
         assert_eq!(completions(&frame), [], "{frame:#?}");
     }
+}
+
+#[test]
+fn a_filter_in_the_middle_completes_in_place() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "retry #c   tidy");
+    alt(&mut palette, KeyCode::Char('b'));
+    alt(&mut palette, KeyCode::Char('b'));
+    press(&mut palette, KeyCode::Right);
+    let frame = self::frame(&mut palette, 120, 40);
+    assert_eq!(
+        completions(&frame),
+        pairs(&[("#claude", 2), ("#codex", 1)]),
+        "{frame:#?}"
+    );
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Tab);
+    let frame = self::frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "retry #codex tidy", "{frame:#?}");
+    assert_eq!(completions(&frame), [], "{frame:#?}");
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X + 13, 1))
+    );
+
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "is:o tidy");
+    press(&mut palette, KeyCode::Home);
+    press(&mut palette, KeyCode::Right);
+    let frame = self::frame(&mut palette, 120, 40);
+    assert_eq!(
+        completions(&frame),
+        pairs(&[("is:orphaned", 1)]),
+        "{frame:#?}"
+    );
+    press(&mut palette, KeyCode::Enter);
+    let frame = self::frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "is:orphaned tidy", "{frame:#?}");
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X + 12, 1))
+    );
+}
+
+#[test]
+fn ctrl_l_inserts_at_the_cursor_or_in_place_of_the_location_under_it() {
+    let histories = Histories::three();
+    let launched = Path::new("/usr/bin");
+    let cases = [
+        ("retry #codex", 1, "retry @/usr/bin #codex", 16),
+        ("retry #codex", 0, "retry #codex @/usr/bin", 23),
+        ("#codex", 1, "@/usr/bin #codex", 10),
+        ("retry @zzz #codex", 1, "retry @/usr/bin #codex", 16),
+        ("retry !@zzz #codex", 1, "retry !@zzz @/usr/bin #codex", 22),
+    ];
+    for (typed, back, expected, cursor_at) in cases {
+        let mut palette = Palette::new(histories.catalog(), Colour::Accent, launched);
+        keys(&mut palette, typed);
+        for _ in 0..back {
+            alt(&mut palette, KeyCode::Left);
+        }
+        // Into the middle of the token before the cursor.
+        press(&mut palette, KeyCode::Left);
+        press(&mut palette, KeyCode::Left);
+        ctrl(&mut palette, 'l');
+        let frame = frame(&mut palette, 120, 40);
+        assert_eq!(query_text(&frame), expected, "{frame:#?}");
+        assert_eq!(
+            cursor(&mut palette, 120, 40),
+            Some(Position::new(QUERY_X + cursor_at, 1)),
+            "{typed}"
+        );
+    }
+
+    // On the first character of an `@` token is on it too.
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, launched);
+    keys(&mut palette, "retry @zzz #codex");
+    alt(&mut palette, KeyCode::Left);
+    alt(&mut palette, KeyCode::Left);
+    ctrl(&mut palette, 'l');
+    let frame = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "retry @/usr/bin #codex", "{frame:#?}");
 }
 
 #[test]
@@ -1628,6 +1720,69 @@ fn choosing_a_project_or_a_folder_inserts_its_token() {
     }
     press(&mut palette, KeyCode::Tab);
     assert_eq!(query_text(&frame(&mut palette, 120, 40)), "@/usr");
+}
+
+#[test]
+fn a_location_in_the_middle_completes_in_place() {
+    let (histories, _live) = locations_fixture();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "retry @lint #claude");
+    alt(&mut palette, KeyCode::Left);
+    for _ in 0..3 {
+        press(&mut palette, KeyCode::Left);
+    }
+    let frame = self::frame(&mut palette, 120, 40);
+    let labels: Vec<String> = location_rows(&frame)
+        .into_iter()
+        .map(|row| row.label)
+        .collect();
+    assert_eq!(labels, ["lint-kit"], "{frame:#?}");
+    press(&mut palette, KeyCode::Enter);
+    let frame = self::frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "retry @lint-kit #claude", "{frame:#?}");
+    assert_eq!(location_rows(&frame), [], "{frame:#?}");
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X + 16, 1))
+    );
+}
+
+#[test]
+fn tab_starts_a_location_at_the_cursor_or_in_place_of_the_one_under_it() {
+    let (histories, _live) = locations_fixture();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "retry #claude");
+    alt(&mut palette, KeyCode::Left);
+    press(&mut palette, KeyCode::Tab);
+    let frame = self::frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "retry @ #claude", "{frame:#?}");
+    assert_documented_order(&location_rows(&frame));
+    press(&mut palette, KeyCode::Enter);
+    let frame = self::frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "retry @lint-kit #claude", "{frame:#?}");
+    assert_eq!(
+        cursor(&mut palette, 120, 40),
+        Some(Position::new(QUERY_X + 16, 1))
+    );
+
+    // `@zzz` offers no location, so `Tab` starts it again from `@`.
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "retry @zzz #claude");
+    alt(&mut palette, KeyCode::Left);
+    press(&mut palette, KeyCode::Left);
+    press(&mut palette, KeyCode::Tab);
+    let frame = self::frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "retry @ #claude", "{frame:#?}");
+    assert_documented_order(&location_rows(&frame));
+
+    // So it does with the cursor on the `@` of `@zzz`.
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    keys(&mut palette, "retry @zzz #claude");
+    alt(&mut palette, KeyCode::Left);
+    alt(&mut palette, KeyCode::Left);
+    press(&mut palette, KeyCode::Tab);
+    let frame = self::frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&frame), "retry @ #claude", "{frame:#?}");
 }
 
 #[test]

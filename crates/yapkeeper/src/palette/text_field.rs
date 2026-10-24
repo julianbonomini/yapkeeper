@@ -8,6 +8,8 @@ use std::ops::Range;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::line::without_controls;
+
 /// An empty field, the cursor at its start.
 #[derive(Default)]
 pub(super) struct TextField {
@@ -18,6 +20,16 @@ pub(super) struct TextField {
     /// Where the part `visible` last showed starts. Edits don't keep it on
     /// a character, so `visible` moves it back to one before reading it.
     scroll: usize,
+}
+
+/// What an edit or a key changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Change {
+    Nothing,
+    /// Only where the cursor is.
+    Cursor,
+    /// The text, and maybe the cursor.
+    Text,
 }
 
 /// What `TextField::visible` shows of the text.
@@ -39,15 +51,34 @@ impl TextField {
         &self.text
     }
 
-    /// Replaces the text with `text`, without its control characters, and
-    /// puts the cursor at its end.
-    pub(super) fn set(&mut self, text: &str) {
-        self.text = text.chars().filter(|c| !c.is_control()).collect();
-        self.cursor = self.text.len();
+    /// The cursor's byte offset in the text: where a character starts, or
+    /// the end.
+    pub(super) fn cursor(&self) -> usize {
+        self.cursor
     }
 
-    /// Applies `key` if it is one a text field takes, and says whether the
-    /// text changed. Typing inserts at the cursor; `←` `→` move it by a
+    /// Replaces the text with `text`, without its control characters, and
+    /// puts the cursor at byte offset `cursor` in `text`, or at the end when
+    /// no character starts there; says what that changed.
+    pub(super) fn set(&mut self, text: &str, cursor: usize) -> Change {
+        let (before, after) = text.split_at_checked(cursor).unwrap_or((text, ""));
+        let before = without_controls(before);
+        let cursor = before.len();
+        let text = before + &without_controls(after);
+        let change = if text != self.text {
+            Change::Text
+        } else if cursor != self.cursor {
+            Change::Cursor
+        } else {
+            Change::Nothing
+        };
+        self.text = text;
+        self.cursor = cursor;
+        change
+    }
+
+    /// Applies `key` if it is one a text field takes, and says what it
+    /// changed. Typing inserts at the cursor; `←` `→` move it by a
     /// character, `Alt+←` `Alt+→` or `Alt+B` `Alt+F` by a word, `Home` `End`
     /// or `Ctrl+A` `Ctrl+E` to either end. `Backspace` and `Delete` delete a
     /// character before and after it, `Ctrl+W` or `Alt+Backspace` and
@@ -55,7 +86,7 @@ impl TextField {
     /// it. A word is a run of non-whitespace. A character is what reads as
     /// one: a combining mark, or an emoji joined by a zero-width joiner,
     /// goes with the character before it. Other keys change nothing.
-    pub(super) fn handle(&mut self, key: KeyEvent) -> bool {
+    pub(super) fn handle(&mut self, key: KeyEvent) -> Change {
         // Terminals send `Alt+key` as ESC then the key, which crossterm
         // reports as the key with `ALT`, so one match takes both forms.
         let (ctrl, alt) = (KeyModifiers::CONTROL, KeyModifiers::ALT);
@@ -66,7 +97,7 @@ impl TextField {
             {
                 self.text.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
-                return true;
+                return Change::Text;
             }
             (KeyCode::Left, KeyModifiers::NONE) => Target::Move(self.before(self.cursor)),
             (KeyCode::Right, KeyModifiers::NONE) => Target::Move(self.after(self.cursor)),
@@ -87,18 +118,20 @@ impl TextField {
             (KeyCode::Char('d'), m) if m == alt => Target::Delete(self.word_end()),
             (KeyCode::Char('u'), m) if m == ctrl => Target::Delete(start),
             (KeyCode::Char('k'), m) if m == ctrl => Target::Delete(end),
-            _ => return false,
+            _ => return Change::Nothing,
         };
         match target {
+            Target::Move(at) if at == self.cursor => Change::Nothing,
             Target::Move(at) => {
                 self.cursor = at;
-                false
+                Change::Cursor
             }
+            Target::Delete(at) if at == self.cursor => Change::Nothing,
             Target::Delete(at) => {
                 let range = at.min(self.cursor)..at.max(self.cursor);
                 self.cursor = range.start;
-                self.text.replace_range(range.clone(), "");
-                !range.is_empty()
+                self.text.replace_range(range, "");
+                Change::Text
             }
         }
     }
@@ -230,10 +263,7 @@ mod tests {
     fn field(text: &str) -> TextField {
         let at = text.find('|').expect("a | marks the cursor");
         let mut field = TextField::default();
-        field.set(&text.replace('|', ""));
-        while field.cursor > at {
-            field.handle(key(KeyCode::Left, KeyModifiers::NONE));
-        }
+        field.set(&text.replace('|', ""), at);
         field
     }
 
@@ -253,7 +283,7 @@ mod tests {
     /// the text changed.
     fn after(text: &str, code: KeyCode, modifiers: KeyModifiers) -> (String, bool) {
         let mut field = field(text);
-        let changed = field.handle(key(code, modifiers));
+        let changed = field.handle(key(code, modifiers)) == Change::Text;
         (field.marked(), changed)
     }
 
@@ -262,10 +292,14 @@ mod tests {
     const ALT: KeyModifiers = KeyModifiers::ALT;
 
     #[test]
-    fn set_puts_the_cursor_at_the_end_and_drops_control_characters() {
+    fn set_drops_control_characters_and_keeps_the_cursor_before_the_same_character() {
         let mut field = TextField::default();
-        field.set("retry\u{1b}[31m #codex");
-        assert_eq!(field.marked(), "retry[31m #codex|");
+        assert_eq!(field.set("re\u{1b}[31m #codex", 8), Change::Text);
+        assert_eq!(field.marked(), "re[31m |#codex");
+        assert_eq!(field.set("re[31m #codex", 0), Change::Cursor);
+        assert_eq!(field.set("re[31m #codex", 0), Change::Nothing);
+        field.set("日本", 1);
+        assert_eq!(field.marked(), "日本|");
     }
 
     #[test]

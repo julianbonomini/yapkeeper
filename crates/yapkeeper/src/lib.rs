@@ -113,9 +113,9 @@ impl DataDir {
         // The XDG spec says a relative path is invalid and must be ignored.
         let base = match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
             Some(dir) if dir.is_absolute() => dir,
-            _ => match std::env::var_os("HOME") {
-                Some(home) if !home.is_empty() => PathBuf::from(home).join(".local/share"),
-                _ => {
+            _ => match dir_from_env("HOME") {
+                Some(home) => home.join(".local/share"),
+                None => {
                     return Err(MissingHome {
                         variable: "XDG_DATA_HOME",
                     });

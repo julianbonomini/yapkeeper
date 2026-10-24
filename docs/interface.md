@@ -78,7 +78,7 @@ The preview shows, in order:
 
 `→` opens the full conversation in place of the query line, results and preview, with the session's title and where it ran above it. Every message is shown whole, with the search words highlighted, and each tool call is one line. `↑` `↓` scroll by a line, `PgUp` `PgDn` by a page less one line, and `Home` `End` jump to either end. It opens at the first match. `n` and `N` move to the next and previous match, wrapping past the last and the first, and the title line shows which one (`match 2 / 3`). `Enter` there opens the resume dialog. `Esc` or `←` returns to the palette with the query and selection unchanged.
 
-Recaps cost nothing extra: Claude Code writes `away_summary` records into its session files. On the real histories, 180 of 783 sessions had one and 100 had a `pr-link` record. Codex sessions have no recap. Writing a summary for every session would need a model call during indexing; that is deferred (see open questions).
+Recaps cost nothing extra: Claude Code writes `away_summary` records into its session files. On the real histories, 180 of 783 sessions had one and 100 had a `pr-link` record. Codex and Pi sessions have no recap. Writing a summary for every session would need a model call during indexing; that is deferred (see open questions).
 
 ## Defaults and settings
 

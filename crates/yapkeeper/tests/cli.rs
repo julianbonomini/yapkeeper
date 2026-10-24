@@ -1201,30 +1201,180 @@ fn pi_sessions_come_from_its_session_dir_then_its_agent_dir_then_home() {
         &home.path().join(".pi/agent/sessions/--synthetic-pi-root--"),
         "From home",
     );
-    let list = |env: &[(&str, &Path)]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
-            .arg("list")
-            .env_clear()
-            .env("HOME", home.path())
-            .envs(env.iter().copied())
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{}", stderr(&output));
-        stdout(&output)
-            .lines()
-            .map(|line| line.split("  ").next().unwrap().to_string())
-            .collect::<Vec<_>>()
-    };
     assert_eq!(
-        list(&[
-            ("PI_CODING_AGENT_SESSION_DIR", &session_dir),
-            ("PI_CODING_AGENT_DIR", &agent_dir),
-        ]),
+        pi_titles(
+            home.path(),
+            &[
+                ("PI_CODING_AGENT_SESSION_DIR", session_dir.as_os_str()),
+                ("PI_CODING_AGENT_DIR", agent_dir.as_os_str()),
+            ]
+        ),
         ["From the session dir"]
     );
     assert_eq!(
-        list(&[("PI_CODING_AGENT_DIR", &agent_dir)]),
+        pi_titles(
+            home.path(),
+            &[("PI_CODING_AGENT_DIR", agent_dir.as_os_str())]
+        ),
         ["From the agent dir"]
     );
-    assert_eq!(list(&[]), ["From home"]);
+    assert_eq!(pi_titles(home.path(), &[]), ["From home"]);
+}
+
+/// The titles `list` prints with only `HOME` and `env` set.
+fn pi_titles(home: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Vec<String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .arg("list")
+        .env_clear()
+        .env("HOME", home)
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    stdout(&output)
+        .lines()
+        .map(|line| line.split("  ").next().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn an_empty_pi_session_dir_falls_back_to_the_agent_dir() {
+    let home = tempfile::tempdir().unwrap();
+    let agent_dir = home.path().join("custom-agent");
+    write_pi_session(
+        &agent_dir.join("sessions/--synthetic-pi-root--"),
+        "From the agent dir",
+    );
+    write_pi_session(
+        &home.path().join(".pi/agent/sessions/--synthetic-pi-root--"),
+        "From home",
+    );
+    assert_eq!(
+        pi_titles(
+            home.path(),
+            &[
+                ("PI_CODING_AGENT_SESSION_DIR", "".as_ref()),
+                ("PI_CODING_AGENT_DIR", agent_dir.as_os_str()),
+            ]
+        ),
+        ["From the agent dir"]
+    );
+}
+
+#[test]
+fn empty_pi_variables_fall_back_to_home() {
+    let home = tempfile::tempdir().unwrap();
+    write_pi_session(
+        &home
+            .path()
+            .join("custom-agent/sessions/--synthetic-pi-root--"),
+        "From the agent dir",
+    );
+    write_pi_session(
+        &home.path().join(".pi/agent/sessions/--synthetic-pi-root--"),
+        "From home",
+    );
+    assert_eq!(
+        pi_titles(
+            home.path(),
+            &[
+                ("PI_CODING_AGENT_SESSION_DIR", "".as_ref()),
+                ("PI_CODING_AGENT_DIR", "".as_ref()),
+            ]
+        ),
+        ["From home"]
+    );
+}
+
+#[test]
+fn help_names_the_directories_under_home_when_their_variables_are_empty() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .arg("--help")
+        .env_clear()
+        .env("HOME", home.path())
+        .env("CLAUDE_CONFIG_DIR", "")
+        .env("CODEX_HOME", "")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    for dir in [".claude/projects", ".codex"] {
+        let dir = home.path().join(dir).display().to_string();
+        assert!(stdout.contains(&dir), "should name {dir}: {stdout}");
+    }
+}
+
+#[test]
+fn help_says_why_no_history_directory_resolves_with_an_empty_home() {
+    let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .arg("--help")
+        .env_clear()
+        .env("HOME", "")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("nor HOME is set"), "{stdout}");
+}
+
+#[test]
+fn paths_fails_with_an_empty_home_as_without_one() {
+    let paths = |home: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_yapkeeper"));
+        command.arg("paths").env_clear();
+        if let Some(home) = home {
+            command.env("HOME", home);
+        }
+        command.output().unwrap()
+    };
+    let empty = paths(Some(""));
+    let unset = paths(None);
+    assert!(!empty.status.success());
+    assert_eq!(empty.status.code(), unset.status.code());
+    assert_eq!(stdout(&empty), stdout(&unset));
+    assert_eq!(stderr(&empty), stderr(&unset));
+    assert_eq!(
+        stderr(&empty),
+        "yapkeeper: neither XDG_DATA_HOME nor HOME is set\n"
+    );
+}
+
+#[test]
+fn list_shows_no_tilde_with_an_empty_home() {
+    let root = temp_dir();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("code");
+    fs::create_dir_all(&cwd).unwrap();
+    write_home_session(
+        root.path(),
+        "aaaaaaaa-0000-4000-8000-000000000021",
+        "Work with no home",
+        &cwd,
+        "",
+    );
+    let empty_dir = |name: &str| {
+        let dir = elsewhere.path().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+
+    let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .args(["search", "is:temp"])
+        .env_clear()
+        .env("HOME", "")
+        .env("XDG_DATA_HOME", empty_dir("data"))
+        .env("CODEX_HOME", empty_dir("codex"))
+        .env("PI_CODING_AGENT_SESSION_DIR", empty_dir("pi"))
+        .env("CLAUDE_CONFIG_DIR", root.path().join(".claude"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
+    assert!(
+        stdout.ends_with(&format!("  {}\n", cwd.display())),
+        "{stdout:?}"
+    );
+    assert!(!stdout.contains('~'), "{stdout:?}");
 }

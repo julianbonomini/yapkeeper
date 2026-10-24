@@ -214,9 +214,9 @@ fn texts(content: &Value) -> impl Iterator<Item = &str> {
 /// when it is set and non-empty, otherwise `$PI_CODING_AGENT_DIR/sessions`,
 /// otherwise `$HOME/.pi/agent/sessions`.
 pub fn session_dir() -> Result<PathBuf, MissingHome> {
-    match std::env::var_os("PI_CODING_AGENT_SESSION_DIR") {
-        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ => yapkeeper_model::root_from_env("PI_CODING_AGENT_DIR", ".pi/agent")
+    match yapkeeper_model::dir_from_env("PI_CODING_AGENT_SESSION_DIR") {
+        Some(dir) => Ok(dir),
+        None => yapkeeper_model::root_from_env("PI_CODING_AGENT_DIR", ".pi/agent")
             .map(|agent_dir| agent_dir.join("sessions")),
     }
 }

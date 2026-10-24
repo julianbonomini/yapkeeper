@@ -37,7 +37,7 @@ Installed CLI help supports `codex resume <session-id> -C <directory>`. Use the 
 
 Observed read-only on 2026-10-23 and 2026-10-24, aggregate counts only. Rechecked against the installed CLI's session manager on 2026-10-24.
 
-- Session root: `PI_CODING_AGENT_SESSION_DIR` when set, otherwise `$PI_CODING_AGENT_DIR/sessions`, otherwise `~/.pi/agent/sessions`. `--session-dir` overrides all three for Pi itself.
+- Session root: `PI_CODING_AGENT_SESSION_DIR` when set and non-empty, otherwise `$PI_CODING_AGENT_DIR/sessions`, otherwise `~/.pi/agent/sessions`. `--session-dir` overrides all three for Pi itself.
 - Under the default root, a top-level session is `<root>/<encoded-cwd>/<timestamp>_<session-id>.jsonl`, where `<encoded-cwd>` is the path with separators turned into `-` between `--` marks. A custom session directory holds session files directly, with no `<encoded-cwd>` folder. Yapkeeper reads `.jsonl` files in the root and one folder below it, and takes the working directory from the header rather than the folder name.
 - The first record has type `session` with `version`, `id`, `timestamp`, and `cwd`. Some session files also carry `parentSession`. None of the 24 top-level files observed did.
 - Other record types: `message`, `custom_message`, `custom`, `session_info` (its `name` is the session's title; Yapkeeper keeps the latest), `model_change`, `thinking_level_change`, and `compaction`. Some records in nested files have no `type`. Yapkeeper skips records without a `type` and records of types it doesn't know.

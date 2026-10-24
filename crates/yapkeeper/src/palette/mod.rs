@@ -33,7 +33,7 @@ use crate::{
     SessionKey, Settings, line, location_token, place_location, start_location,
 };
 
-pub use terminal::{Restore, run};
+pub use terminal::{Events, Restore, event_loop, run};
 
 /// The command palette over a catalog: an empty query, every session it
 /// lists, the first one selected.
@@ -54,6 +54,10 @@ pub struct Palette {
     parsed: Query,
     /// What the query found, in `search`'s order.
     found: Vec<Rc<Listed>>,
+    /// The query or the search settings changed since the last search.
+    /// Whatever next reads `found` or `selection` calls `settle` first;
+    /// `selected` asserts it.
+    unsearched: bool,
     left_out: LeftOut,
     selection: ListState,
     /// The ways to finish the filter at the cursor in `query`; while there
@@ -159,6 +163,7 @@ impl Palette {
             tools: false,
             parsed: Query::default(),
             found: Vec::new(),
+            unsearched: false,
             left_out: LeftOut::default(),
             selection: ListState::default(),
             completions: Vec::new(),
@@ -184,7 +189,8 @@ impl Palette {
     }
 
     /// Applies one key press, made at `now`, and says whether the palette
-    /// is still open. Key releases and repeats are ignored.
+    /// is still open. Key releases and repeats are ignored. The results it
+    /// changes are searched for when they are next drawn or acted on.
     pub fn handle(&mut self, key: KeyEvent, now: Instant) -> Step {
         if key.kind != KeyEventKind::Press {
             return Step::Continue;
@@ -269,6 +275,7 @@ impl Palette {
     /// published by `now`. The query, the selected session when it is still
     /// listed, and the place in the conversation are kept.
     pub fn render(&mut self, frame: &mut Frame, now: Instant) {
+        self.settle();
         self.take_in(now);
         if self.toast.as_ref().is_some_and(|toast| toast.until <= now) {
             self.toast = None;
@@ -413,10 +420,10 @@ impl Palette {
         }
     }
 
-    /// Searches for the query again from the first row and works out the
-    /// ways to finish it, as after the query or the settings change.
+    /// Marks the query to be searched again from the first row and works
+    /// out the ways to finish it, as after the query or the settings change.
     fn reapply(&mut self) {
-        self.search(0);
+        self.unsearched = true;
         self.completion = ListState::default();
         self.complete();
     }
@@ -445,6 +452,7 @@ impl Palette {
     /// next session. Nothing while completions are open, or when no session
     /// is selected; a failure to record it is shown in the footer.
     fn toggle_hidden(&mut self, now: Instant) {
+        self.settle();
         let Some(listed) = self.selected().filter(|_| self.completions.is_empty()) else {
             return;
         };
@@ -467,7 +475,7 @@ impl Palette {
     fn toggle_tools(&mut self, now: Instant) {
         self.tools = !self.tools;
         self.confirm(Confirmation::Tools(self.tools), now);
-        self.search(0);
+        self.unsearched = true;
     }
 
     /// Shows `said` in the footer from `now` for `TOAST_TIME`.
@@ -481,6 +489,7 @@ impl Palette {
     /// Opens the selected session's whole conversation; nothing while
     /// completions are open, or when no session is selected.
     fn open_reading(&mut self) {
+        self.settle();
         if self.completions.is_empty() && self.selected().is_some() {
             self.reading = Some(Reading::new());
         }
@@ -489,8 +498,18 @@ impl Palette {
     /// Opens the resume dialog on the selected session; nothing when no
     /// session is selected.
     fn open_resuming(&mut self) {
+        self.settle();
         if let Some(listed) = self.selected() {
             self.resuming = Some(Resuming::open(&self.catalog, &listed.session));
+        }
+    }
+
+    /// Searches for the query when it changed since the last search, from
+    /// the first row.
+    fn settle(&mut self) {
+        if self.unsearched {
+            self.unsearched = false;
+            self.search(0);
         }
     }
 
@@ -522,6 +541,7 @@ impl Palette {
     /// Moves the selection one row, among the completions while there are
     /// any, otherwise among the sessions, stopping at the first and last rows.
     fn move_selection(&mut self, direction: Direction) {
+        self.settle();
         if self.completions.is_empty() {
             let row = direction.step(self.selection.selected(), self.found.len());
             if row != self.selection.selected() {
@@ -550,6 +570,7 @@ impl Palette {
 
     /// The session the selection bar is on.
     fn selected(&self) -> Option<Rc<Listed>> {
+        debug_assert!(!self.unsearched, "results read before they were searched");
         self.selection
             .selected()
             .map(|row| Rc::clone(&self.found[row]))

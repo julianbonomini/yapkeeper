@@ -4,8 +4,10 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{self, AssertUnwindSafe};
@@ -14,15 +16,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
-use ratatui::backend::TestBackend;
-use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::Position;
+use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::{Position, Size};
 use ratatui::style::{Color, Modifier};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
-use yapkeeper::palette::{Colour, Palette, Restore, Step};
+use yapkeeper::palette::{Colour, Events, Palette, Restore, Step, event_loop};
 use yapkeeper::{
     Catalog, DataDir, Indexer, REFRESH_INTERVAL, ResumeCommand, Roots, State, Stepper, hide, list,
     rebuild,
@@ -267,6 +269,178 @@ fn keys(palette: &mut Palette, text: &str) {
     for c in text.chars() {
         press(palette, KeyCode::Char(c));
     }
+}
+
+/// What a `Script` gives the event loop next.
+enum Scripted {
+    Event(Event),
+    /// Nothing comes until the loop waits with a timeout.
+    Pause,
+}
+
+/// Events for `event_loop`, given in order: everything up to a `Pause` is
+/// already waiting when the loop asks, and a `Pause` ends the first timed
+/// wait that reaches it. Records each timed wait a `Pause` ended.
+struct Script {
+    queue: VecDeque<Scripted>,
+    waits: Vec<Duration>,
+}
+
+impl Script {
+    fn new(steps: impl IntoIterator<Item = Scripted>) -> Script {
+        Script {
+            queue: steps.into_iter().collect(),
+            waits: Vec::new(),
+        }
+    }
+}
+
+impl Events for Script {
+    fn next_event(&mut self, timeout: Option<Duration>) -> io::Result<Option<Event>> {
+        match timeout {
+            Some(Duration::ZERO) => {}
+            Some(timeout) => {
+                if let Some(Scripted::Pause) = self.queue.front() {
+                    self.queue.pop_front();
+                    self.waits.push(timeout);
+                    return Ok(None);
+                }
+            }
+            None => {
+                while let Some(Scripted::Pause) = self.queue.front() {
+                    self.queue.pop_front();
+                }
+            }
+        }
+        match self.queue.pop_front() {
+            Some(Scripted::Event(event)) => Ok(Some(event)),
+            Some(Scripted::Pause) => {
+                self.queue.push_front(Scripted::Pause);
+                Ok(None)
+            }
+            None if timeout == Some(Duration::ZERO) => Ok(None),
+            // A loop that would wait for good fails rather than hangs.
+            None => panic!("the event loop waited past the end of its script"),
+        }
+    }
+}
+
+/// One key press per character of `text`.
+fn typed(text: &str) -> Vec<Scripted> {
+    text.chars().map(|c| key(KeyCode::Char(c))).collect()
+}
+
+fn key(code: KeyCode) -> Scripted {
+    Scripted::Event(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+}
+
+fn ctrl_key(c: char) -> Scripted {
+    Scripted::Event(Event::Key(KeyEvent::new(
+        KeyCode::Char(c),
+        KeyModifiers::CONTROL,
+    )))
+}
+
+/// A `TestBackend` that fails as a terminal does, with `io::Error`, and
+/// keeps every frame drawn to it, as `lines` reads it.
+struct Recording {
+    backend: TestBackend,
+    frames: Vec<Vec<String>>,
+}
+
+impl Recording {
+    fn new(width: u16, height: u16) -> Recording {
+        Recording {
+            backend: TestBackend::new(width, height),
+            frames: Vec::new(),
+        }
+    }
+}
+
+impl Backend for Recording {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.backend.draw(content).map_err(never)
+    }
+
+    fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        self.backend.append_lines(n).map_err(never)
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.backend.hide_cursor().map_err(never)
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.backend.show_cursor().map_err(never)
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        self.backend.get_cursor_position().map_err(never)
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        self.backend.set_cursor_position(position).map_err(never)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.backend.clear().map_err(never)
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        self.backend.clear_region(clear_type).map_err(never)
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        self.backend.size().map_err(never)
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        self.backend.window_size().map_err(never)
+    }
+
+    /// `Terminal::draw` flushes once per frame, so this is where a frame ends.
+    fn flush(&mut self) -> io::Result<()> {
+        self.backend.flush().map_err(never)?;
+        self.frames.push(lines(self.backend.buffer()));
+        Ok(())
+    }
+}
+
+/// The `io::Error` a `TestBackend` call can't fail with.
+fn never(error: Infallible) -> io::Error {
+    match error {}
+}
+
+/// What a run of `event_loop` over a script did.
+struct Ran {
+    returned: Option<ResumeCommand>,
+    /// Every frame drawn, in order.
+    frames: Vec<Vec<String>>,
+    /// The timed waits a `Pause` ended.
+    waits: Vec<Duration>,
+}
+
+/// Runs `event_loop` on `palette` over `script` in a 120×40 terminal.
+fn run_script(palette: &mut Palette, script: impl IntoIterator<Item = Scripted>) -> Ran {
+    let mut terminal = Terminal::new(Recording::new(120, 40)).unwrap();
+    let mut script = Script::new(script);
+    let returned = event_loop(palette, &mut terminal, &mut script).unwrap();
+    Ran {
+        returned,
+        frames: std::mem::take(&mut terminal.backend_mut().frames),
+        waits: script.waits,
+    }
+}
+
+/// Whether `frame` is the startup frame: the empty query's placeholder and
+/// all three of `Histories::three()`'s sessions.
+fn is_startup(frame: &[String]) -> bool {
+    query_text(frame).starts_with("search everything") && rows_with(frame, &TITLES).len() == 3
 }
 
 /// The rows whose title starts with one of `titles`, in frame order.
@@ -3653,4 +3827,144 @@ fn the_background_thread_waits_after_a_pass_and_runs_another_on_ctrl_r() {
         assert!(Instant::now() < deadline, "Ctrl+R started no second pass");
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn a_paste_draws_once_with_the_whole_query_and_its_results() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = typed("retry")
+        .into_iter()
+        .chain([Scripted::Pause, ctrl_key('c')]);
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    assert_eq!(frames.len(), 2, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    let pasted = &frames[1];
+    assert_eq!(query_text(pasted), "retry", "{pasted:#?}");
+    assert!(
+        pasted[1]
+            .trim_end_matches('│')
+            .trim_end()
+            .ends_with("1 / 3"),
+        "{pasted:#?}"
+    );
+    assert_eq!(rows_with(pasted, &TITLES).len(), 1, "{pasted:#?}");
+    assert_eq!(rows_with(pasted, &["Retry the billing job"]).len(), 1);
+}
+
+#[test]
+fn ctrl_c_in_a_batch_quits_without_applying_the_keys_after_it() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = typed("ab")
+        .into_iter()
+        .chain([ctrl_key('c')])
+        .chain(typed("xy"));
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    assert_eq!(frames.len(), 1, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    let after = frame(&mut palette, 120, 40);
+    assert_eq!(query_text(&after), "ab", "{after:#?}");
+}
+
+#[test]
+fn a_confirmed_resume_in_a_batch_ends_the_loop_without_applying_the_keys_after_it() {
+    let histories = Histories::three();
+    histories.pi(PI, "/usr", "Sort the inbox");
+    let bin = bin_with(&["claude", "codex", "pi"]);
+    let mut palette = finding_in(&histories, bin.path(), Path::new("/"));
+    let script = typed("#pi ").into_iter().chain([
+        key(KeyCode::Enter),
+        key(KeyCode::Enter),
+        key(KeyCode::Esc),
+    ]);
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(
+        returned,
+        Some(ResumeCommand {
+            program: "pi".to_string(),
+            args: vec!["--session".to_string(), PI.to_string()],
+            cwd: PathBuf::from("/usr"),
+        })
+    );
+    assert_eq!(frames.len(), 1, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    let dialog = frame(&mut palette, 120, 40);
+    assert!(
+        dialog[1].starts_with("│ Resume \"Sort the inbox\""),
+        "{dialog:#?}"
+    );
+}
+
+#[test]
+fn with_no_keys_waiting_the_loop_redraws_when_the_toast_ends() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = [ctrl_key('t'), Scripted::Pause, ctrl_key('c')];
+    let Ran {
+        returned,
+        frames,
+        waits,
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    assert_eq!(frames.len(), 3, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    assert!(
+        frames[1][38].contains("Searching tool calls too"),
+        "{:#?}",
+        frames[1]
+    );
+    assert_eq!(waits.len(), 1, "{waits:?}");
+    assert!(
+        waits[0] > Duration::ZERO && waits[0] <= Duration::from_secs(3),
+        "{waits:?}"
+    );
+}
+
+#[test]
+fn a_resize_or_another_event_in_a_batch_just_redraws() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = [
+        Scripted::Event(Event::Resize(120, 40)),
+        key(KeyCode::Char('r')),
+        Scripted::Event(Event::FocusGained),
+        key(KeyCode::Char('e')),
+        Scripted::Pause,
+        ctrl_key('c'),
+    ];
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    assert_eq!(frames.len(), 2, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    assert_eq!(query_text(&frames[1]), "re", "{:#?}", frames[1]);
+}
+
+#[test]
+fn a_key_that_acts_on_results_in_a_batch_acts_on_the_batch_query() {
+    let histories = Histories::three();
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+    let script = typed("retry")
+        .into_iter()
+        .chain([ctrl_key('x'), Scripted::Pause, ctrl_key('c')]);
+    let Ran {
+        returned, frames, ..
+    } = run_script(&mut palette, script);
+    assert_eq!(returned, None);
+    // The batch's frame, then the one the toast's timed wait brings.
+    assert_eq!(frames.len(), 3, "{frames:#?}");
+    assert!(is_startup(&frames[0]), "{:#?}", frames[0]);
+    let hid = &frames[1];
+    assert!(hid[38].contains("Hid “Retry the billing job”"), "{hid:#?}");
+    assert!(rows_with(hid, &["Retry"]).is_empty(), "{hid:#?}");
 }

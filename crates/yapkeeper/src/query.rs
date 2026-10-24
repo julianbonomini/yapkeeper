@@ -205,6 +205,12 @@ impl Query {
         &self.excluded_words
     }
 
+    /// Whether finding this query's sessions reads the index: it has a
+    /// search word or an excluded word.
+    pub(crate) fn has_words(&self) -> bool {
+        !self.words.is_empty() || !self.excluded_words.is_empty()
+    }
+
     pub(crate) fn tools(&self) -> bool {
         self.tools
     }

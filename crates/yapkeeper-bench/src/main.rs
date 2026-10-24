@@ -151,7 +151,7 @@ fn report(measured: &Measurements, runs: NonZeroUsize) {
         millis(measured.warmed)
     );
     println!(
-        "Runs         {runs} per measurement, each up to a frame drawn off-screen at {}x{}",
+        "Runs         {runs} per measurement, each up to the frame showing its results at {}x{}",
         FRAME.0, FRAME.1
     );
     let mut rows = vec![(

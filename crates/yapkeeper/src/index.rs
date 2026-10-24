@@ -22,7 +22,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{
-    Connection, ErrorCode, OptionalExtension, ToSql, Transaction, TransactionBehavior, params,
+    Connection, ErrorCode, OpenFlags, OptionalExtension, ToSql, Transaction, TransactionBehavior,
+    params,
 };
 use yapkeeper_model::{
     Adapter, Assembled, FOLD_VERSION, Fact, Message, RecordedGit, ResumeCommand, Role, Session,
@@ -159,7 +160,18 @@ impl Index {
     /// The index at `path`, created when missing, recreated when corrupt or of
     /// another schema; refreshes nothing.
     pub(crate) fn open(path: &Path) -> Result<Index, DataError> {
-        match open(path) {
+        Index::opened(path, open(path))
+    }
+
+    /// The index at `path` as it is, for reads only: creates, recreates and
+    /// writes nothing. Fails when nothing readable is there.
+    pub(crate) fn reading(path: &Path) -> Result<Index, DataError> {
+        Index::opened(path, open_reading(path))
+    }
+
+    /// The index at `path` over `connection`, or why it failed to open.
+    fn opened(path: &Path, connection: Result<Connection, Cause>) -> Result<Index, DataError> {
+        match connection {
             Ok(connection) => Ok(Index {
                 connection,
                 path: path.to_path_buf(),
@@ -574,6 +586,19 @@ fn open(path: &Path) -> Result<Connection, Cause> {
         remove(path)?;
         open_as_is(path)
     })
+}
+
+/// The index at `path`, read-only. Reads its schema version at once, as
+/// SQLite opens lazily, so a failed open fails here rather than on every
+/// search after it.
+fn open_reading(path: &Path) -> Result<Connection, Cause> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != SCHEMA_VERSION {
+        return Err(format!("the index has schema version {version}").into());
+    }
+    Ok(connection)
 }
 
 impl DataError {

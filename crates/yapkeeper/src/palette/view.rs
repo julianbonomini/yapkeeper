@@ -224,10 +224,11 @@ fn too_small(frame: &mut Frame, area: Rect) {
 }
 
 /// The prompt, the query with the cursor in it unless the location list
-/// has the focus, and the match count on the right, after `indexing` while
-/// a pass has run a while and after how many temp sessions the query left
-/// out, each while that leaves the query `QUERY_ROOM` cells, and followed
-/// by `+tools` in the accent while searches read tool calls.
+/// has the focus, and the match count on the right, after `searching` while
+/// a search has run a while, else `indexing` while a pass has, and after
+/// how many temp sessions the query left out, each while that leaves the
+/// query `QUERY_ROOM` cells, and followed by `+tools` in the accent while
+/// searches read tool calls.
 fn query_line(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     let mut count = vec![Span::styled(
         format!("{} / {}", palette.found.len(), palette.catalog.indexed()),
@@ -239,14 +240,19 @@ fn query_line(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rec
     }
     let width = usize::from(area.width);
     // The query keeps its room first; the temp count goes before
-    // `indexing`, and `indexing` before the query would.
+    // `searching` or `indexing`, and either before the query would. Only one
+    // shows, so one signal says the results are yet to settle.
     let fits = |count: &[Span], more: &str| {
         let count_cells: usize = count.iter().map(Span::width).sum();
         PROMPT.width() + 1 + QUERY_ROOM + more.width() + count_cells <= width
     };
-    let indexing = format!("indexing{SEPARATOR}");
-    if palette.shows_indexing() && fits(&count, &indexing) {
-        count.insert(0, Span::styled(indexing, theme.dim));
+    let busy = match (palette.shows_searching(), palette.shows_indexing()) {
+        (true, _) => Some(format!("searching{SEPARATOR}")),
+        (false, true) => Some(format!("indexing{SEPARATOR}")),
+        (false, false) => None,
+    };
+    if let Some(busy) = busy.filter(|busy| fits(&count, busy)) {
+        count.insert(0, Span::styled(busy, theme.dim));
     }
     let temp = format!("{} temp hidden{SEPARATOR}", palette.left_out.temp);
     if palette.left_out.temp > 0 && fits(&count, &temp) {
@@ -278,15 +284,15 @@ fn query_line(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rec
 /// The part of the query that keeps the cursor in view in `cells` cells,
 /// with a `…` where text is left out on either side, and how many cells
 /// from its start the cursor sits. Each filter token is in the accent, as
-/// the query parser read it; words and the spaces between tokens stay plain.
+/// the query parser reads the text now; words and the spaces between tokens
+/// stay plain.
 fn typed_query<'a>(palette: &mut Palette, theme: &Theme, cells: usize) -> (Vec<Span<'a>>, usize) {
     let visible = palette.query.visible(cells);
+    // Read afresh rather than from the results' query, which lags the text
+    // while a search is in flight.
+    let typed = palette.catalog.parse(palette.query.text());
     let style_at = |at: usize| {
-        let token = palette
-            .parsed
-            .tokens()
-            .iter()
-            .find(|token| token.span.contains(&at));
+        let token = typed.tokens().iter().find(|token| token.span.contains(&at));
         match token {
             Some(token) if token.kind != TokenKind::Word => theme.accent,
             _ => Style::new(),

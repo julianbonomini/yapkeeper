@@ -138,7 +138,7 @@ fn open_palette() -> ExitCode {
     };
     // Before the indexer starts, so a missing index is created only here.
     let catalog = match Catalog::cached(&roots, &data) {
-        Ok(catalog) => catalog,
+        Ok(catalog) => catalog.searching_in_background(),
         Err(error) => return data_failure(error),
     };
     // A launch directory that is gone has no location to offer `Ctrl+L`.

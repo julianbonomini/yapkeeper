@@ -1,11 +1,12 @@
 //! The command palette: a query line searched live as the person types, the
 //! sessions it matches or the ways to finish the filter being typed, a
 //! preview of the selected session and key hints, over a `Catalog` an
-//! `Indexer` keeps up to date; or, in their place, the selected session's
-//! whole conversation, a settings screen or the resume dialog. It owns
-//! every terminal decision (keys, layout, theme and the terminal's
-//! lifecycle) and reaches the index, the preferences, settings included,
-//! and what resuming would do only through the catalog.
+//! `Indexer` keeps up to date and that may find sessions on a worker of its
+//! own, whose results show once they arrive; or, in their place, the
+//! selected session's whole conversation, a settings screen or the resume
+//! dialog. It owns every terminal decision (keys, layout, theme and the
+//! terminal's lifecycle) and reaches the index, the preferences, settings
+//! included, and what resuming would do only through the catalog.
 
 mod reading;
 mod resuming;
@@ -29,8 +30,8 @@ use self::text_field::{Change, TextField};
 use crate::Snapshot;
 use crate::indexer::Indexing;
 use crate::{
-    Catalog, Completion, Edited, Indexer, LeftOut, Listed, Message, Query, ResumeCommand,
-    SessionKey, Settings, line, location_token, place_location, start_location,
+    Catalog, Completion, DataError, Edited, Found, Indexer, LeftOut, Listed, Message, Query,
+    ResumeCommand, SessionKey, Settings, line, location_token, place_location, start_location,
 };
 
 pub use terminal::{Events, Restore, event_loop, run};
@@ -50,14 +51,12 @@ pub struct Palette {
     /// Whether searches also read tool calls, tool output and subagent
     /// transcripts.
     tools: bool,
-    /// `query` as the last search read it.
+    /// The query the results shown were found for.
     parsed: Query,
     /// What the query found, in `search`'s order.
     found: Vec<Rc<Listed>>,
-    /// The query or the search settings changed since the last search.
-    /// Whatever next reads `found` or `selection` calls `settle` first;
-    /// `selected` asserts it.
-    unsearched: bool,
+    /// How the next results place the selection.
+    keep: Keep,
     left_out: LeftOut,
     selection: ListState,
     /// The ways to finish the filter at the cursor in `query`; while there
@@ -86,6 +85,8 @@ pub struct Palette {
     indexer: Indexer,
     /// The first render that found a pass running, until one finds it ended.
     running_since: Option<Instant>,
+    /// The first render that found a search in flight, until one finds none.
+    searching_since: Option<Instant>,
     /// When the last render drew.
     drawn_at: Option<Instant>,
     /// Whether the indexer published while the conversation or the resume
@@ -96,12 +97,25 @@ pub struct Palette {
 /// How long a confirmation stays in the footer.
 const TOAST_TIME: Duration = Duration::from_secs(3);
 
-/// How long a pass runs before the query line says so, so a pass that
-/// finds nothing to read never flashes it.
-const INDEXING_SHOWN_AFTER: Duration = Duration::from_millis(150);
+/// How long a pass or a search runs before the query line says so, so one
+/// that ends quickly never flashes it.
+const BUSY_SHOWN_AFTER: Duration = Duration::from_millis(150);
 
 /// How often the palette redraws while a pass runs, to show what it publishes.
 const INDEXING_TICK: Duration = Duration::from_millis(50);
+
+/// How often the palette redraws while a search is in flight, to show its
+/// results soon after they arrive: nothing can wake the terminal's loop.
+const SEARCH_TICK: Duration = Duration::from_millis(10);
+
+/// Where the selection goes when the next results are shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    /// The first row, as after the query or the search settings changed.
+    FirstRow,
+    /// The selected session when it is still listed, else the same row.
+    Selection,
+}
 
 /// A confirmation of the last action, shown until `until`.
 struct Toast {
@@ -163,7 +177,7 @@ impl Palette {
             tools: false,
             parsed: Query::default(),
             found: Vec::new(),
-            unsearched: false,
+            keep: Keep::FirstRow,
             left_out: LeftOut::default(),
             selection: ListState::default(),
             completions: Vec::new(),
@@ -176,10 +190,11 @@ impl Palette {
             toast: None,
             indexer: Indexer::idle(),
             running_since: None,
+            searching_since: None,
             drawn_at: None,
             stale: false,
         };
-        palette.search(0);
+        palette.ask(Keep::FirstRow);
         palette
     }
 
@@ -189,8 +204,10 @@ impl Palette {
     }
 
     /// Applies one key press, made at `now`, and says whether the palette
-    /// is still open. Key releases and repeats are ignored. The results it
-    /// changes are searched for when they are next drawn or acted on.
+    /// is still open. Key releases and repeats are ignored. Results a key
+    /// changes are asked for at once. Over a catalog searching in the
+    /// background they show from the first frame after they arrive, and
+    /// until then keys act on the results drawn.
     pub fn handle(&mut self, key: KeyEvent, now: Instant) -> Step {
         if key.kind != KeyEventKind::Press {
             return Step::Continue;
@@ -273,10 +290,21 @@ impl Palette {
     /// Draws the palette as it is at `now`, or the too-small message, into
     /// the whole frame. First takes in the sessions the indexer has
     /// published by `now`. The query, the selected session when it is still
-    /// listed, and the place in the conversation are kept.
+    /// listed, and the place in the conversation are kept. Then takes in
+    /// the newest results found, unless the conversation or the resume
+    /// dialog is open.
     pub fn render(&mut self, frame: &mut Frame, now: Instant) {
-        self.settle();
         self.take_in(now);
+        if self.shows_results()
+            && let Some(found) = self.catalog.answer()
+        {
+            self.show(found);
+        }
+        if self.catalog.searching() {
+            self.searching_since.get_or_insert(now);
+        } else {
+            self.searching_since = None;
+        }
         if self.toast.as_ref().is_some_and(|toast| toast.until <= now) {
             self.toast = None;
         }
@@ -284,23 +312,58 @@ impl Palette {
     }
 
     /// When the frame changes with no key pressed: when the toast gives way
-    /// to the key hints, `INDEXING_TICK` after the last render while a pass runs, or
-    /// when the next pass is due. `None` while nothing will.
+    /// to the key hints, `INDEXING_TICK` after the last render while a pass
+    /// runs, `SEARCH_TICK` after it while a search is in flight and its
+    /// results would show, or when the next pass is due. `None` while
+    /// nothing will.
     pub fn redraw_at(&self) -> Option<Instant> {
         let toast = self.toast.as_ref().map(|toast| toast.until);
         let tick = self
             .drawn_at
             .filter(|_| self.running_since.is_some())
             .map(|drawn_at| drawn_at + INDEXING_TICK);
+        let search = self
+            .drawn_at
+            .filter(|_| self.searching_since.is_some() && self.shows_results())
+            .map(|drawn_at| drawn_at + SEARCH_TICK);
         let pass = self.indexer.next_pass_at();
-        toast.into_iter().chain(tick).chain(pass).min()
+        toast
+            .into_iter()
+            .chain(tick)
+            .chain(search)
+            .chain(pass)
+            .min()
+    }
+
+    /// Whether the results last drawn are those of the query line as it
+    /// is, so drawing until this is true ends at the frame that shows them.
+    pub fn caught_up(&self) -> bool {
+        !self.catalog.searching()
+    }
+
+    /// Whether the results are on screen rather than behind the
+    /// conversation or the resume dialog.
+    fn shows_results(&self) -> bool {
+        self.reading.is_none() && self.resuming.is_none()
+    }
+
+    /// Whether the query line says a search is in flight: once it has been
+    /// for `BUSY_SHOWN_AFTER`, so a quick one never flashes it.
+    fn shows_searching(&self) -> bool {
+        self.shown_after_a_while(self.searching_since)
     }
 
     /// Whether the query line says a pass is running: once it has run for
-    /// `INDEXING_SHOWN_AFTER`.
+    /// `BUSY_SHOWN_AFTER`.
     fn shows_indexing(&self) -> bool {
-        match (self.running_since, self.drawn_at) {
-            (Some(since), Some(drawn_at)) => drawn_at >= since + INDEXING_SHOWN_AFTER,
+        self.shown_after_a_while(self.running_since)
+    }
+
+    /// Whether the last render drew `BUSY_SHOWN_AFTER` or more after
+    /// `since`, the first render that found work in flight.
+    fn shown_after_a_while(&self, since: Option<Instant>) -> bool {
+        match (since, self.drawn_at) {
+            (Some(since), Some(drawn_at)) => drawn_at >= since + BUSY_SHOWN_AFTER,
             _ => false,
         }
     }
@@ -333,7 +396,7 @@ impl Palette {
     /// hides wait for `catch_up`.
     fn apply(&mut self, snapshot: Snapshot) {
         self.catalog.apply(snapshot);
-        if self.reading.is_none() && self.resuming.is_none() {
+        if self.shows_results() {
             self.refind();
             return;
         }
@@ -347,34 +410,76 @@ impl Palette {
         }
     }
 
-    /// Searches again for what the indexer published while the conversation
-    /// or the resume dialog was open, once neither is.
+    /// Asks again for what the indexer published while the conversation or
+    /// the resume dialog was open, once neither is.
     fn catch_up(&mut self) {
-        if self.stale && self.reading.is_none() && self.resuming.is_none() {
+        if self.stale && self.shows_results() {
             self.stale = false;
             self.refind();
         }
     }
 
-    /// Searches for the query again after the catalog changed, keeping the
-    /// selected session when it is still found, else the same row, and the
-    /// rows scrolled into view; the ways to finish the query keep the one
-    /// selected when it is still offered, else the first.
+    /// Asks for the query's sessions again after the catalog changed, to be
+    /// shown keeping the selected session when it is still found, else the
+    /// same row, and the rows scrolled into view; the ways to finish the
+    /// query keep the one selected when it is still offered, else the first.
     fn refind(&mut self) {
+        self.ask(Keep::Selection);
+        self.complete();
+    }
+
+    /// Asks the catalog for the query's sessions, to be shown with the
+    /// selection placed by `keep`, or at the first row when an ask not yet
+    /// shown asked for that. Shows them now when the catalog finds them
+    /// on this thread.
+    fn ask(&mut self, keep: Keep) {
+        if keep == Keep::FirstRow {
+            self.keep = Keep::FirstRow;
+        }
+        let query = self
+            .catalog
+            .parse(self.query.text())
+            .including_tools(self.tools);
+        if let Some(found) = self.catalog.ask(query) {
+            self.show(found);
+        }
+    }
+
+    /// Shows `found` in place of the rows, placing the selection as `keep`
+    /// says. A failed search is shown in the footer, with the rows kept.
+    fn show(&mut self, found: Result<Found, DataError>) {
+        let keep = std::mem::replace(&mut self.keep, Keep::Selection);
+        let found = match found {
+            Ok(found) => found,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                return;
+            }
+        };
         let selected = self
             .selected()
             .map(|listed| SessionKey::of(&listed.session));
         let row = self.selection.selected().unwrap_or(0);
         let offset = self.selection.offset();
-        self.find();
-        let row = self
-            .found
-            .iter()
-            .position(|listed| Some(SessionKey::of(&listed.session)) == selected)
-            .or_else(|| self.found.len().checked_sub(1).map(|last| row.min(last)));
-        self.selection = ListState::default().with_offset(offset);
+        self.parsed = found.query;
+        self.found = found.sessions;
+        self.left_out = found.left_out;
+        self.error = None;
+        let last = self.found.len().checked_sub(1);
+        let row = match keep {
+            Keep::FirstRow => {
+                self.selection = ListState::default();
+                last.map(|_| 0)
+            }
+            Keep::Selection => {
+                self.selection = ListState::default().with_offset(offset);
+                self.found
+                    .iter()
+                    .position(|listed| Some(SessionKey::of(&listed.session)) == selected)
+                    .or_else(|| last.map(|last| row.min(last)))
+            }
+        };
         self.select(row);
-        self.complete();
     }
 
     /// Works out the ways to finish the filter at the cursor, keeping the
@@ -420,10 +525,11 @@ impl Palette {
         }
     }
 
-    /// Marks the query to be searched again from the first row and works
-    /// out the ways to finish it, as after the query or the settings change.
+    /// Asks for the query's sessions again, to be shown from the first row,
+    /// and works out the ways to finish it, as after the query or the
+    /// settings change.
     fn reapply(&mut self) {
-        self.unsearched = true;
+        self.ask(Keep::FirstRow);
         self.completion = ListState::default();
         self.complete();
     }
@@ -452,7 +558,6 @@ impl Palette {
     /// next session. Nothing while completions are open, or when no session
     /// is selected; a failure to record it is shown in the footer.
     fn toggle_hidden(&mut self, now: Instant) {
-        self.settle();
         let Some(listed) = self.selected().filter(|_| self.completions.is_empty()) else {
             return;
         };
@@ -467,7 +572,7 @@ impl Palette {
             false => Confirmation::Unhid(title),
         };
         self.confirm(said, now);
-        self.search(self.selection.selected().unwrap_or(0));
+        self.ask(Keep::Selection);
     }
 
     /// Searches tool calls too, or no longer does, from the first row, and
@@ -475,7 +580,7 @@ impl Palette {
     fn toggle_tools(&mut self, now: Instant) {
         self.tools = !self.tools;
         self.confirm(Confirmation::Tools(self.tools), now);
-        self.unsearched = true;
+        self.ask(Keep::FirstRow);
     }
 
     /// Shows `said` in the footer from `now` for `TOAST_TIME`.
@@ -489,7 +594,6 @@ impl Palette {
     /// Opens the selected session's whole conversation; nothing while
     /// completions are open, or when no session is selected.
     fn open_reading(&mut self) {
-        self.settle();
         if self.completions.is_empty() && self.selected().is_some() {
             self.reading = Some(Reading::new());
         }
@@ -498,50 +602,14 @@ impl Palette {
     /// Opens the resume dialog on the selected session; nothing when no
     /// session is selected.
     fn open_resuming(&mut self) {
-        self.settle();
         if let Some(listed) = self.selected() {
             self.resuming = Some(Resuming::open(&self.catalog, &listed.session));
-        }
-    }
-
-    /// Searches for the query when it changed since the last search, from
-    /// the first row.
-    fn settle(&mut self) {
-        if self.unsearched {
-            self.unsearched = false;
-            self.search(0);
-        }
-    }
-
-    /// Searches the catalog for the query and selects `row`, or the last row
-    /// when there are fewer.
-    fn search(&mut self, row: usize) {
-        self.find();
-        let row = self.found.len().checked_sub(1).map(|last| row.min(last));
-        self.selection = ListState::default();
-        self.select(row);
-    }
-
-    /// Searches the catalog for the query, leaving the selection to the caller.
-    fn find(&mut self) {
-        self.parsed = self
-            .catalog
-            .parse(self.query.text())
-            .including_tools(self.tools);
-        match self.catalog.search(&self.parsed) {
-            Ok(found) => {
-                self.found = found.sessions;
-                self.left_out = found.left_out;
-                self.error = None;
-            }
-            Err(error) => self.error = Some(error.to_string()),
         }
     }
 
     /// Moves the selection one row, among the completions while there are
     /// any, otherwise among the sessions, stopping at the first and last rows.
     fn move_selection(&mut self, direction: Direction) {
-        self.settle();
         if self.completions.is_empty() {
             let row = direction.step(self.selection.selected(), self.found.len());
             if row != self.selection.selected() {
@@ -570,7 +638,6 @@ impl Palette {
 
     /// The session the selection bar is on.
     fn selected(&self) -> Option<Rc<Listed>> {
-        debug_assert!(!self.unsearched, "results read before they were searched");
         self.selection
             .selected()
             .map(|row| Rc::clone(&self.found[row]))

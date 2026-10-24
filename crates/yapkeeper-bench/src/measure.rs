@@ -1,9 +1,12 @@
 //! Times the palette as a person meets it: opening it over a warm index,
-//! typing a query a key at a time and pasting one, each up to a frame
+//! up to its first frame, and typing a query a key at a time and pasting
+//! one, each up to the frame showing the query's results, which includes
+//! the search worker's hand-over and the palette's redraw tick. Frames are
 //! drawn off-screen. The timing boundaries and the percentiles live here.
 
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
@@ -26,7 +29,7 @@ pub struct Latency {
 
 /// The slowest keystroke of typing `query` from an empty query: the one
 /// that completed `prefix`, timed from its key press to the frame showing
-/// that prefix's results.
+/// that prefix's results, which can come a frame or more after the key.
 pub struct SlowestKeystroke {
     pub query: &'static str,
     pub prefix: &'static str,
@@ -57,8 +60,9 @@ pub struct Measurements {
 
 /// Builds the index in `data` from `roots`, then opens the palette over it
 /// `runs` times, types each representative query a key at a time `runs`
-/// times and pastes one `runs` times, each from an empty query and timed
-/// up to a frame drawn at `FRAME` off-screen. Process start, the
+/// times and pastes one `runs` times, each from an empty query. Launch is
+/// timed up to the first frame, typing and pasting up to the frame showing
+/// the query's results, each drawn at `FRAME` off-screen. Process start, the
 /// terminal's own drawing and the background indexer are outside every
 /// timing. Reads the histories only to build the index, and
 /// writes only in `data`. Fails when the index or the preferences can't be
@@ -84,7 +88,7 @@ pub fn measure(
     let mut palette = None;
     for _ in 0..runs.get() {
         let started = Instant::now();
-        let catalog = Catalog::cached(roots, data)?;
+        let catalog = Catalog::cached(roots, data)?.searching_in_background();
         let mut opened = Palette::new(catalog, Colour::Accent, Path::new("/"));
         draw(&mut opened);
         launches.push(started.elapsed());
@@ -99,11 +103,11 @@ pub fn measure(
             let mut times = vec![Vec::with_capacity(runs.get()); query.chars().count()];
             for _ in 0..runs.get() {
                 clear(&mut palette);
-                draw(&mut palette);
+                draw_results(&mut palette, &mut draw);
                 for (c, prefix_times) in query.chars().zip(&mut times) {
                     let started = Instant::now();
                     press(&mut palette, character(c));
-                    draw(&mut palette);
+                    draw_results(&mut palette, &mut draw);
                     prefix_times.push(started.elapsed());
                 }
             }
@@ -124,12 +128,12 @@ pub fn measure(
     let pastes = (0..runs.get())
         .map(|_| {
             clear(&mut palette);
-            draw(&mut palette);
+            draw_results(&mut palette, &mut draw);
             let started = Instant::now();
             for c in PASTED.chars() {
                 press(&mut palette, character(c));
             }
-            draw(&mut palette);
+            draw_results(&mut palette, &mut draw);
             started.elapsed()
         })
         .collect();
@@ -144,6 +148,18 @@ pub fn measure(
             latency: Latency::of(pastes),
         },
     })
+}
+
+/// Draws `palette` with `draw`, then again at each redraw it asks for, as
+/// the terminal's loop does, until the frame drawn shows the query's results.
+fn draw_results(palette: &mut Palette, draw: &mut impl FnMut(&mut Palette)) {
+    draw(palette);
+    while !palette.caught_up() {
+        if let Some(at) = palette.redraw_at() {
+            thread::sleep(at.saturating_duration_since(Instant::now()));
+        }
+        draw(palette);
+    }
 }
 
 /// Empties the query, as `Ctrl+U` does, so each run starts afresh.

@@ -31,7 +31,14 @@ fn a_tiny_run_reports_every_measurement_against_its_target() {
     assert!(corpus.contains("14 files"), "{corpus}");
     // Every generated session is indexed, so the histories parse.
     assert!(line("Index").contains("12 sessions"), "{stdout}");
-    assert!(line("Runs").contains("3 per measurement"), "{stdout}");
+    let runs = line("Runs");
+    assert!(runs.contains("3 per measurement"), "{runs}");
+    // Typing is timed past the search worker's hand-over; this run would
+    // never end if the palette never caught up with the query.
+    assert!(
+        runs.contains("up to the frame showing its results"),
+        "{runs}"
+    );
     let header = line("Measurement");
     for column in ["p50", "p95", "Target"] {
         assert!(header.contains(column), "{header}");

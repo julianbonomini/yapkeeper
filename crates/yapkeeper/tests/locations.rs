@@ -14,7 +14,8 @@ use yapkeeper::{Availability, DataDir, Location, Place, Query, RecordedGit, Root
 
 mod support;
 
-/// A fresh `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, each empty.
+/// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and Pi session directory, each
+/// empty.
 struct Histories {
     dir: TempDir,
 }

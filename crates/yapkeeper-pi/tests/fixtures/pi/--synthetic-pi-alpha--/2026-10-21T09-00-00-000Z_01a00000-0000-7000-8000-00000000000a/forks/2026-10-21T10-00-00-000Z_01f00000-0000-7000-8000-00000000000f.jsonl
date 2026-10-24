@@ -1,2 +1,2 @@
-{"type":"session","version":3,"id":"01f00000-0000-7000-8000-00000000000f","timestamp":"2026-10-21T10:00:00.000Z","cwd":"/synthetic/pi-alpha","parentSession":"01a00000-0000-7000-8000-00000000000a"}
+{"type":"session","version":3,"id":"01f00000-0000-7000-8000-00000000000f","timestamp":"2026-10-21T10:00:00.000Z","cwd":"/synthetic/pi-alpha","parentSession":"/synthetic/home/.pi/agent/sessions/--synthetic-pi-alpha--/2026-10-21T09-00-00-000Z_01a00000-0000-7000-8000-00000000000a.jsonl"}
 {"type":"message","id":"f0000001","parentId":null,"timestamp":"2026-10-21T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Synthetic fork task"}],"timestamp":1792576801000}}

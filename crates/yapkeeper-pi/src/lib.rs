@@ -1,6 +1,7 @@
 //! The Pi adapter. It owns where Pi keeps its session files, which of them
-//! are top-level sessions, the JSONL grammar of a session file, and how a
-//! session is resumed. The model folds what it reads into sessions.
+//! are sessions and which are a session's subagent runs and forks, the JSONL
+//! grammar of a session file, and how a session is resumed. The model folds
+//! what it reads into sessions.
 
 #![forbid(unsafe_code)]
 
@@ -12,7 +13,7 @@ use yapkeeper_model::{
     jsonl_files, non_empty_text, read_jsonl_from, record_time,
 };
 
-const PARSER_VERSION: u32 = 1;
+const PARSER_VERSION: u32 = 2;
 
 /// Pi's sessions under one session directory.
 pub struct Pi {
@@ -22,7 +23,8 @@ pub struct Pi {
 impl Pi {
     /// Reads the top-level session files under `root`: those in `root`
     /// itself, as a custom session directory holds them, and those one
-    /// folder down, as Pi's default `<cwd>` folders hold them.
+    /// folder down, as Pi's default `<cwd>` folders hold them, with the
+    /// subagent runs and forks in each session's folder.
     pub fn at(root: PathBuf) -> Pi {
         Pi { root }
     }
@@ -42,20 +44,45 @@ impl Adapter for Pi {
     }
 
     fn sources(&self) -> Vec<PathBuf> {
-        // Subagent runs and forks sit deeper, in a folder named after their
-        // session file, so they are never listed as sessions of their own.
-        // A `subagent-artifacts` transcript one level down has no `session`
-        // header, so it gives no session either.
-        let mut files = jsonl_files(&self.root, 0);
-        files.extend(jsonl_files(&self.root, 1));
+        // `subagent-artifacts` transcripts beside the sessions are found too,
+        // but have no `session` header, so they give no thread.
+        let session_files = jsonl_files(&self.root, 0)
+            .into_iter()
+            .chain(jsonl_files(&self.root, 1));
+        let mut files = Vec::new();
+        for session_file in session_files {
+            // A run or fork whose session file is gone is never found.
+            let folder = session_file.with_extension("");
+            files.extend(
+                [jsonl_files(&folder, 1), jsonl_files(&folder, 2)]
+                    .into_iter()
+                    .flatten()
+                    .filter(|nested| session_folder_of(nested) == Some(folder.as_path())),
+            );
+            files.push(session_file);
+        }
         files
     }
 
     fn read(&self, source: &Path, from: u64) -> Reading {
+        // Runs and forks copy the session header's shape, so where the file
+        // sits is what says whose subagent it is. Only the path below the
+        // root counts, whatever the root itself is named.
+        let below_root = source.strip_prefix(&self.root).unwrap_or(source);
+        let thread = match session_folder_of(below_root) {
+            None => ThreadKind::Session,
+            Some(folder) => ThreadKind::Subagent {
+                // Named after its session file, `<timestamp>_<session-id>`.
+                parent: folder
+                    .file_name()
+                    .and_then(|name| name.to_str()?.split_once('_'))
+                    .map(|(_timestamp, id)| id.to_string()),
+            },
+        };
         let mut facts = Vec::new();
         let mut malformed_lines = 0;
         let offset = read_jsonl_from(source, from, &mut malformed_lines, |record| {
-            read_record(&mut facts, &record);
+            read_record(&mut facts, &record, &thread);
         });
         Reading {
             facts,
@@ -84,8 +111,8 @@ impl Adapter for Pi {
     }
 }
 
-/// The facts one session record gives.
-fn read_record(facts: &mut Vec<Fact>, record: &Value) {
+/// The facts one record gives, in a file that records a `thread`.
+fn read_record(facts: &mut Vec<Fact>, record: &Value, thread: &ThreadKind) {
     let Some(kind) = record["type"].as_str() else {
         return;
     };
@@ -93,12 +120,10 @@ fn read_record(facts: &mut Vec<Fact>, record: &Value) {
         facts.push(Fact::Activity(time));
     }
     match kind {
-        // A fork's header names its `parentSession` too, but a top-level
-        // fork is a separate session the person went on with.
         "session" => {
             facts.push(Fact::Identity {
                 id: record["id"].as_str().map(str::to_string),
-                kind: ThreadKind::Session,
+                kind: thread.clone(),
             });
             if let Some(cwd) = record["cwd"].as_str() {
                 facts.push(Fact::WorkingDir(PathBuf::from(cwd)));
@@ -155,6 +180,21 @@ fn read_message(facts: &mut Vec<Fact>, message: &Value) {
             push(Role::ToolOutput, message["output"].as_str().unwrap_or(""));
         }
         _ => {}
+    }
+}
+
+/// The folder of the session whose subagent `file` records: a fork sits at
+/// `<folder>/forks/*.jsonl` and a run at `<folder>/<run-id>/run-<n>/session.jsonl`.
+/// `None` for any other file, such as a session file.
+fn session_folder_of(file: &Path) -> Option<&Path> {
+    let dir = file.parent()?;
+    let dir_name = dir.file_name()?.to_str()?;
+    if dir_name == "forks" {
+        dir.parent()
+    } else if dir_name.starts_with("run-") && file.file_name()? == "session.jsonl" {
+        dir.parent()?.parent()
+    } else {
+        None
     }
 }
 

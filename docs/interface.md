@@ -26,7 +26,7 @@ Words search conversation text, titles, and provider recaps. Every other token i
 | Form | Meaning | Examples |
 |---|---|---|
 | `@where` | Location: project, `project:worktree`, or any part of a path | `@acme-api`, `@acme-api:billing-retry`, `@scratch` |
-| `#provider` | Provider | `#claude`, `#codex` |
+| `#provider` | Provider | `#claude`, `#codex`, `#pi` |
 | `is:state` | Session state | `is:orphaned`, `is:temp`, `is:git`, `is:folder`, `is:pr`, `is:recap`, `is:unavailable`, `is:hidden` |
 | `!x`, `not:x` | Exclude a filter, a provider or state by name, or a word | `!codex`, `!temp`, `!@scratch`, `!is:pr`, `not:orphaned`, `!flaky` |
 
@@ -143,7 +143,7 @@ The resume dialog has no query line, so it takes letters: `Enter` resumes, `c` r
 | `unavailable` | The folder exists but can't be inspected (permissions, or a volume not mounted). The row offers `c` as above, and `r` to check again. |
 | `orphaned` or `unavailable` | After `c`, the launch directory is gone too, or can't be inspected either. |
 | `running` | Claude Code's running-session metadata lists the session as open. Resuming is still allowed. |
-| `warning` | After `c`, for a provider that looks sessions up by directory (Claude Code): it may not find this session from another directory. |
+| `warning` | After `c`, for a provider that looks sessions up by directory (Claude Code, Pi): it may not find this session from another directory. |
 | `not found` | The provider's program isn't on `PATH`, so it can't start. |
 
 Resume never moves to another directory without `c`. `c` is offered while the session's own folder is orphaned or unavailable, and it is one-way: `Esc` and opening the dialog again start from the recorded folder. `r` checks an unavailable folder again and redraws the dialog; when it is still unavailable, the dialog says `Checked again: still can't inspect it.` The result row keeps its label until the next launch. Directory and command come first, so a short terminal drops state rows from the bottom.

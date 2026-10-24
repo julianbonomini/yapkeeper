@@ -13,7 +13,8 @@ use yapkeeper::{
     Availability, DataDir, Listed, Listing, Query, Roots, hide, rebuild, search, unhide,
 };
 
-/// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and data directory, each empty.
+/// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, Pi session directory and data
+/// directory, each empty.
 struct Histories {
     dir: TempDir,
 }

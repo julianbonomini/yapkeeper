@@ -12,6 +12,7 @@ unicode-width.workspace = true
 yapkeeper-claude.workspace = true
 yapkeeper-codex.workspace = true
 yapkeeper-model.workspace = true
+yapkeeper-pi.workspace = true
 
 [dev-dependencies]
 jiff.workspace = true

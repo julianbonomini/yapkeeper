@@ -12,16 +12,10 @@ use support::Locked;
 use support::{repo_with_worktree, temp_dir};
 use yapkeeper::{Catalog, DataDir, Roots, Settings, State};
 
+mod listing;
 mod support;
 
-const FIXTURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../yapkeeper-claude/tests/fixtures/claude"
-);
-const CODEX_FIXTURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../yapkeeper-codex/tests/fixtures/codex"
-);
+use listing::{CLAUDE_FIXTURES, CODEX_FIXTURES, PI_FIXTURES};
 
 fn yapkeeper(args: &[&str], home: &Path, claude_config_dir: Option<&Path>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_yapkeeper"));
@@ -38,7 +32,7 @@ fn yapkeeper_over_fixtures(args: &[&str], home: &Path) -> Output {
         .args(args)
         .env_clear()
         .env("HOME", home)
-        .env("CLAUDE_CONFIG_DIR", FIXTURES)
+        .env("CLAUDE_CONFIG_DIR", CLAUDE_FIXTURES)
         .env("CODEX_HOME", CODEX_FIXTURES)
         .output()
         .unwrap()
@@ -63,7 +57,7 @@ fn is_age(token: &str) -> bool {
 #[test]
 fn list_prints_one_line_per_session_most_recent_first() {
     let home = tempfile::tempdir().unwrap();
-    let output = yapkeeper(&["list"], home.path(), Some(Path::new(FIXTURES)));
+    let output = yapkeeper(&["list"], home.path(), Some(Path::new(CLAUDE_FIXTURES)));
     assert!(output.status.success(), "{}", stderr(&output));
 
     let stdout = stdout(&output);
@@ -97,7 +91,7 @@ fn list_reads_home_dot_claude_when_claude_config_dir_is_unset() {
     fs::create_dir_all(&project).unwrap();
     let file = "22222222-2222-4222-8222-222222222222.jsonl";
     fs::copy(
-        Path::new(FIXTURES)
+        Path::new(CLAUDE_FIXTURES)
             .join("projects/-synthetic-beta")
             .join(file),
         project.join(file),
@@ -795,6 +789,7 @@ fn search_help_names_every_state_and_provider_the_query_accepts() {
     let roots = Roots {
         claude: home.path().to_path_buf(),
         codex: home.path().to_path_buf(),
+        pi: home.path().to_path_buf(),
     };
     let states = State::ALL.map(|state| format!("is:{}", state.name()));
     let providers = roots.providers().into_iter().map(|p| format!("#{p}"));
@@ -835,12 +830,12 @@ fn search_help_describes_words_case_tools_and_the_double_dash() {
 #[test]
 fn search_names_the_valid_choices_for_an_unknown_provider_or_state_and_succeeds() {
     let home = tempfile::tempdir().unwrap();
-    let output = yapkeeper_over_fixtures(&["search", "#pi", "is:bogus"], home.path());
+    let output = yapkeeper_over_fixtures(&["search", "#opencode", "is:bogus"], home.path());
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "");
     let stderr = stderr(&output);
     for hint in [
-        "yapkeeper: \"#pi\" names no provider (claude, codex)\n",
+        "yapkeeper: \"#opencode\" names no provider (claude, codex, pi)\n",
         "yapkeeper: \"is:bogus\" names no state (orphaned, temp, git, folder, pr, recap, unavailable, hidden)\n",
     ] {
         assert!(stderr.contains(hint), "{hint:?} is missing from {stderr}");
@@ -1008,7 +1003,7 @@ fn hide_leaves_a_session_out_until_unhide_and_never_touches_the_histories() {
     let home = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| yapkeeper_over_fixtures(args, home.path());
     let before = (
-        snapshot(Path::new(FIXTURES)),
+        snapshot(Path::new(CLAUDE_FIXTURES)),
         snapshot(Path::new(CODEX_FIXTURES)),
     );
     let listed = stdout(&run(&["list"]));
@@ -1036,7 +1031,7 @@ fn hide_leaves_a_session_out_until_unhide_and_never_touches_the_histories() {
     assert_eq!(stdout(&run(&["list"])), listed);
 
     let after = (
-        snapshot(Path::new(FIXTURES)),
+        snapshot(Path::new(CLAUDE_FIXTURES)),
         snapshot(Path::new(CODEX_FIXTURES)),
     );
     assert!(before == after, "hide or unhide changed a history file");
@@ -1125,6 +1120,7 @@ fn list_keeps_the_documented_defaults_whatever_the_palette_is_set_to() {
     let roots = Roots {
         claude: home.path().join(".claude"),
         codex: home.path().join(".codex"),
+        pi: home.path().join(".pi/agent/sessions"),
     };
     let data = DataDir::at(home.path().join(".local/share/yapkeeper"));
     let mut catalog = Catalog::open(&roots, &data).unwrap();
@@ -1144,4 +1140,241 @@ fn list_keeps_the_documented_defaults_whatever_the_palette_is_set_to() {
         .map(|line| line.split("  ").next().unwrap())
         .collect();
     assert_eq!(titles, ["Live work", "Orphaned work"], "{stdout}");
+}
+
+#[test]
+fn list_shows_claude_code_codex_and_pi_sessions_together() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .arg("list")
+        .env_clear()
+        .env("HOME", home.path())
+        .env("CLAUDE_CONFIG_DIR", CLAUDE_FIXTURES)
+        .env("CODEX_HOME", CODEX_FIXTURES)
+        .env("PI_CODING_AGENT_SESSION_DIR", PI_FIXTURES)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    for provider in ["claude", "codex", "pi"] {
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.split_whitespace().any(|word| word == provider)),
+            "no {provider} session in {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("Sort the synthetic inbox by sender"),
+        "{stdout}"
+    );
+}
+
+/// Writes a Pi session titled `prompt` as `<dir>/<file>`, the way Pi names
+/// a top-level session file.
+fn write_pi_session(dir: &Path, prompt: &str) {
+    fs::create_dir_all(dir).unwrap();
+    let header = r#"{"type":"session","version":3,"id":"01d00000-0000-7000-8000-00000000000d","timestamp":"2026-10-22T08:00:00.000Z","cwd":"/synthetic/pi-root"}"#;
+    let message = format!(
+        r#"{{"type":"message","id":"d1","parentId":null,"timestamp":"2026-10-22T08:00:01.000Z","message":{{"role":"user","content":[{{"type":"text","text":"{prompt}"}}]}}}}"#
+    );
+    fs::write(
+        dir.join("2026-10-22T08-00-00-000Z_01d00000-0000-7000-8000-00000000000d.jsonl"),
+        format!("{header}\n{message}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn pi_sessions_come_from_its_session_dir_then_its_agent_dir_then_home() {
+    let home = tempfile::tempdir().unwrap();
+    let session_dir = home.path().join("custom-sessions");
+    let agent_dir = home.path().join("custom-agent");
+    // A custom session directory holds session files directly; the others
+    // hold them in a folder per working directory.
+    write_pi_session(&session_dir, "From the session dir");
+    write_pi_session(
+        &agent_dir.join("sessions/--synthetic-pi-root--"),
+        "From the agent dir",
+    );
+    write_pi_session(
+        &home.path().join(".pi/agent/sessions/--synthetic-pi-root--"),
+        "From home",
+    );
+    assert_eq!(
+        pi_titles(
+            home.path(),
+            &[
+                ("PI_CODING_AGENT_SESSION_DIR", session_dir.as_os_str()),
+                ("PI_CODING_AGENT_DIR", agent_dir.as_os_str()),
+            ]
+        ),
+        ["From the session dir"]
+    );
+    assert_eq!(
+        pi_titles(
+            home.path(),
+            &[("PI_CODING_AGENT_DIR", agent_dir.as_os_str())]
+        ),
+        ["From the agent dir"]
+    );
+    assert_eq!(pi_titles(home.path(), &[]), ["From home"]);
+}
+
+/// The titles `list` prints with only `HOME` and `env` set.
+fn pi_titles(home: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Vec<String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .arg("list")
+        .env_clear()
+        .env("HOME", home)
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    stdout(&output)
+        .lines()
+        .map(|line| line.split("  ").next().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn an_empty_pi_session_dir_falls_back_to_the_agent_dir() {
+    let home = tempfile::tempdir().unwrap();
+    let agent_dir = home.path().join("custom-agent");
+    write_pi_session(
+        &agent_dir.join("sessions/--synthetic-pi-root--"),
+        "From the agent dir",
+    );
+    write_pi_session(
+        &home.path().join(".pi/agent/sessions/--synthetic-pi-root--"),
+        "From home",
+    );
+    assert_eq!(
+        pi_titles(
+            home.path(),
+            &[
+                ("PI_CODING_AGENT_SESSION_DIR", "".as_ref()),
+                ("PI_CODING_AGENT_DIR", agent_dir.as_os_str()),
+            ]
+        ),
+        ["From the agent dir"]
+    );
+}
+
+#[test]
+fn empty_pi_variables_fall_back_to_home() {
+    let home = tempfile::tempdir().unwrap();
+    write_pi_session(
+        &home
+            .path()
+            .join("custom-agent/sessions/--synthetic-pi-root--"),
+        "From the agent dir",
+    );
+    write_pi_session(
+        &home.path().join(".pi/agent/sessions/--synthetic-pi-root--"),
+        "From home",
+    );
+    assert_eq!(
+        pi_titles(
+            home.path(),
+            &[
+                ("PI_CODING_AGENT_SESSION_DIR", "".as_ref()),
+                ("PI_CODING_AGENT_DIR", "".as_ref()),
+            ]
+        ),
+        ["From home"]
+    );
+}
+
+#[test]
+fn help_names_the_directories_under_home_when_their_variables_are_empty() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .arg("--help")
+        .env_clear()
+        .env("HOME", home.path())
+        .env("CLAUDE_CONFIG_DIR", "")
+        .env("CODEX_HOME", "")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    for dir in [".claude/projects", ".codex"] {
+        let dir = home.path().join(dir).display().to_string();
+        assert!(stdout.contains(&dir), "should name {dir}: {stdout}");
+    }
+}
+
+#[test]
+fn help_says_why_no_history_directory_resolves_with_an_empty_home() {
+    let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .arg("--help")
+        .env_clear()
+        .env("HOME", "")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("nor HOME is set"), "{stdout}");
+}
+
+#[test]
+fn paths_fails_with_an_empty_home_as_without_one() {
+    let paths = |home: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_yapkeeper"));
+        command.arg("paths").env_clear();
+        if let Some(home) = home {
+            command.env("HOME", home);
+        }
+        command.output().unwrap()
+    };
+    let empty = paths(Some(""));
+    let unset = paths(None);
+    assert!(!empty.status.success());
+    assert_eq!(empty.status.code(), unset.status.code());
+    assert_eq!(stdout(&empty), stdout(&unset));
+    assert_eq!(stderr(&empty), stderr(&unset));
+    assert_eq!(
+        stderr(&empty),
+        "yapkeeper: neither XDG_DATA_HOME nor HOME is set\n"
+    );
+}
+
+#[test]
+fn list_shows_no_tilde_with_an_empty_home() {
+    let root = temp_dir();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("code");
+    fs::create_dir_all(&cwd).unwrap();
+    write_home_session(
+        root.path(),
+        "aaaaaaaa-0000-4000-8000-000000000021",
+        "Work with no home",
+        &cwd,
+        "",
+    );
+    let empty_dir = |name: &str| {
+        let dir = elsewhere.path().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+
+    let output = Command::new(env!("CARGO_BIN_EXE_yapkeeper"))
+        .args(["search", "is:temp"])
+        .env_clear()
+        .env("HOME", "")
+        .env("XDG_DATA_HOME", empty_dir("data"))
+        .env("CODEX_HOME", empty_dir("codex"))
+        .env("PI_CODING_AGENT_SESSION_DIR", empty_dir("pi"))
+        .env("CLAUDE_CONFIG_DIR", root.path().join(".claude"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
+    assert!(
+        stdout.ends_with(&format!("  {}\n", cwd.display())),
+        "{stdout:?}"
+    );
+    assert!(!stdout.contains('~'), "{stdout:?}");
 }

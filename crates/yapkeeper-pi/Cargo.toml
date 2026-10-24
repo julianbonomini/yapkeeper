@@ -1,0 +1,14 @@
+[package]
+name = "yapkeeper-pi"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+yapkeeper-model.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

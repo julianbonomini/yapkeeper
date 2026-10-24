@@ -6,12 +6,11 @@
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use serde_json::Value;
 use yapkeeper_model::{
     Adapter, Fact, Message, MissingHome, Reading, RecordedGit, ResumeCommand, Role, ThreadKind,
-    TitleKind, jsonl_files, read_jsonl_from,
+    TitleKind, jsonl_files, non_empty_text, read_jsonl_from, record_time,
 };
 
 const PARSER_VERSION: u32 = 2;
@@ -62,9 +61,10 @@ impl Adapter for Codex {
             // A session renamed more than once appears on several lines, and
             // the model keeps the latest.
             read_jsonl_from(source, from, &mut malformed_lines, |record| {
-                if let (Some(id), Some(name)) =
-                    (record["id"].as_str(), non_empty(&record["thread_name"]))
-                {
+                if let (Some(id), Some(name)) = (
+                    record["id"].as_str(),
+                    non_empty_text(&record["thread_name"]),
+                ) {
                     facts.push(Fact::Title {
                         thread: Some(id.to_string()),
                         kind: TitleKind::Named,
@@ -110,7 +110,7 @@ impl Adapter for Codex {
 
 /// The facts one rollout record gives.
 fn read_rollout_record(facts: &mut Vec<Fact>, record: &Value) {
-    if let Some(time) = record["timestamp"].as_str().and_then(parse_timestamp) {
+    if let Some(time) = record_time(record) {
         facts.push(Fact::Activity(time));
     }
     let payload = &record["payload"];
@@ -124,8 +124,8 @@ fn read_rollout_record(facts: &mut Vec<Fact>, record: &Value) {
             let spawn = &payload["source"]["subagent"];
             let kind = if !spawn.is_null() || !payload["parent_thread_id"].is_null() {
                 ThreadKind::Subagent {
-                    parent: non_empty(&payload["parent_thread_id"])
-                        .or_else(|| non_empty(&spawn["thread_spawn"]["parent_thread_id"])),
+                    parent: non_empty_text(&payload["parent_thread_id"])
+                        .or_else(|| non_empty_text(&spawn["thread_spawn"]["parent_thread_id"])),
                 }
             } else {
                 ThreadKind::Session
@@ -135,8 +135,8 @@ fn read_rollout_record(facts: &mut Vec<Fact>, record: &Value) {
                 kind,
             });
             facts.push(Fact::Git(RecordedGit {
-                branch: non_empty(&payload["git"]["branch"]),
-                repository_url: non_empty(&payload["git"]["repository_url"]),
+                branch: non_empty_text(&payload["git"]["branch"]),
+                repository_url: non_empty_text(&payload["git"]["repository_url"]),
             }));
             if let Some(cwd) = payload["cwd"].as_str() {
                 facts.push(Fact::WorkingDir(PathBuf::from(cwd)));
@@ -184,15 +184,6 @@ fn read_rollout_record(facts: &mut Vec<Fact>, record: &Value) {
 /// instruction blocks, and the `AGENTS.md` it loaded.
 fn is_injected(text: &str) -> bool {
     text.starts_with('<') || text.starts_with("# AGENTS.md")
-}
-
-fn non_empty(value: &Value) -> Option<String> {
-    let text = value.as_str()?.trim();
-    (!text.is_empty()).then(|| text.to_string())
-}
-
-fn parse_timestamp(text: &str) -> Option<SystemTime> {
-    text.parse::<jiff::Timestamp>().ok().map(SystemTime::from)
 }
 
 /// Codex's home for this process: `$CODEX_HOME` when it is set and

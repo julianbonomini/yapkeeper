@@ -142,9 +142,7 @@ pub fn age(then: SystemTime, now: SystemTime) -> String {
 /// The home folder `place` shows as `~`: `HOME`, unless it is unset or
 /// empty.
 pub fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
+    crate::dir_from_env("HOME")
 }
 
 /// `project`, `project › worktree`, or, when the session ran outside any

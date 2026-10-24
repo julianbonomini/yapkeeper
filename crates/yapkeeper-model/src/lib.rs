@@ -196,16 +196,19 @@ pub struct ResumeCommand {
     pub cwd: PathBuf,
 }
 
+/// The directory `$<variable>` names, or `None` when it is unset or empty.
+pub fn dir_from_env(variable: &str) -> Option<PathBuf> {
+    std::env::var_os(variable)
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+}
+
 /// A provider's history directory for this process: `$<variable>` when it is
 /// set and non-empty, otherwise `$HOME/<home_subdir>`.
 pub fn root_from_env(variable: &'static str, home_subdir: &str) -> Result<PathBuf, MissingHome> {
-    match std::env::var_os(variable) {
-        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ => match std::env::var_os("HOME") {
-            Some(home) if !home.is_empty() => Ok(PathBuf::from(home).join(home_subdir)),
-            _ => Err(MissingHome { variable }),
-        },
-    }
+    dir_from_env(variable)
+        .or_else(|| dir_from_env("HOME").map(|home| home.join(home_subdir)))
+        .ok_or(MissingHome { variable })
 }
 
 /// Neither a directory's own variable nor `HOME` names a directory.
@@ -223,6 +226,20 @@ impl fmt::Display for MissingHome {
 }
 
 impl std::error::Error for MissingHome {}
+
+/// The trimmed string `value` holds, or `None` when it holds no string or
+/// only whitespace.
+pub fn non_empty_text(value: &Value) -> Option<String> {
+    let text = value.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// When `record` was written, from its RFC 3339 `timestamp`, or `None` when
+/// it has none that parses.
+pub fn record_time(record: &Value) -> Option<SystemTime> {
+    let text = record["timestamp"].as_str()?;
+    text.parse::<jiff::Timestamp>().ok().map(SystemTime::from)
+}
 
 /// `.jsonl` files exactly `depth` directory levels below `dir`, or none when
 /// `dir` can't be read.

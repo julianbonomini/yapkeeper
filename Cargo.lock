@@ -2031,13 +2031,13 @@ dependencies = [
  "yapkeeper-claude",
  "yapkeeper-codex",
  "yapkeeper-model",
+ "yapkeeper-pi",
 ]
 
 [[package]]
 name = "yapkeeper-claude"
 version = "0.1.0"
 dependencies = [
- "jiff",
  "serde_json",
  "tempfile",
  "yapkeeper-model",
@@ -2047,7 +2047,6 @@ dependencies = [
 name = "yapkeeper-codex"
 version = "0.1.0"
 dependencies = [
- "jiff",
  "serde_json",
  "tempfile",
  "yapkeeper-model",
@@ -2057,8 +2056,18 @@ dependencies = [
 name = "yapkeeper-model"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "yapkeeper-pi"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "yapkeeper-model",
 ]
 
 [[package]]

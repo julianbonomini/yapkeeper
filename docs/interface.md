@@ -26,7 +26,7 @@ Words search conversation text, titles, and provider recaps. Every other token i
 | Form | Meaning | Examples |
 |---|---|---|
 | `@where` | Location: project, `project:worktree`, or any part of a path | `@acme-api`, `@acme-api:billing-retry`, `@scratch` |
-| `#provider` | Provider | `#claude`, `#codex` |
+| `#provider` | Provider | `#claude`, `#codex`, `#pi` |
 | `is:state` | Session state | `is:orphaned`, `is:temp`, `is:git`, `is:folder`, `is:pr`, `is:recap`, `is:unavailable`, `is:hidden` |
 | `!x`, `not:x` | Exclude a filter, a provider or state by name, or a word | `!codex`, `!temp`, `!@scratch`, `!is:pr`, `not:orphaned`, `!flaky` |
 
@@ -67,7 +67,7 @@ In the location list, a folder that no longer exists cannot be checked for Git, 
 
 The preview shows, in order:
 
-1. Title: the provider title (Claude Code `custom-title`, then `ai-title`; Codex `thread_name`), or the first prompt.
+1. Title: the provider title (Claude Code `custom-title`, then `ai-title`; Codex `thread_name`; Pi `session_info` name), or the first prompt.
 2. Provider, age, message count, subagent count, and linked PR numbers.
 3. Location icon and full directory, and the worktree name.
 4. `orphaned` or `unavailable` when the session cannot resume in its recorded directory.
@@ -78,7 +78,7 @@ The preview shows, in order:
 
 `→` opens the full conversation in place of the query line, results and preview, with the session's title and where it ran above it. Every message is shown whole, with the search words highlighted, and each tool call is one line. `↑` `↓` scroll by a line, `PgUp` `PgDn` by a page less one line, and `Home` `End` jump to either end. It opens at the first match. `n` and `N` move to the next and previous match, wrapping past the last and the first, and the title line shows which one (`match 2 / 3`). `Enter` there opens the resume dialog. `Esc` or `←` returns to the palette with the query and selection unchanged.
 
-Recaps cost nothing extra: Claude Code writes `away_summary` records into its session files. On the real histories, 180 of 783 sessions had one and 100 had a `pr-link` record. Codex sessions have no recap. Writing a summary for every session would need a model call during indexing; that is deferred (see open questions).
+Recaps cost nothing extra: Claude Code writes `away_summary` records into its session files. On the real histories, 180 of 783 sessions had one and 100 had a `pr-link` record. Codex and Pi sessions have no recap. Writing a summary for every session would need a model call during indexing; that is deferred (see open questions).
 
 ## Defaults and settings
 
@@ -143,7 +143,7 @@ The resume dialog has no query line, so it takes letters: `Enter` resumes, `c` r
 | `unavailable` | The folder exists but can't be inspected (permissions, or a volume not mounted). The row offers `c` as above, and `r` to check again. |
 | `orphaned` or `unavailable` | After `c`, the launch directory is gone too, or can't be inspected either. |
 | `running` | Claude Code's running-session metadata lists the session as open. Resuming is still allowed. |
-| `warning` | After `c`, for a provider that looks sessions up by directory (Claude Code): it may not find this session from another directory. |
+| `warning` | After `c`, for a provider that looks sessions up by directory (Claude Code, Pi): it may not find this session from another directory. |
 | `not found` | The provider's program isn't on `PATH`, so it can't start. |
 
 Resume never moves to another directory without `c`. `c` is offered while the session's own folder is orphaned or unavailable, and it is one-way: `Esc` and opening the dialog again start from the recorded folder. `r` checks an unavailable folder again and redraws the dialog; when it is still unavailable, the dialog says `Checked again: still can't inspect it.` The result row keeps its label until the next launch. Directory and command come first, so a short terminal drops state rows from the bottom.

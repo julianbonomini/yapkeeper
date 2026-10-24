@@ -20,3 +20,4 @@ unicode-width = "0.2"
 yapkeeper-claude = { path = "crates/yapkeeper-claude" }
 yapkeeper-codex = { path = "crates/yapkeeper-codex" }
 yapkeeper-model = { path = "crates/yapkeeper-model" }
+yapkeeper-pi = { path = "crates/yapkeeper-pi" }

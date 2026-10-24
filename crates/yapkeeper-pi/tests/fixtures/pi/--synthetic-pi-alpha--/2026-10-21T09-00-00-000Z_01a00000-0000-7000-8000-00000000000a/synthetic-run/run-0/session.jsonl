@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"01c00000-0000-7000-8000-00000000000c","timestamp":"2026-10-21T09:30:00.000Z","cwd":"/synthetic/pi-alpha"}
+{"type":"message","id":"c0000001","parentId":null,"timestamp":"2026-10-21T09:30:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Synthetic run task"}],"timestamp":1792575001000}}

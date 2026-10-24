@@ -35,16 +35,22 @@ Installed CLI help supports `codex resume <session-id> -C <directory>`. Use the 
 
 ## Pi
 
-Observed read-only on 2026-10-23, aggregate counts only.
+Observed read-only on 2026-10-23 and 2026-10-24, aggregate counts only. Rechecked against the installed CLI's session manager on 2026-10-24.
 
-- Top-level path: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<session-id>.jsonl`. `--session-dir` overrides the root for Pi itself.
-- The first record has type `session` with `version`, `id`, `timestamp`, and `cwd`. Some session files also carry `parentSession`.
-- Other record types: `message`, `custom_message`, `custom`, `session_info` (its `name` is the session's title), `model_change`, `thinking_level_change`, and `compaction`. Some records in nested files have no `type`.
+- Session root: `PI_CODING_AGENT_SESSION_DIR` when set and non-empty, otherwise `$PI_CODING_AGENT_DIR/sessions`, otherwise `~/.pi/agent/sessions`. `--session-dir` overrides all three for Pi itself.
+- Under the default root, a top-level session is `<root>/<encoded-cwd>/<timestamp>_<session-id>.jsonl`, where `<encoded-cwd>` is the path with separators turned into `-` between `--` marks. A custom session directory holds session files directly, with no `<encoded-cwd>` folder. Yapkeeper reads `.jsonl` files in the root and one folder below it, and takes the working directory from the header rather than the folder name.
+- The first record has type `session` with `version`, `id`, `timestamp`, and `cwd`. Some session files also carry `parentSession`. None of the 24 top-level files observed did.
+- Other record types: `message`, `custom_message`, `custom`, `session_info` (its `name` is the session's title; Yapkeeper keeps the latest), `model_change`, `thinking_level_change`, and `compaction`. Some records in nested files have no `type`. Yapkeeper skips records without a `type` and records of types it doesn't know.
 - Records link through `id` and `parentId`, forming a tree.
-- `message.message` has a `role` (`user`, `assistant`, `toolResult`, `bashExecution`) and `content` as a block array. Observed blocks are `text`, `toolCall`, and `thinking`.
-- Under a session's folder, `<session-dir>/<run-id>/run-<n>/session.jsonl` holds subagent runs, and `<session-dir>/forks/<timestamp>_<id>.jsonl` holds forks whose header names a `parentSession`. `subagent-artifacts/` beside the sessions holds worker transcripts and metadata. Verify which of these are subagent transcripts before classifying them; a `parentSession` alone does not establish it.
+- `message.message` has a `role` (`user`, `assistant`, `toolResult`, `bashExecution`). `content` is a block array for `user`, `assistant` and `toolResult`; Pi's types also allow a plain string. Observed blocks are `text`, `toolCall` (`name`, `arguments`), and `thinking`. A `bashExecution` message has `command` and `output` instead of `content`. Yapkeeper keeps `user` and `assistant` text as ordinary text, `toolCall` blocks, `toolResult` text and `bashExecution` commands and output as tool text, and never indexes thinking.
+- `custom_message` has `customType`, `content` (a string in every observed record), `display`, and sometimes `details`. Extensions write it, and Pi hands its content to the model as context. Observed kinds are subagent and background-task notices, mostly with `display: false`. Neither the person nor the assistant wrote it, so Yapkeeper keeps it as tool text.
+- A session file `<timestamp>_<id>.jsonl` may have a folder of the same name beside it. Locally there were 136 run files, 107 fork files and 6 worker transcripts:
+  - `<session-dir>/<run-id>/run-<n>/session.jsonl` is a subagent run. Its `session` header has its own `id` and no `parentSession`. Every observed run held one user prompt that the parent session's `subagent` tool call had written, and shared no entry ids with the parent.
+  - `<session-dir>/forks/<timestamp>_<id>.jsonl` is a subagent started with a copy of the parent's context. Its header's `parentSession` is the path of the session file beside the folder. Every observed fork began with entries copied from the parent, with the same entry ids. Those that went on were handed a task from the parent's `subagent` tool call, and the parent's `subagent` tool results and `subagent-notify` messages name the fork's id.
+  - `subagent-artifacts/` beside the session files holds a worker's input, output, metadata and `_worker_transcript.jsonl`. The transcript's records have `recordType`, `runId` and no `type`, and the file has no `session` header. Its run is named only inside other sessions' text, not by its path.
+- Yapkeeper reads runs and forks as subagents of the session whose folder holds them, taking that session's id from the folder name, so they count toward its subagents and their text is tool-level. It finds them only through their session file, so a folder whose session file is gone is not read. It gives worker transcripts no thread, so they are left out. Where a run or fork sits classifies it, not its `parentSession`.
 
-Installed CLI help supports `pi --session <path|id>` to open a specific session. Launch it with the recorded `cwd` as the process working directory. `--fork` creates a new session and is not ordinary resume.
+Installed CLI help supports `pi --session <path|id>` to open a specific session. Pi looks for the id among the starting directory's sessions first. When it finds the session under another project, it asks whether to fork it into the current directory. Launch it with the recorded `cwd` as the process working directory. `--fork` creates a new session and is not ordinary resume. Pi keeps no record of which sessions are open.
 
 ## OpenCode
 

@@ -12,7 +12,8 @@ use yapkeeper::{
     Availability, DataDir, Listing, Location, Query, Roots, Session, hide, list, rebuild, search,
 };
 
-/// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and data directory, each empty.
+/// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, Pi session directory and data
+/// directory, each empty.
 struct Histories {
     dir: TempDir,
 }
@@ -28,6 +29,7 @@ impl Histories {
         Roots {
             claude: self.dir.path().join("claude"),
             codex: self.dir.path().join("codex"),
+            pi: self.dir.path().join("pi"),
         }
     }
 

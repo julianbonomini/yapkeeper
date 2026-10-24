@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use yapkeeper::{
-    Availability, DataDir, Listing, Location, Query, Roots, Session, hide, list, rebuild, search,
+    Availability, Catalog, DataDir, Indexer, Listing, Location, Query, Roots, Session, hide, list,
+    rebuild, search,
 };
 
 /// A fresh `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, Pi session directory and data
@@ -483,4 +484,94 @@ fn a_codex_rename_changes_the_title_after_reading_only_the_session_index() {
     let listing = histories.list();
     assert_eq!(title(&listing, renamed), "A synthetic name");
     assert_eq!(listing.files_read, 1);
+}
+
+/// Every session `listing` lists, with where it ran.
+fn everything(listing: &Listing) -> Vec<(Session, Location)> {
+    listing
+        .sessions
+        .iter()
+        .map(|listed| (listed.session.clone(), listed.location.clone()))
+        .collect()
+}
+
+/// The id of the `n`th of `Histories::many`'s sessions.
+fn many_id(n: usize) -> String {
+    format!("aaaaaaaa-0000-4000-8000-{:012}", 1000 + n)
+}
+
+impl Histories {
+    /// Writes `count` Claude Code transcripts, oldest first, and gives their
+    /// paths in that order.
+    fn many(&self, count: usize) -> Vec<PathBuf> {
+        (0..count)
+            .map(|n| self.claude_session(&many_id(n), &format!("Prompt {n}"), "/synthetic/many"))
+            .collect()
+    }
+}
+
+#[test]
+fn two_indexers_taking_turns_store_each_message_once() {
+    let histories = Histories::new();
+    let transcripts = histories.many(40);
+    histories.list();
+    // In the same order, so the first eight stay the oldest.
+    for transcript in &transcripts {
+        append(transcript, &claude_prompt("Grown once", "/synthetic/many"));
+    }
+    let (_a, mut a) = Indexer::stepped(&histories.roots(), &histories.data());
+    let (_b, mut b) = Indexer::stepped(&histories.roots(), &histories.data());
+
+    // A plans all forty and commits the newest 32; B plans the eight left
+    // and commits them; A still holds those eight in its plan.
+    assert!(a.step());
+    assert!(b.step());
+    append(
+        &transcripts[0],
+        &claude_prompt("Grown twice", "/synthetic/many"),
+    );
+    while a.step() {}
+    while b.step() {}
+
+    let catalog = Catalog::cached(&histories.roots(), &histories.data()).unwrap();
+    let listing = histories.list();
+    let first = listing
+        .sessions
+        .iter()
+        .find(|listed| listed.session.id == many_id(0))
+        .unwrap();
+    let said: Vec<String> = catalog
+        .conversation(&first.session)
+        .unwrap()
+        .into_iter()
+        .map(|message| message.text)
+        .collect();
+    assert_eq!(said, ["Prompt 0", "Grown once", "Grown twice"]);
+    let rebuilt = rebuild(&histories.roots(), &histories.data()).unwrap();
+    assert_eq!(everything(&listing), everything(&rebuilt));
+}
+
+#[test]
+fn dropping_an_indexer_mid_pass_returns_at_once_and_leaves_the_index_consistent() {
+    let histories = Histories::new();
+    histories.many(300);
+    let indexer = Indexer::start(&histories.roots(), &histories.data());
+    drop(indexer);
+
+    let catalog = Catalog::cached(&histories.roots(), &histories.data()).unwrap();
+    let mut ids: Vec<String> = catalog
+        .search(&Query::default())
+        .unwrap()
+        .sessions
+        .iter()
+        .map(|listed| listed.session.id.clone())
+        .collect();
+    let listed = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), listed);
+    let listing = histories.list();
+    let rebuilt = rebuild(&histories.roots(), &histories.data()).unwrap();
+    assert_eq!(everything(&listing), everything(&rebuilt));
+    assert_eq!(listing.sessions.len(), 300);
 }

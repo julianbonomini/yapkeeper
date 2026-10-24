@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{self, AssertUnwindSafe};
@@ -20,7 +21,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 use yapkeeper::palette::{Colour, Palette, Restore, Step};
-use yapkeeper::{Catalog, DataDir, ResumeCommand, Roots, State, hide};
+use yapkeeper::{
+    Catalog, DataDir, Indexer, ResumeCommand, Roots, State, Stepper, hide, list, rebuild,
+};
 
 #[cfg(unix)]
 use support::Locked;
@@ -66,6 +69,24 @@ impl Histories {
 
     fn catalog(&self) -> Catalog {
         Catalog::open(&self.roots(), &self.data()).unwrap()
+    }
+
+    /// The palette over the sessions already indexed, taking in what a
+    /// stepped indexer over these histories publishes as it is stepped.
+    fn palette_indexing(&self) -> (Palette, Stepper) {
+        let catalog = Catalog::cached(&self.roots(), &self.data()).unwrap();
+        let (indexer, stepper) = Indexer::stepped(&self.roots(), &self.data());
+        let palette = Palette::new(catalog, Colour::Accent, Path::new("/")).indexing(indexer);
+        (palette, stepper)
+    }
+
+    /// Writes `count` Claude Code sessions run in `/usr`, `Synthetic session 0`
+    /// onwards.
+    fn many(&self, count: usize) {
+        for n in 0..count {
+            let id = format!("aaaaaaaa-0000-4000-8000-{:012}", 1000 + n);
+            self.claude(&id, "/usr", &format!("Synthetic session {n}"));
+        }
     }
 
     /// Writes Claude Code session `id`, run in `cwd`, whose one prompt is `text`.
@@ -2869,4 +2890,261 @@ fn the_footer_names_enter_for_resume_under_the_results_and_while_reading() {
         footer(&reading).contains("↑↓ scroll  ↵ resume"),
         "{reading:#?}"
     );
+}
+
+/// Steps `stepper` until its pass has ended.
+fn finish(stepper: &mut Stepper) {
+    while stepper.step() {}
+}
+
+const CLAUDE_NEW: &str = "aaaaaaaa-0000-4000-8000-000000000404";
+
+#[test]
+fn a_warm_index_shows_its_sessions_before_the_indexer_reads_anything() {
+    let histories = Histories::three();
+    histories.catalog();
+    histories.claude(CLAUDE_NEW, "/usr", "Draft the onboarding guide");
+    let (mut palette, mut stepper) = histories.palette_indexing();
+
+    let first = frame(&mut palette, 80, 24);
+    assert_eq!(rows_with(&first, &TITLES).len(), 3, "{first:#?}");
+    assert!(rows_with(&first, &["Draft"]).is_empty(), "{first:#?}");
+    assert!(!first[1].contains("indexing"), "{first:#?}");
+
+    finish(&mut stepper);
+    let after = frame(&mut palette, 80, 24);
+    assert_eq!(rows_with(&after, &["Draft"]).len(), 1, "{after:#?}");
+}
+
+/// Appends `records` to Claude Code session `id`, run in `cwd`, each given
+/// the session's `cwd` and the timestamp `Histories::claude` gives.
+fn append_claude(histories: &Histories, id: &str, cwd: &str, records: &[Value]) {
+    let path = histories
+        .dir
+        .path()
+        .join("claude/projects/-synthetic-palette")
+        .join(format!("{id}.jsonl"));
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    for record in records {
+        let mut record = record.clone();
+        record["cwd"] = json!(cwd);
+        record["timestamp"] = json!("2026-10-20T10:00:00Z");
+        writeln!(file, "{record}").unwrap();
+    }
+}
+
+#[test]
+fn an_update_keeps_the_open_conversation_where_it_was_read() {
+    let histories = Histories::three();
+    long_session(&histories);
+    histories.catalog();
+    let (mut palette, mut stepper) = histories.palette_indexing();
+    // Tidy, Retry, then the long session, which isn't the first row.
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Right);
+    for _ in 0..4 {
+        press(&mut palette, KeyCode::Down);
+    }
+    let before = frame(&mut palette, 80, 24);
+    assert!(before[1].contains("turn 0 asks"), "{before:#?}");
+
+    append_claude(
+        &histories,
+        CLAUDE_FULL,
+        "/usr",
+        &[json!({ "type": "user", "message": { "content": "turn 40 appended" } })],
+    );
+    finish(&mut stepper);
+    let after = frame(&mut palette, 80, 24);
+    assert_eq!(after[1], before[1], "{after:#?}");
+    assert_eq!(
+        conversation_body(&after)[0],
+        conversation_body(&before)[0],
+        "{after:#?}"
+    );
+    press(&mut palette, KeyCode::End);
+    let end = conversation_body(&frame(&mut palette, 80, 24));
+    assert!(end.last().unwrap().contains("turn 40 appended"), "{end:#?}");
+
+    press(&mut palette, KeyCode::Esc);
+    let results = frame(&mut palette, 80, 24);
+    assert!(
+        results.iter().any(|row| row.contains("turn 40 appended")),
+        "{results:#?}"
+    );
+}
+
+/// The row the selection bar is on, as `lines` reads it.
+fn selected_row(buffer: &Buffer) -> Option<String> {
+    let frame = lines(buffer);
+    (3..buffer.area.height.saturating_sub(2))
+        .find(|&y| {
+            buffer[(2, y)]
+                .modifier
+                .intersects(Modifier::BOLD | Modifier::REVERSED)
+        })
+        .map(|y| frame[usize::from(y)].clone())
+}
+
+#[test]
+fn an_update_adds_a_session_and_keeps_the_query_and_the_selected_session() {
+    let histories = Histories::three();
+    let export = "aaaaaaaa-0000-4000-8000-000000000405";
+    histories.claude(export, "/usr", "Billing export cleanup");
+    histories.claude(
+        "aaaaaaaa-0000-4000-8000-000000000406",
+        "/usr",
+        "Billing invoice totals",
+    );
+    histories.catalog();
+    let (mut palette, mut stepper) = histories.palette_indexing();
+    keys(&mut palette, "billing");
+    // Retry, Billing export, then Billing invoice.
+    press(&mut palette, KeyCode::Down);
+    press(&mut palette, KeyCode::Down);
+    let before = selected_row(&draw(&mut palette, 80, 24)).unwrap();
+    assert!(before.starts_with("│ Billing invoice"), "{before}");
+
+    // A day later than the rest, so it sorts above them.
+    histories.claude_records(
+        "aaaaaaaa-0000-4000-8000-000000000407",
+        "/usr",
+        &[json!({
+            "type": "user",
+            "message": { "content": "Billing ledger audit" },
+            "timestamp": "2026-10-21T10:00:00Z",
+        })],
+    );
+    finish(&mut stepper);
+    let buffer = draw(&mut palette, 80, 24);
+    let after = lines(&buffer);
+    assert!(after[3].starts_with("│ Billing ledger"), "{after:#?}");
+    assert_eq!(query_text(&after), "billing", "{after:#?}");
+    let selected = selected_row(&buffer).unwrap();
+    assert!(selected.starts_with("│ Billing invoice"), "{after:#?}");
+
+    // With the selected session gone, the bar stays on its row.
+    press(&mut palette, KeyCode::Up);
+    let before = selected_row(&draw(&mut palette, 80, 24)).unwrap();
+    assert!(before.starts_with("│ Billing export"), "{before}");
+    fs::remove_file(
+        histories
+            .dir
+            .path()
+            .join("claude/projects/-synthetic-palette")
+            .join(format!("{export}.jsonl")),
+    )
+    .unwrap();
+    let (indexer, mut stepper) = Indexer::stepped(&histories.roots(), &histories.data());
+    let mut palette = palette.indexing(indexer);
+    finish(&mut stepper);
+    let buffer = draw(&mut palette, 80, 24);
+    let after = lines(&buffer);
+    assert!(after[5].starts_with("│ Billing invoice"), "{after:#?}");
+    assert_eq!(
+        selected_row(&buffer).as_ref(),
+        Some(&after[5]),
+        "{after:#?}"
+    );
+}
+
+/// What `palette` draws into an 80×24 terminal at `at`.
+fn frame_at(palette: &mut Palette, at: Instant) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| palette.render(frame, at)).unwrap();
+    lines(terminal.backend().buffer())
+}
+
+#[test]
+fn indexing_shows_on_the_query_line_while_a_pass_runs_and_clears_after() {
+    let histories = Histories::new();
+    histories.many(40);
+    let (mut palette, mut stepper) = histories.palette_indexing();
+    assert!(stepper.step());
+
+    let start = Instant::now();
+    let first = frame_at(&mut palette, start);
+    assert!(!first[1].contains("indexing"), "{first:#?}");
+    assert_eq!(palette.redraw_at(), Some(start + Duration::from_millis(50)));
+    let soon = frame_at(&mut palette, start + Duration::from_millis(50));
+    assert!(!soon[1].contains("indexing"), "{soon:#?}");
+    let later = frame_at(&mut palette, start + Duration::from_millis(200));
+    assert!(later[1].contains("indexing · "), "{later:#?}");
+    assert!(palette.redraw_at().is_some());
+
+    finish(&mut stepper);
+    let done = frame_at(&mut palette, start + Duration::from_millis(250));
+    assert!(!done[1].contains("indexing"), "{done:#?}");
+    assert_eq!(palette.redraw_at(), None);
+}
+
+/// The match count at the end of the query line, such as `32 / 32`.
+fn count(frame: &[String]) -> &str {
+    let line = frame[1].trim_end_matches('│').trim_end();
+    let at = line.rfind(" / ").unwrap();
+    let start = line[..at].rfind(' ').unwrap() + 1;
+    &line[start..]
+}
+
+#[test]
+fn a_first_launch_shows_each_batch_as_it_is_indexed() {
+    let histories = Histories::new();
+    histories.many(40);
+    let (mut palette, mut stepper) = histories.palette_indexing();
+
+    let first = frame(&mut palette, 80, 24);
+    assert_eq!(
+        results(&first[3]).trim(),
+        "Indexing histories…",
+        "{first:#?}"
+    );
+    assert!(!first.iter().any(|row| row.contains("No sessions found.")));
+    assert!(stepper.step());
+    assert_eq!(count(&frame(&mut palette, 80, 24)), "32 / 32");
+    assert!(stepper.step());
+    assert_eq!(count(&frame(&mut palette, 80, 24)), "40 / 40");
+    assert!(!stepper.step());
+
+    let empty = Histories::new();
+    let (mut palette, mut stepper) = empty.palette_indexing();
+    let first = frame(&mut palette, 80, 24);
+    assert_eq!(
+        results(&first[3]).trim(),
+        "Indexing histories…",
+        "{first:#?}"
+    );
+    finish(&mut stepper);
+    let done = frame(&mut palette, 80, 24);
+    assert_eq!(results(&done[3]).trim(), "No sessions found.", "{done:#?}");
+}
+
+#[test]
+fn resuming_mid_index_drops_the_indexer_at_once_and_leaves_the_index_consistent() {
+    let histories = Histories::three();
+    histories.catalog();
+    histories.many(300);
+    let bin = bin_with(&["claude", "codex"]);
+    let catalog = Catalog::cached(&histories.roots(), &histories.data())
+        .unwrap()
+        .finding_programs_in(bin.path().as_os_str().to_owned());
+    let indexer = Indexer::start(&histories.roots(), &histories.data());
+    let mut palette = Palette::new(catalog, Colour::Accent, Path::new("/")).indexing(indexer);
+
+    press(&mut palette, KeyCode::Enter);
+    let step = press(&mut palette, KeyCode::Enter);
+    assert!(matches!(step, Step::Resume(_)), "{step:?}");
+    // As `run` does before the command replaces the process.
+    drop(palette);
+
+    let listed = list(&histories.roots(), &histories.data()).unwrap();
+    let rebuilt = rebuild(&histories.roots(), &histories.data()).unwrap();
+    let ids = |sessions: &[yapkeeper::Listed]| -> Vec<String> {
+        sessions
+            .iter()
+            .map(|listed| listed.session.id.clone())
+            .collect()
+    };
+    assert_eq!(ids(&listed.sessions), ids(&rebuilt.sessions));
+    assert_eq!(listed.sessions.len(), 303);
 }

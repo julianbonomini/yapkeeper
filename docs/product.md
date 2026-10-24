@@ -31,7 +31,7 @@ After indexing, opening Yapkeeper should show cached results immediately and sea
 
 Proposed measurement targets are a usable cached launch within 200 ms and search results within 50 ms. These are provisional targets, not measured results. Define the machine, corpus, timing boundaries, and percentiles before comparing implementations.
 
-Proposed refresh behavior: show cached results first, scan changed histories in the background on launch, refresh periodically while open, and provide a manual refresh action. The interval, process lifetime, cancellation behavior, and handling of a source change during indexing still need validation. A full archive parse must not be required on each launch.
+Proposed refresh behavior: show cached results first, scan changed histories in the background on launch, refresh periodically while open, and provide a manual refresh action. The indexer lives only as long as the palette. Quitting and resuming cancel it without waiting, and the index stays consistent as of its last batch. A file that changes during a pass is stat'ed before it is read, so the next pass sees the change. The interval and the manual refresh (`Ctrl+R`) are still open. A full archive parse must not be required on each launch.
 
 ## Interface
 

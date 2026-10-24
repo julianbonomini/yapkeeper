@@ -1,11 +1,11 @@
-//! The command palette: a query line searched live as the person types,
-//! the sessions it matches or the ways to finish the filter being typed, a
-//! preview of the selected session and key hints, over a `Catalog` loaded
-//! once; or, in their place, the selected session's whole conversation, a
-//! settings screen or the resume dialog. It owns every terminal decision
-//! (keys, layout, theme and the terminal's lifecycle) and reaches the
-//! index, the preferences, settings included, and what resuming would do
-//! only through the catalog.
+//! The command palette: a query line searched live as the person types, the
+//! sessions it matches or the ways to finish the filter being typed, a
+//! preview of the selected session and key hints, over a `Catalog` an
+//! `Indexer` keeps up to date; or, in their place, the selected session's
+//! whole conversation, a settings screen or the resume dialog. It owns
+//! every terminal decision (keys, layout, theme and the terminal's
+//! lifecycle) and reaches the index, the preferences, settings included,
+//! and what resuming would do only through the catalog.
 
 mod reading;
 mod resuming;
@@ -24,9 +24,11 @@ use ratatui::widgets::ListState;
 use self::reading::Reading;
 use self::resuming::Resuming;
 use self::settings::SettingsScreen;
+use crate::Snapshot;
+use crate::indexer::Indexing;
 use crate::{
-    Catalog, Completion, LeftOut, Listed, Message, Query, ResumeCommand, Settings, line,
-    location_token,
+    Catalog, Completion, Indexer, LeftOut, Listed, Message, Query, ResumeCommand, SessionKey,
+    Settings, line, location_token,
 };
 
 pub use terminal::{Restore, run};
@@ -74,10 +76,26 @@ pub struct Palette {
     error: Option<String>,
     /// Shown in the footer in place of the key hints.
     toast: Option<Toast>,
+    /// What keeps `catalog` up to date; idle unless given by `indexing`.
+    indexer: Indexer,
+    /// The first render that found a pass running, until one finds it ended.
+    running_since: Option<Instant>,
+    /// When the last render drew.
+    drawn_at: Option<Instant>,
+    /// Whether the indexer published while the conversation or the resume
+    /// dialog was open, so the results behind it are yet to be searched again.
+    stale: bool,
 }
 
 /// How long a confirmation stays in the footer.
 const TOAST_TIME: Duration = Duration::from_secs(3);
+
+/// How long a pass runs before the query line says so, so a pass that
+/// finds nothing to read never flashes it.
+const INDEXING_SHOWN_AFTER: Duration = Duration::from_millis(150);
+
+/// How often the palette redraws while a pass runs, to show what it publishes.
+const INDEXING_TICK: Duration = Duration::from_millis(50);
 
 /// A confirmation of the last action, shown until `until`.
 struct Toast {
@@ -149,9 +167,18 @@ impl Palette {
             resuming: None,
             error: None,
             toast: None,
+            indexer: Indexer::idle(),
+            running_since: None,
+            drawn_at: None,
+            stale: false,
         };
         palette.search(0);
         palette
+    }
+
+    /// This palette, taking in each batch `indexer` publishes.
+    pub fn indexing(self, indexer: Indexer) -> Palette {
+        Palette { indexer, ..self }
     }
 
     /// Applies one key press, made at `now`, and says whether the palette
@@ -164,7 +191,10 @@ impl Palette {
         if let Some(resuming) = &mut self.resuming {
             match key.code {
                 KeyCode::Char('c') if ctrl => return Step::Quit,
-                KeyCode::Esc => self.resuming = None,
+                KeyCode::Esc => {
+                    self.resuming = None;
+                    self.catch_up();
+                }
                 _ => {
                     if let Some(command) = resuming.handle(key, &self.catalog, &self.launch_dir) {
                         return Step::Resume(command);
@@ -189,7 +219,10 @@ impl Palette {
         if let Some(reading) = &mut self.reading {
             match key.code {
                 KeyCode::Char('c') if ctrl => return Step::Quit,
-                KeyCode::Esc | KeyCode::Left => self.reading = None,
+                KeyCode::Esc | KeyCode::Left => {
+                    self.reading = None;
+                    self.catch_up();
+                }
                 KeyCode::Enter => self.open_resuming(),
                 _ => reading.handle(key),
             }
@@ -231,18 +264,117 @@ impl Palette {
     }
 
     /// Draws the palette as it is at `now`, or the too-small message, into
-    /// the whole frame.
+    /// the whole frame. First takes in the sessions the indexer has
+    /// published by `now`. The query, the selected session when it is still
+    /// listed, and the place in the conversation are kept.
     pub fn render(&mut self, frame: &mut Frame, now: Instant) {
+        self.take_in(now);
         if self.toast.as_ref().is_some_and(|toast| toast.until <= now) {
             self.toast = None;
         }
         view::render(self, frame);
     }
 
-    /// When the frame changes with no key pressed: when the toast drawn
-    /// last gives way to the key hints. `None` while nothing will.
+    /// When the frame changes with no key pressed: when the toast gives way
+    /// to the key hints, or 50 ms after the last render while a pass runs.
+    /// `None` while nothing will.
     pub fn redraw_at(&self) -> Option<Instant> {
-        self.toast.as_ref().map(|toast| toast.until)
+        let toast = self.toast.as_ref().map(|toast| toast.until);
+        let tick = self
+            .drawn_at
+            .filter(|_| self.running_since.is_some())
+            .map(|drawn_at| drawn_at + INDEXING_TICK);
+        toast.into_iter().chain(tick).min()
+    }
+
+    /// Whether the query line says a pass is running: once it has run for
+    /// `INDEXING_SHOWN_AFTER`.
+    fn shows_indexing(&self) -> bool {
+        match (self.running_since, self.drawn_at) {
+            (Some(since), Some(drawn_at)) => drawn_at >= since + INDEXING_SHOWN_AFTER,
+            _ => false,
+        }
+    }
+
+    /// Takes in what the indexer has done by `now`: whether a pass runs, why
+    /// it failed, and the sessions it published since the last render.
+    fn take_in(&mut self, now: Instant) {
+        self.drawn_at = Some(now);
+        // Read before the snapshot, so the last batch of a pass that has just
+        // ended is taken in by this render or the one its tick brings.
+        let status = self.indexer.status();
+        match status {
+            Indexing::Running => {
+                self.running_since.get_or_insert(now);
+            }
+            Indexing::Idle | Indexing::Failed(_) => self.running_since = None,
+        }
+        if let Some(snapshot) = self.indexer.take() {
+            self.apply(snapshot);
+        }
+        // After the search the snapshot brings, which would clear it.
+        if let Indexing::Failed(message) = status {
+            self.error = Some(message);
+        }
+    }
+
+    /// Takes `snapshot` into the catalog. An open conversation keeps its place
+    /// and reads its messages again; the results it or the resume dialog
+    /// hides wait for `catch_up`.
+    fn apply(&mut self, snapshot: Snapshot) {
+        self.catalog.apply(snapshot);
+        if self.reading.is_none() && self.resuming.is_none() {
+            self.refind();
+            return;
+        }
+        self.stale = true;
+        let read = self.selected().filter(|_| self.reading.is_some());
+        if let Some(listed) = read.filter(|listed| self.catalog.holds(&listed.session)) {
+            match self.catalog.conversation(&listed.session) {
+                Ok(conversation) => self.conversation = conversation,
+                Err(error) => self.error = Some(error.to_string()),
+            }
+        }
+    }
+
+    /// Searches again for what the indexer published while the conversation
+    /// or the resume dialog was open, once neither is.
+    fn catch_up(&mut self) {
+        if self.stale && self.reading.is_none() && self.resuming.is_none() {
+            self.stale = false;
+            self.refind();
+        }
+    }
+
+    /// Searches for the query again after the catalog changed, keeping the
+    /// selected session when it is still found, else the same row, and the
+    /// rows scrolled into view; the ways to finish the query keep the one
+    /// selected when it is still offered, else the first.
+    fn refind(&mut self) {
+        let selected = self
+            .selected()
+            .map(|listed| SessionKey::of(&listed.session));
+        let row = self.selection.selected().unwrap_or(0);
+        let offset = self.selection.offset();
+        let completion = self
+            .completion
+            .selected()
+            .map(|row| self.completions[row].token.clone());
+        self.find();
+        let row = self
+            .found
+            .iter()
+            .position(|listed| Some(SessionKey::of(&listed.session)) == selected)
+            .or_else(|| self.found.len().checked_sub(1).map(|last| row.min(last)));
+        self.selection = ListState::default().with_offset(offset);
+        self.select(row);
+        self.completions = self.catalog.completions(&self.query);
+        let kept = self
+            .completions
+            .iter()
+            .position(|offered| Some(&offered.token) == completion.as_ref());
+        let first = (!self.completions.is_empty()).then_some(0);
+        self.completion = ListState::default().with_selected(kept.or(first));
     }
 
     fn set_query(&mut self, query: String) {
@@ -354,6 +486,14 @@ impl Palette {
     /// Searches the catalog for the query and selects `row`, or the last row
     /// when there are fewer.
     fn search(&mut self, row: usize) {
+        self.find();
+        let row = self.found.len().checked_sub(1).map(|last| row.min(last));
+        self.selection = ListState::default();
+        self.select(row);
+    }
+
+    /// Searches the catalog for the query, leaving the selection to the caller.
+    fn find(&mut self) {
         self.parsed = self.catalog.parse(&self.query).including_tools(self.tools);
         match self.catalog.search(&self.parsed) {
             Ok(found) => {
@@ -363,9 +503,6 @@ impl Palette {
             }
             Err(error) => self.error = Some(error.to_string()),
         }
-        let row = self.found.len().checked_sub(1).map(|last| row.min(last));
-        self.selection = ListState::default();
-        self.select(row);
     }
 
     /// Moves the selection one row, among the completions while there are

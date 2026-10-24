@@ -5,15 +5,17 @@
 //! by the query language's filters, reads each session's location from
 //! the disk when it is listed, keeps the user's hides and settings apart
 //! from the index, and says what resuming a session would do now, and
-//! starts it. A `Catalog` loads all of that once so it can be searched
-//! many times, by the settings, and record hides and settings, as the
-//! `palette` does while the person types;
+//! starts it. A `Catalog` loads all of that from the index, and takes in
+//! each batch an `Indexer` publishes, so it can be searched many times, by
+//! the settings, and record hides and settings, as the `palette` does while
+//! the person types;
 //! `line` holds how a session reads as one line of terminal text, for the
 //! palette and the CLI.
 
 #![forbid(unsafe_code)]
 
 mod index;
+mod indexer;
 pub mod line;
 mod location;
 pub mod palette;
@@ -36,6 +38,7 @@ use yapkeeper_claude::ClaudeCode;
 use yapkeeper_codex::Codex;
 use yapkeeper_pi::Pi;
 
+pub use indexer::{Indexer, Stepper};
 pub use location::*;
 pub use query::{
     Completion, LocationRow, LocationRowKind, Query, State, Token, TokenKind, location_token,
@@ -45,6 +48,7 @@ pub use settings::*;
 pub use yapkeeper_model::*;
 
 /// Where each provider keeps its history.
+#[derive(Clone)]
 pub struct Roots {
     pub claude: PathBuf,
     pub codex: PathBuf,
@@ -275,15 +279,46 @@ fn listing(catalog: &Catalog, query: &Query) -> Result<Listing, DataError> {
     })
 }
 
-/// Every indexed session as of `Catalog::open`, with its location and
-/// whether it is hidden, ready to be searched many times without
-/// refreshing the index or rereading the disk, to record hides and
+/// Every session in the index as of one read, each with its location read
+/// from the disk then; `hidden` is left to the catalog that applies it.
+pub(crate) struct Snapshot {
+    sessions: Vec<Listed>,
+    malformed_lines: usize,
+}
+
+impl Snapshot {
+    /// `sessions`, each with its location read from the disk now.
+    pub(crate) fn of(sessions: index::Sessions) -> Snapshot {
+        Snapshot {
+            sessions: sessions
+                .sessions
+                .into_iter()
+                .map(|session| listed(session, false))
+                .collect(),
+            malformed_lines: sessions.malformed_lines,
+        }
+    }
+}
+
+/// What opening a catalog read from the histories, for its listings.
+struct Opening {
+    searched: Vec<PathBuf>,
+    files_read: usize,
+    bytes_read: u64,
+}
+
+/// Every indexed session as of the catalog's last snapshot, with its
+/// location and whether it is hidden, ready to be searched many times
+/// without refreshing the index or rereading the disk, to record hides and
 /// settings, and to say what resuming one would do.
 pub struct Catalog {
     index: index::Index,
     /// Every session in the index, in no particular order; shared with what
     /// each search finds, so a search holds no borrow of the catalog.
     sessions: Vec<Rc<Listed>>,
+    /// What `sessions` are marked hidden by, kept so each snapshot applied
+    /// is marked the same way.
+    hides: prefs::Hides,
     /// The settings `parse` and `completions` follow.
     settings: Settings,
     /// Where the index and the preferences live.
@@ -312,28 +347,76 @@ impl Catalog {
     /// as `list` does.
     pub fn open(roots: &Roots, data: &DataDir) -> Result<Catalog, DataError> {
         let refreshed = refresh(roots, data)?;
+        let snapshot = Snapshot::of(index::Sessions {
+            sessions: refreshed.sessions,
+            malformed_lines: refreshed.malformed_lines,
+        });
+        let opening = Opening {
+            searched: refreshed.searched,
+            files_read: refreshed.files_read,
+            bytes_read: refreshed.bytes_read,
+        };
+        Catalog::with(refreshed.index, snapshot, opening, roots, data)
+    }
+
+    /// Every session already in the index, with locations, hides and settings
+    /// read now; opens no history file. A missing index is created empty, a
+    /// corrupt or old one is recreated. Fails as `open` does.
+    pub fn cached(roots: &Roots, data: &DataDir) -> Result<Catalog, DataError> {
+        let index = index::Index::open(&data.index())?;
+        let snapshot = Snapshot::of(index.sessions(&roots.providers())?);
+        let opening = Opening {
+            searched: roots
+                .history_dirs()
+                .into_iter()
+                .map(|dir| dir.dir)
+                .collect(),
+            files_read: 0,
+            bytes_read: 0,
+        };
+        Catalog::with(index, snapshot, opening, roots, data)
+    }
+
+    /// The catalog over `index` holding `snapshot`'s sessions, with the hides
+    /// and settings read from `data` now.
+    fn with(
+        index: index::Index,
+        snapshot: Snapshot,
+        opening: Opening,
+        roots: &Roots,
+        data: &DataDir,
+    ) -> Result<Catalog, DataError> {
         let prefs = prefs::read(&data.prefs())?;
-        let sessions = refreshed
-            .sessions
-            .into_iter()
-            .map(|session| {
-                let hidden = prefs.hides.contains(&session);
-                Rc::new(listed(session, hidden))
-            })
-            .collect();
-        Ok(Catalog {
-            index: refreshed.index,
-            sessions,
+        let mut catalog = Catalog {
+            index,
+            sessions: Vec::new(),
+            hides: prefs.hides,
             settings: prefs.settings,
             data: data.clone(),
             providers: roots.providers(),
             adapters: adapters(roots).into(),
             path: std::env::var_os("PATH").unwrap_or_default(),
-            malformed_lines: refreshed.malformed_lines,
-            searched: refreshed.searched,
-            files_read: refreshed.files_read,
-            bytes_read: refreshed.bytes_read,
-        })
+            malformed_lines: 0,
+            searched: opening.searched,
+            files_read: opening.files_read,
+            bytes_read: opening.bytes_read,
+        };
+        catalog.apply(snapshot);
+        Ok(catalog)
+    }
+
+    /// Takes `snapshot`'s sessions as this catalog's own, marked hidden by
+    /// this catalog's hides; keeps its settings and its index connection.
+    pub(crate) fn apply(&mut self, snapshot: Snapshot) {
+        self.sessions = snapshot
+            .sessions
+            .into_iter()
+            .map(|listed| {
+                let hidden = self.hides.contains(&listed.session);
+                Rc::new(Listed { hidden, ..listed })
+            })
+            .collect();
+        self.malformed_lines = snapshot.malformed_lines;
     }
 
     /// `text` read as the query language, with this catalog's providers,
@@ -395,6 +478,7 @@ impl Catalog {
             false => Choice::Unhide,
         };
         prefs::record(&self.data.prefs(), std::slice::from_ref(session), choice)?;
+        self.hides.set(session, hidden);
         let key = SessionKey::of(session);
         for listed in &mut self.sessions {
             if SessionKey::of(&listed.session) == key {
@@ -443,6 +527,14 @@ impl Catalog {
     /// the `PATH` this process had when it opened.
     pub fn finding_programs_in(self, path: OsString) -> Catalog {
         Catalog { path, ..self }
+    }
+
+    /// Whether `session` is among this catalog's sessions.
+    pub(crate) fn holds(&self, session: &Session) -> bool {
+        let key = SessionKey::of(session);
+        self.sessions
+            .iter()
+            .any(|listed| SessionKey::of(&listed.session) == key)
     }
 
     /// Every session in the index, whether or not a query keeps it.

@@ -2,6 +2,7 @@
 //! searchable text. It finds the sessions whose text contains every word of
 //! a query and none of its excluded words. It owns the schema and the
 //! refresh rule (which history files are opened, and from which byte),
+//! applied in small committed batches, safe beside another writer,
 //! keeps each file's digest as text it never looks inside, and hides how
 //! text is found fast: full-text tables, the trigram limit and which rows
 //! count as tool-level.
@@ -15,9 +16,14 @@ use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior, params, params_from_iter};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+    params_from_iter,
+};
 use yapkeeper_model::{
     Adapter, Assembled, FOLD_VERSION, Fact, Message, RecordedGit, ResumeCommand, Role, Session,
     SourceDigest, assemble,
@@ -111,13 +117,42 @@ const SAID: &str = "messages.role IN ('user', 'assistant')";
 /// Threads that are the session's own, leaving out every subagent's.
 const OWN_THREAD: &str = "threads.thread = threads.session_id";
 
-/// The index, open and up to date as of the refresh that returned it.
+/// The index, open; each read sees the last batch any writer committed.
 pub(crate) struct Index {
     connection: Connection,
     path: PathBuf,
 }
 
+/// Every session in the index as of one read, in no particular order.
+pub(crate) struct Sessions {
+    pub(crate) sessions: Vec<Session>,
+    /// Malformed complete lines in every indexed file.
+    pub(crate) malformed_lines: usize,
+}
+
 impl Index {
+    /// The index at `path`, created when missing, recreated when corrupt or of
+    /// another schema; refreshes nothing.
+    pub(crate) fn open(path: &Path) -> Result<Index, DataError> {
+        match open(path) {
+            Ok(connection) => Ok(Index {
+                connection,
+                path: path.to_path_buf(),
+            }),
+            Err(source) => Err(DataError {
+                path: path.to_path_buf(),
+                file: DataFile::Index,
+                source,
+            }),
+        }
+    }
+
+    /// Every session of `providers` and the malformed-line total, read in
+    /// one read transaction.
+    pub(crate) fn sessions(&self, providers: &[&'static str]) -> Result<Sessions, DataError> {
+        sessions(&self.connection, providers).map_err(|source| self.error(source))
+    }
+
     /// The `candidates` whose title, recap or a message in scope contains
     /// every word of `query`, and none of its excluded words. Fails only
     /// when the index can no longer be read.
@@ -144,6 +179,25 @@ impl Index {
             source,
         }
     }
+}
+
+/// `Index::sessions` before its error names the index.
+fn sessions(connection: &Connection, providers: &[&'static str]) -> Result<Sessions, Cause> {
+    // Both reads see the same commit, so the total matches the sessions.
+    let transaction = connection.unchecked_transaction()?;
+    let malformed_lines: i64 = transaction.query_row(
+        "SELECT COALESCE(SUM(malformed_lines), 0) FROM sources",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut sessions = Vec::new();
+    for &provider in providers {
+        sessions.extend(stored_sessions(&transaction, provider)?);
+    }
+    Ok(Sessions {
+        sessions,
+        malformed_lines: malformed_lines as usize,
+    })
 }
 
 /// `Index::conversation` before its error names the index.
@@ -218,28 +272,250 @@ pub(crate) struct Refreshed {
 /// session in it, with the index kept open for word lookups. Fails only
 /// when the index can't be created or written.
 pub(crate) fn refresh(adapters: &[&dyn Adapter], path: &Path) -> Result<Refreshed, DataError> {
-    let indexed = open(path).and_then(|mut connection| {
-        // Immediate, so two refreshes at once take turns instead of both
-        // reading the same files and one failing to write.
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let read = refresh_in(&transaction, adapters)?;
+    let mut pass = Pass::new(adapters, path)?;
+    let never = AtomicBool::new(false);
+    while pass.next_batch(adapters, &never)? {}
+    let Sessions {
+        sessions,
+        malformed_lines,
+    } = pass.sessions()?;
+    Ok(Refreshed {
+        index: pass.index,
+        sessions,
+        malformed_lines,
+        searched: adapters
+            .iter()
+            .map(|adapter| adapter.history_dir())
+            .collect(),
+        files_read: pass.files_read,
+        bytes_read: pass.bytes_read,
+    })
+}
+
+/// The most files one batch reads, and the new bytes after which it takes
+/// no more, so each batch holds the write lock briefly.
+const BATCH_FILES: usize = 32;
+const BATCH_BYTES: u64 = 16 * 1024 * 1024;
+
+/// One refresh, split into batches, each committed on its own so readers
+/// see it at once and another writer can take its turn between them.
+pub(crate) struct Pass {
+    index: Index,
+    /// The providers of the pass's adapters, whose sessions `sessions` reads.
+    providers: Vec<&'static str>,
+    /// The files to read, oldest mtime first, so the newest is read first.
+    planned: Vec<Planned>,
+    /// Indexed files that are no longer sources; the first batch deletes
+    /// what they recorded.
+    gone: Vec<Gone>,
+    /// History files opened by the batches committed so far.
+    files_read: usize,
+    /// History bytes read by the batches committed so far.
+    bytes_read: u64,
+}
+
+/// A file a pass reads, as planned.
+struct Planned {
+    /// Which of the pass's adapters it is a source of.
+    adapter: usize,
+    file: PathBuf,
+    /// Its mtime as planned, which orders the plan.
+    mtime_ns: i64,
+}
+
+/// An indexed file that is no longer a source.
+struct Gone {
+    /// Which of the pass's adapters it was a source of.
+    adapter: usize,
+    file: PathBuf,
+}
+
+impl Pass {
+    /// Opens the index as `Index::open` does, lists and stats every source
+    /// of `adapters`, and plans the files to read (newest mtime first) and
+    /// the ones gone. Takes no write lock.
+    pub(crate) fn new(adapters: &[&dyn Adapter], path: &Path) -> Result<Pass, DataError> {
+        let mut pass = Pass {
+            index: Index::open(path)?,
+            providers: adapters.iter().map(|adapter| adapter.provider()).collect(),
+            planned: Vec::new(),
+            gone: Vec::new(),
+            files_read: 0,
+            bytes_read: 0,
+        };
+        pass.plan(adapters)
+            .map_err(|source| pass.index.error(source))?;
+        Ok(pass)
+    }
+
+    fn plan(&mut self, adapters: &[&dyn Adapter]) -> Result<(), Cause> {
+        for (n, &adapter) in adapters.iter().enumerate() {
+            let mut stored = stored_sources(&self.index.connection, adapter)?;
+            for file in adapter.sources() {
+                let Some(stat) = stat(&file) else {
+                    continue;
+                };
+                if progress(stored.remove(&file), &stat).is_some() {
+                    self.planned.push(Planned {
+                        adapter: n,
+                        file,
+                        mtime_ns: stat.mtime_ns,
+                    });
+                }
+            }
+            // Whatever is left was indexed before but is no longer a source.
+            self.gone
+                .extend(stored.into_keys().map(|file| Gone { adapter: n, file }));
+        }
+        self.planned.sort_by_key(|planned| planned.mtime_ns);
+        Ok(())
+    }
+
+    /// Commits the next batch: up to 32 files or 16 MiB of new bytes, read
+    /// by `adapters`, the ones given to `new`. True when it committed one.
+    /// False, committing nothing, once nothing is left or `stop` is set. A
+    /// busy index fails it as it fails `refresh`.
+    pub(crate) fn next_batch(
+        &mut self,
+        adapters: &[&dyn Adapter],
+        stop: &AtomicBool,
+    ) -> Result<bool, DataError> {
+        if stop.load(Ordering::Relaxed) || (self.planned.is_empty() && self.gone.is_empty()) {
+            return Ok(false);
+        }
+        self.batch(adapters, stop)
+            .map_err(|source| self.index.error(source))
+    }
+
+    fn batch(&mut self, adapters: &[&dyn Adapter], stop: &AtomicBool) -> Result<bool, Cause> {
+        // Immediate, so two writers take turns instead of both reading the
+        // same files and one failing to write.
+        let transaction = self
+            .index
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut changed = vec![false; adapters.len()];
+        for gone in &self.gone {
+            let gone_path = gone.file.as_os_str().as_bytes();
+            transaction.execute("DELETE FROM sources WHERE path = ?1", [gone_path])?;
+            transaction.execute("DELETE FROM messages WHERE source_path = ?1", [gone_path])?;
+            changed[gone.adapter] = true;
+        }
+        let mut files_read = 0;
+        let mut bytes_read = 0;
+        while files_read < BATCH_FILES && bytes_read < BATCH_BYTES {
+            // Dropping the transaction rolls back what this batch wrote.
+            if stop.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            let Some(planned) = self.planned.pop() else {
+                break;
+            };
+            // Decided again inside the lock: another writer may have read
+            // the file since this pass planned it, and it may have changed.
+            let adapter = adapters[planned.adapter];
+            let Some(stat) = stat(&planned.file) else {
+                continue;
+            };
+            let stored = stored_source(&transaction, adapter, &planned.file)?;
+            let Some(progress) = progress(stored, &stat) else {
+                continue;
+            };
+            bytes_read += read_source(&transaction, adapter, &planned.file, &stat, progress)?;
+            files_read += 1;
+            changed[planned.adapter] = true;
+        }
+        for (&adapter, changed) in adapters.iter().zip(changed) {
+            if changed {
+                store_sessions(&transaction, adapter)?;
+            }
+        }
         transaction.commit()?;
-        Ok(Refreshed {
-            index: Index {
-                connection,
-                path: path.to_path_buf(),
-            },
-            sessions: read.sessions,
-            malformed_lines: read.malformed_lines,
-            searched: read.searched,
-            files_read: read.files_read,
-            bytes_read: read.bytes_read,
-        })
-    });
-    indexed.map_err(|source| DataError {
-        path: path.to_path_buf(),
-        file: DataFile::Index,
-        source,
+        self.gone.clear();
+        self.files_read += files_read;
+        self.bytes_read += bytes_read;
+        Ok(true)
+    }
+
+    /// Every session of the pass's providers in the index, as of its last
+    /// commit or another writer's since.
+    pub(crate) fn sessions(&self) -> Result<Sessions, DataError> {
+        self.index.sessions(&self.providers)
+    }
+}
+
+/// Reads `file`, a source of `adapter` whose stat was `stat` before reading,
+/// on from `progress`, and stores what it adds. Gives the bytes read.
+fn read_source(
+    transaction: &Transaction,
+    adapter: &dyn Adapter,
+    file: &Path,
+    stat: &Stat,
+    mut progress: Progress,
+) -> Result<u64, Cause> {
+    // Read from the start, so whatever was stored for it goes.
+    if progress.offset == 0 {
+        transaction.execute(
+            "DELETE FROM messages WHERE source_path = ?1",
+            [file.as_os_str().as_bytes()],
+        )?;
+    }
+    let reading = adapter.read(file, progress.offset);
+    let digest = &mut progress.digest;
+    digest.absorb(&reading.facts, time(stat.mtime_ns));
+    store_messages(transaction, file, &reading.facts)?;
+    transaction.execute(
+        r#"INSERT OR REPLACE INTO sources (provider, path, dev, ino, size, mtime_ns,
+            "offset", parser_version, fold_version, malformed_lines, digest, thread)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+        params![
+            adapter.provider(),
+            file.as_os_str().as_bytes(),
+            stat.dev as i64,
+            stat.ino as i64,
+            stat.size as i64,
+            stat.mtime_ns,
+            reading.offset as i64,
+            adapter.parser_version(),
+            FOLD_VERSION,
+            (progress.malformed_lines + reading.malformed_lines) as i64,
+            digest.encode(),
+            digest.thread(),
+        ],
+    )?;
+    Ok(stat.size.saturating_sub(progress.offset))
+}
+
+/// Where to read a file whose stat is now `stat` from, given what the index
+/// `stored` about it; `None` when it is up to date. A file that only grew is
+/// read on from its last complete line; anything else is read again from
+/// the start.
+fn progress(stored: Option<Stored>, stat: &Stat) -> Option<Progress> {
+    match stored {
+        Some(Stored {
+            stat: old,
+            resume: Some(_),
+        }) if old == *stat => None,
+        Some(Stored {
+            stat: old,
+            resume: Some(progress),
+        }) if (old.dev, old.ino) == (stat.dev, stat.ino) && stat.size >= progress.offset => {
+            Some(progress)
+        }
+        _ => Some(Progress::default()),
+    }
+}
+
+/// `file`'s identity, size and mtime now; `None` when it can't be read.
+/// Taken before reading, so a file that grows during the read is seen as
+/// changed next time.
+fn stat(file: &Path) -> Option<Stat> {
+    let metadata = fs::metadata(file).ok()?;
+    Some(Stat {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        size: metadata.size(),
+        mtime_ns: nanos(metadata.modified().ok()?),
     })
 }
 
@@ -282,6 +558,13 @@ fn open(path: &Path) -> Result<Connection, Cause> {
     })
 }
 
+impl DataError {
+    /// Whether another process held the index past `BUSY_TIMEOUT`.
+    pub(crate) fn is_busy(&self) -> bool {
+        is_busy(self.source.as_ref())
+    }
+}
+
 fn is_busy(error: &(dyn Error + 'static)) -> bool {
     error
         .downcast_ref::<rusqlite::Error>()
@@ -292,7 +575,7 @@ fn is_busy(error: &(dyn Error + 'static)) -> bool {
 fn open_as_is(path: &Path) -> Result<Connection, Cause> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(BUSY_TIMEOUT)?;
-    connection.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
+    use_wal(&connection)?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     match version {
         SCHEMA_VERSION => {}
@@ -306,13 +589,19 @@ fn open_as_is(path: &Path) -> Result<Connection, Cause> {
     Ok(connection)
 }
 
-/// What `refresh_in` read and found, before the index is handed out.
-struct Read {
-    sessions: Vec<Session>,
-    malformed_lines: usize,
-    searched: Vec<PathBuf>,
-    files_read: usize,
-    bytes_read: u64,
+/// Switches `connection` to WAL, waiting up to `BUSY_TIMEOUT` while another
+/// connection switches it too: SQLite fails that switch at once rather than
+/// calling the busy handler, so two first launches would otherwise race.
+fn use_wal(connection: &Connection) -> rusqlite::Result<()> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match connection.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(())) {
+            Err(error) if is_busy(&error) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            switched => return switched,
+        }
+    }
 }
 
 /// What the index recorded about a source file when it last read it.
@@ -340,148 +629,66 @@ struct Stat {
     mtime_ns: i64,
 }
 
-fn refresh_in(transaction: &Transaction, adapters: &[&dyn Adapter]) -> Result<Read, Cause> {
-    let mut files_read = 0;
-    let mut bytes_read = 0;
-    let mut searched = Vec::new();
-    for &adapter in adapters {
-        let provider = adapter.provider();
-        searched.push(adapter.history_dir());
-        let mut stored = stored_sources(transaction, adapter)?;
-        let mut changed = false;
-        for file in adapter.sources() {
-            // Taken before reading, so a file that grows during the read is
-            // seen as changed next time.
-            let Ok(metadata) = fs::metadata(&file) else {
-                continue;
-            };
-            let Ok(modified) = metadata.modified() else {
-                continue;
-            };
-            let stat = Stat {
-                dev: metadata.dev(),
-                ino: metadata.ino(),
-                size: metadata.size(),
-                mtime_ns: nanos(modified),
-            };
-            // A file that only grew is read on from its last complete line;
-            // anything else is read again from the start.
-            let mut progress = match stored.remove(&file) {
-                Some(Stored {
-                    stat: old,
-                    resume: Some(_),
-                }) if old == stat => continue,
-                Some(Stored {
-                    stat: old,
-                    resume: Some(progress),
-                }) if (old.dev, old.ino) == (stat.dev, stat.ino)
-                    && stat.size >= progress.offset =>
-                {
-                    progress
-                }
-                _ => {
-                    transaction.execute(
-                        "DELETE FROM messages WHERE source_path = ?1",
-                        [file.as_os_str().as_bytes()],
-                    )?;
-                    Progress::default()
-                }
-            };
-            let reading = adapter.read(&file, progress.offset);
-            files_read += 1;
-            bytes_read += stat.size.saturating_sub(progress.offset);
-            let digest = &mut progress.digest;
-            digest.absorb(&reading.facts, modified);
-            store_messages(transaction, &file, &reading.facts)?;
-            transaction.execute(
-                r#"INSERT OR REPLACE INTO sources (provider, path, dev, ino, size, mtime_ns,
-                    "offset", parser_version, fold_version, malformed_lines, digest, thread)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
-                params![
-                    provider,
-                    file.as_os_str().as_bytes(),
-                    stat.dev as i64,
-                    stat.ino as i64,
-                    stat.size as i64,
-                    stat.mtime_ns,
-                    reading.offset as i64,
-                    adapter.parser_version(),
-                    FOLD_VERSION,
-                    (progress.malformed_lines + reading.malformed_lines) as i64,
-                    digest.encode(),
-                    digest.thread(),
-                ],
-            )?;
-            changed = true;
-        }
-        // Whatever is left was indexed before but is no longer a source.
-        for gone in stored.keys() {
-            let gone = gone.as_os_str().as_bytes();
-            transaction.execute("DELETE FROM sources WHERE path = ?1", [gone])?;
-            transaction.execute("DELETE FROM messages WHERE source_path = ?1", [gone])?;
-            changed = true;
-        }
-        if changed {
-            store_sessions(transaction, adapter)?;
-        }
-    }
-    let malformed_lines: i64 = transaction.query_row(
-        "SELECT COALESCE(SUM(malformed_lines), 0) FROM sources",
-        [],
-        |row| row.get(0),
-    )?;
-    let mut sessions = Vec::new();
-    for &adapter in adapters {
-        sessions.extend(stored_sessions(transaction, adapter)?);
-    }
-    Ok(Read {
-        sessions,
-        malformed_lines: malformed_lines as usize,
-        searched,
-        files_read,
-        bytes_read,
-    })
-}
-
 /// Every source of `adapter` the index has read, by path.
 fn stored_sources(
-    transaction: &Transaction,
+    connection: &Connection,
     adapter: &dyn Adapter,
 ) -> Result<HashMap<PathBuf, Stored>, Cause> {
-    let mut statement = transaction.prepare(
-        r#"SELECT path, dev, ino, size, mtime_ns, "offset", malformed_lines, digest,
-            parser_version, fold_version
-        FROM sources WHERE provider = ?1"#,
-    )?;
-    let rows = statement.query_map([adapter.provider()], |row| {
-        let path: Vec<u8> = row.get(0)?;
-        Ok((
-            PathBuf::from(OsStr::from_bytes(&path)),
-            Stored {
-                stat: Stat {
-                    dev: row.get::<_, i64>(1)? as u64,
-                    ino: row.get::<_, i64>(2)? as u64,
-                    size: row.get::<_, i64>(3)? as u64,
-                    mtime_ns: row.get(4)?,
-                },
-                resume: if row.get::<_, u32>(8)? == adapter.parser_version()
-                    && row.get::<_, u32>(9)? == FOLD_VERSION
-                {
-                    let digest: String = row.get(7)?;
-                    let offset = row.get::<_, i64>(5)? as u64;
-                    let malformed_lines = row.get::<_, i64>(6)? as usize;
-                    SourceDigest::decode(&digest).map(|digest| Progress {
-                        offset,
-                        digest,
-                        malformed_lines,
-                    })
-                } else {
-                    None
-                },
-            },
-        ))
-    })?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT {STORED_COLUMNS} FROM sources WHERE provider = ?1"
+    ))?;
+    let rows = statement.query_map([adapter.provider()], |row| stored(row, adapter))?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// What the index has read of `file`, a source of `adapter`, as of now.
+fn stored_source(
+    connection: &Connection,
+    adapter: &dyn Adapter,
+    file: &Path,
+) -> Result<Option<Stored>, Cause> {
+    let stored = connection
+        .query_row(
+            &format!("SELECT {STORED_COLUMNS} FROM sources WHERE path = ?1"),
+            [file.as_os_str().as_bytes()],
+            |row| stored(row, adapter),
+        )
+        .optional()?;
+    Ok(stored.map(|(_, stored)| stored))
+}
+
+/// The `sources` columns `stored` reads, in its order.
+const STORED_COLUMNS: &str = r#"path, dev, ino, size, mtime_ns, "offset", malformed_lines,
+    digest, parser_version, fold_version"#;
+
+/// A `sources` row of `adapter`'s, selected as `STORED_COLUMNS`, by path.
+fn stored(row: &rusqlite::Row, adapter: &dyn Adapter) -> rusqlite::Result<(PathBuf, Stored)> {
+    let path: Vec<u8> = row.get(0)?;
+    Ok((
+        PathBuf::from(OsStr::from_bytes(&path)),
+        Stored {
+            stat: Stat {
+                dev: row.get::<_, i64>(1)? as u64,
+                ino: row.get::<_, i64>(2)? as u64,
+                size: row.get::<_, i64>(3)? as u64,
+                mtime_ns: row.get(4)?,
+            },
+            resume: if row.get::<_, u32>(8)? == adapter.parser_version()
+                && row.get::<_, u32>(9)? == FOLD_VERSION
+            {
+                let digest: String = row.get(7)?;
+                let offset = row.get::<_, i64>(5)? as u64;
+                let malformed_lines = row.get::<_, i64>(6)? as usize;
+                SourceDigest::decode(&digest).map(|digest| Progress {
+                    offset,
+                    digest,
+                    malformed_lines,
+                })
+            } else {
+                None
+            },
+        },
+    ))
 }
 
 /// Appends `facts`' messages to those already stored for `source`, in order.
@@ -648,10 +855,10 @@ fn sessions_matching(
     Ok(matched)
 }
 
-/// `adapter`'s sessions as the index stores them.
+/// `provider`'s sessions as the index stores them.
 fn stored_sessions(
     transaction: &Transaction,
-    adapter: &dyn Adapter,
+    provider: &'static str,
 ) -> Result<Vec<Session>, Cause> {
     let mut statement = transaction.prepare(
         "SELECT id, title, working_dir, other_working_dirs, last_active_ns, branch,
@@ -659,12 +866,12 @@ fn stored_sessions(
             resume_cwd
         FROM sessions WHERE provider = ?1",
     )?;
-    let mut rows = statement.query([adapter.provider()])?;
+    let mut rows = statement.query([provider])?;
     let mut sessions = Vec::new();
     while let Some(row) = rows.next()? {
         let other_working_dirs: Vec<String> = serde_json::from_str(&row.get::<_, String>(3)?)?;
         sessions.push(Session {
-            provider: adapter.provider(),
+            provider,
             id: row.get(0)?,
             title: row.get(1)?,
             working_dir: PathBuf::from(row.get::<_, String>(2)?),

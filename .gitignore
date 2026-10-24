@@ -2,3 +2,4 @@
 /target/
 .vago-goals/
 /.yapkeeper-bench-*/
+/brag-output/

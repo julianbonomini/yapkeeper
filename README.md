@@ -2,6 +2,8 @@
 
 Now, where was I?
 
+![Yapkeeper narrowing to a project, searching a conversation, reading it and resuming it](docs/demo.gif)
+
 Yapkeeper finds your Claude Code, Codex and Pi sessions across projects, Git worktrees and plain folders, and resumes them in the directory they ran in. It reads every session in your history, including ones you started without it.
 
 ## Install

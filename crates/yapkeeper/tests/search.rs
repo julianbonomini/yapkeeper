@@ -745,3 +745,75 @@ fn orphaned_sessions_come_after_the_rest_each_group_most_recent_first() {
 
     assert_eq!(histories.found(""), [B, A, C, D]);
 }
+
+/// Sessions with text in titles, prompts, replies, tool output and a
+/// subagent, for checking that a query of several words finds exactly
+/// what its words find one at a time.
+fn mixed() -> Histories {
+    let histories = Histories::new();
+    histories.claude(
+        A,
+        &[
+            prompt("Run the database migration"),
+            reply("The migration needs a retry"),
+            said(
+                "user",
+                json!([{ "type": "tool_result", "tool_use_id": "t1", "content": "rollback ok" }]),
+            ),
+        ],
+    );
+    histories.claude(
+        B,
+        &[
+            prompt("Retry the upload"),
+            json!({ "type": "custom-title", "customTitle": "Database upload" }),
+        ],
+    );
+    histories.claude(C, &[prompt("Go plan the migration")]);
+    histories.claude_subagent(C, "x", &[prompt("Look at the rollback")]);
+    histories.claude(D, &[prompt("Nothing in common at all")]);
+    histories
+}
+
+/// The ids every one of `terms` finds when searched alone with `found`,
+/// sorted.
+fn found_by_each(
+    histories: &Histories,
+    found: fn(&Histories, &str) -> Vec<String>,
+    terms: &[&str],
+) -> Vec<String> {
+    let mut all = found(histories, "");
+    for term in terms {
+        let matched = found(histories, term);
+        all.retain(|id| matched.contains(id));
+    }
+    sorted(all)
+}
+
+#[test]
+fn a_query_finds_exactly_what_its_words_find_one_at_a_time() {
+    let histories = mixed();
+    let queries: &[&[&str]] = &[
+        &["database", "zzzzzz", "migration"],
+        &["zzzzzz", "m"],
+        &["migration", "r"],
+        &["database", "m"],
+        &["migration", "retry", "go"],
+        &["database", "up", "!retry"],
+        &["migration", "!go", "!zzzzzz"],
+        &["rollback", "migration"],
+        &["rollback", "not:plan", "a"],
+        &["!rollback", "the"],
+    ];
+    let without_tools: fn(&Histories, &str) -> Vec<String> = Histories::found;
+    for found in [without_tools, Histories::found_with_tools] {
+        for terms in queries {
+            let text = terms.join(" ");
+            assert_eq!(
+                sorted(found(&histories, &text)),
+                found_by_each(&histories, found, terms),
+                "{text:?}"
+            );
+        }
+    }
+}

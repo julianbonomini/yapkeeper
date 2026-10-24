@@ -32,7 +32,7 @@ use yapkeeper_model::{
 use crate::query::{self, Query, Word};
 use crate::{BUSY_TIMEOUT, Cause, DataError, DataFile, SessionKey};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 // Source paths come from the filesystem, so they are stored as raw bytes.
 // Session paths and text come from JSON, so they are always UTF-8.
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS messages (
     text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_by_source ON messages (source_path);
+CREATE INDEX IF NOT EXISTS sources_by_thread ON sources (provider, thread);
 CREATE TABLE IF NOT EXISTS sessions (
     row_id INTEGER PRIMARY KEY,
     provider TEXT NOT NULL,
@@ -82,6 +83,7 @@ CREATE TABLE IF NOT EXISTS threads (
     session_id TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS threads_by_thread ON threads (provider, thread);
+CREATE INDEX IF NOT EXISTS threads_by_session ON threads (provider, session_id);
 -- Folded by query::fold in Rust and matched case-sensitively, so a
 -- candidate set is never narrower than what Word::matches accepts.
 CREATE VIRTUAL TABLE IF NOT EXISTS message_text USING fts5(
@@ -105,9 +107,9 @@ CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
 END;
 "#;
 
-/// The search word bound as `?1`, quoted as one FTS5 phrase so that quotes,
+/// The search word bound as `?2`, quoted as one FTS5 phrase so that quotes,
 /// `OR`, `NEAR`, `*` and `:` in it are matched as text.
-const PHRASE: &str = r#"'"' || replace(?1, '"', '""') || '"'"#;
+const PHRASE: &str = r#"'"' || replace(?2, '"', '""') || '"'"#;
 
 /// What the person and the assistant said, leaving out tool calls and
 /// tool output. In the session's own thread, these messages are the ones
@@ -116,6 +118,10 @@ const SAID: &str = "messages.role IN ('user', 'assistant')";
 
 /// Threads that are the session's own, leaving out every subagent's.
 const OWN_THREAD: &str = "threads.thread = threads.session_id";
+
+/// The sessions still in play, bound as `?1`: a JSON array of
+/// `[provider, id]` pairs.
+const IN_PLAY: &str = "SELECT value ->> 0, value ->> 1 FROM json_each(?1)";
 
 /// The index, open; each read sees the last batch any writer committed.
 pub(crate) struct Index {
@@ -797,42 +803,62 @@ fn key_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionKey> {
 
 /// Which of `candidates` match `word` in their title, recap or a message
 /// that `scope`, an SQL condition on `messages` and `threads`, admits.
+/// Only the rows of `candidates` are read, so none are when it is empty.
 fn sessions_matching(
     connection: &Connection,
     word: &Word,
     scope: &str,
     candidates: &HashSet<SessionKey>,
 ) -> Result<HashSet<SessionKey>, Cause> {
-    let mut unmatched = candidates.clone();
     let mut matched = HashSet::new();
+    if candidates.is_empty() {
+        return Ok(matched);
+    }
+    let in_play: Vec<[&str; 2]> = candidates
+        .iter()
+        .map(|key| [key.provider.as_str(), key.id.as_str()])
+        .collect();
+    let in_play = serde_json::to_string(&in_play)?;
     // Trigram rows hold three-character sequences, so a shorter word
-    // can't be looked up, and every row in scope is read instead.
-    // Bound as `?1` only in the SQL that looks it up.
+    // can't be looked up, and every row in play is read instead.
+    // Bound as `?2` only in the SQL that looks it up.
     let lookup = (word.key().chars().count() >= 3).then_some(word.key());
-    let (session_rows, message_rows, match_clause) = match lookup {
+    let (session_rows, session_match) = match lookup {
         Some(_) => (
-            format!(
-                "session_text JOIN sessions ON sessions.row_id = session_text.rowid
-                WHERE session_text MATCH {PHRASE}"
-            ),
+            "session_text JOIN sessions ON sessions.row_id = session_text.rowid",
+            format!("AND session_text MATCH {PHRASE}"),
+        ),
+        None => ("sessions", String::new()),
+    };
+    // A lookup's hits are each checked against the sessions in play; the
+    // unary `+` stops SQLite probing the threads index once per session in
+    // play for every hit. A shorter word starts from the sessions in play.
+    let (message_rows, message_match, in_play_key) = match lookup {
+        Some(_) => (
             "message_text JOIN messages ON messages.id = message_text.rowid",
             format!("AND message_text MATCH {PHRASE}"),
+            "+threads.provider, +threads.session_id",
         ),
-        None => ("sessions".to_string(), "messages", String::new()),
+        None => (
+            "messages",
+            String::new(),
+            "threads.provider, threads.session_id",
+        ),
     };
+    let bound = || params_from_iter(std::iter::once(in_play.as_str()).chain(lookup));
     let mut statement = connection.prepare(&format!(
         "SELECT sessions.provider, sessions.id, sessions.title, sessions.recap
-        FROM {session_rows}"
+        FROM {session_rows}
+        WHERE (sessions.provider, sessions.id) IN ({IN_PLAY}) {session_match}"
     ))?;
-    let mut rows = statement.query(params_from_iter(lookup))?;
+    let mut rows = statement.query(bound())?;
     while let Some(row) = rows.next()? {
         let key = key_from_row(row)?;
         let title: String = row.get(2)?;
         let recap: Option<String> = row.get(3)?;
-        if unmatched.contains(&key)
+        if !matched.contains(&key)
             && (word.matches(&title) || recap.is_some_and(|recap| word.matches(&recap)))
         {
-            unmatched.remove(&key);
             matched.insert(key);
         }
     }
@@ -842,13 +868,12 @@ fn sessions_matching(
         JOIN sources ON sources.path = messages.source_path
         JOIN threads ON threads.provider = sources.provider
             AND threads.thread = sources.thread
-        WHERE {scope} {match_clause}"
+        WHERE {scope} AND ({in_play_key}) IN ({IN_PLAY}) {message_match}"
     ))?;
-    let mut rows = statement.query(params_from_iter(lookup))?;
+    let mut rows = statement.query(bound())?;
     while let Some(row) = rows.next()? {
         let key = key_from_row(row)?;
-        if unmatched.contains(&key) && word.matches(&row.get::<_, String>(2)?) {
-            unmatched.remove(&key);
+        if !matched.contains(&key) && word.matches(&row.get::<_, String>(2)?) {
             matched.insert(key);
         }
     }

@@ -2035,6 +2035,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "yapkeeper-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "jiff",
+ "ratatui",
+ "serde_json",
+ "tempfile",
+ "yapkeeper",
+]
+
+[[package]]
 name = "yapkeeper-claude"
 version = "0.1.0"
 dependencies = [

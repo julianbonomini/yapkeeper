@@ -281,7 +281,7 @@ impl Palette {
     }
 
     /// When the frame changes with no key pressed: when the toast gives way
-    /// to the key hints, 50 ms after the last render while a pass runs, or
+    /// to the key hints, `INDEXING_TICK` after the last render while a pass runs, or
     /// when the next pass is due. `None` while nothing will.
     pub fn redraw_at(&self) -> Option<Instant> {
         let toast = self.toast.as_ref().map(|toast| toast.until);

@@ -371,7 +371,7 @@ impl Pass {
         Ok(())
     }
 
-    /// Commits the next batch: up to 32 files or 16 MiB of new bytes, read
+    /// Commits the next batch: up to `BATCH_FILES` files or `BATCH_BYTES` new bytes, read
     /// by `adapters`, the ones given to `new`. True when it committed one.
     /// False, committing nothing, once nothing is left or `stop` is set. A
     /// busy index fails it as it fails `refresh`.

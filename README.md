@@ -2,9 +2,7 @@
 
 Now, where was I?
 
-Yapkeeper is a local CLI/TUI for finding, browsing, and resuming Claude Code, Codex, and Pi conversations across projects, Git worktrees, and folders, including sessions started outside Yapkeeper.
-
-Run `yapkeeper` in a terminal to open the palette: type to search your Claude Code, Codex and Pi sessions, preview one, and press `Enter` twice to resume it in its own directory. `yapkeeper list` and `yapkeeper search` print the same sessions one line each for scripts, and `yapkeeper --help` covers the query language and where Yapkeeper keeps its files.
+Yapkeeper finds your Claude Code, Codex and Pi sessions across projects, Git worktrees and plain folders, and resumes them in the directory they ran in. It reads every session in your history, including ones you started without it.
 
 ## Install
 
@@ -16,40 +14,76 @@ With [Homebrew](https://brew.sh):
 brew install julianbonomini/tap/yapkeeper
 ```
 
-With the install script, which puts the binary in `~/.local/bin` after checking its SHA-256 checksum:
+With the install script:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/julianbonomini/yapkeeper/main/install.sh | sh
 ```
 
-Set `YAPKEEPER_INSTALL_DIR` to install somewhere else, or `YAPKEEPER_VERSION=v0.1.1` to install a specific release. Prebuilt binaries for Apple Silicon and Intel Macs and static Linux binaries for x86_64 and arm64 are also on the [releases page](https://github.com/julianbonomini/yapkeeper/releases).
+The script downloads the release for your OS and CPU, checks its SHA-256 checksum, and puts the binary in `~/.local/bin`. Set `YAPKEEPER_INSTALL_DIR` to install it somewhere else, or `YAPKEEPER_VERSION=v0.1.1` to pin a release.
 
-From source, with a recent stable Rust:
+You can also download a binary from the [releases page](https://github.com/julianbonomini/yapkeeper/releases) (Apple Silicon and Intel Macs, static Linux builds for x86_64 and arm64), or build from source with a recent stable Rust:
 
 ```sh
 cargo install --locked --git https://github.com/julianbonomini/yapkeeper yapkeeper
 ```
 
-On 1.91 GB of local histories, disposable benchmarks indexed in 2.75 seconds with 50 MiB peak RAM in Rust, versus 2.87 seconds and 235 MiB in Bun/TypeScript. We chose Rust with Ratatui for comparable indexing speed and a smaller memory footprint.
+## Usage
 
-- [Product scope and open decisions](docs/product.md)
-- [Session-format findings](docs/session-formats.md)
-- [Domain glossary](GLOSSARY.md)
+Run `yapkeeper` to open the palette. Type to search, move with the arrow keys, and press `Enter` twice to resume the selected session in its own directory. On terminals at least 80 columns wide a preview of the conversation sits beside the results; `Ctrl+O` opens the whole conversation at any width, `Tab` browses sessions by location, and `Ctrl+S` opens settings.
 
-Vago builds Yapkeeper with Claude Code and Claude Opus 5.5 by default. Run a Goal from the repository root with `vago run <goal>`. The workflows use Cargo formatting, lint, and test checks, with unsafe Rust forbidden in workspace code; publishing steps still need review before execution.
+A query is a list of words and filters, and a session has to match all of them:
 
-## Measuring launch and search
-
-`yapkeeper-bench` measures how fast the palette opens over a warm index and how fast it answers each keystroke of a query and a pasted query, against the 200 ms and 50 ms targets in [docs/product.md](docs/product.md#speed-and-refresh). It writes a synthetic corpus from a seed, indexes it into a temporary folder, and prints p50 and p95 for each measurement on stdout. Run it from the repository root in a release build:
-
-```sh
-cargo run --release -p yapkeeper-bench
+```text
+billing retry            words in the title, messages or recap
+@yapkeeper               a project, project:worktree or any part of the path
+#codex                   one provider: #claude, #codex or #pi
+is:worktree              a state, such as is:git, is:pr, is:orphaned or is:hidden
+!temp  not:flaky         leave out a filter, state or word
 ```
 
-The corpus takes about 1 GB in a hidden folder inside `--dir` (default: the current directory) while it runs and is deleted at the end. `--dir` must not be under a system temp folder such as `/tmp`, where every session would count as temp. `--seed`, `--sessions`, `--subagents`, `--megabytes` and `--runs` change what is measured; `--help` lists them. The checks don't run it.
+Typing `@`, `#`, `is:` or `!` in the palette opens a list of completions with session counts. A word with an uppercase letter matches case. Tool calls, tool output and subagent transcripts are searched only after `Ctrl+T`.
 
-The benchmark reads your own histories only with `--real-histories`, and only with your authorization. It reads the Claude Code, Codex and Pi directories this environment names without writing to them, builds a temporary private index that is deleted at the end, and prints counts and timings only. Keep its output out of commits and pull requests.
+The same search works from the shell, one session per line:
 
-## Releasing
+```sh
+yapkeeper list
+yapkeeper search '#claude' is:worktree flaky test
+yapkeeper search --ids '!temp' release
+yapkeeper hide <id>
+```
 
-Releases are cut from the version in the root `Cargo.toml`. Bump `version` under `[workspace.package]`, run `cargo check` so `Cargo.lock` picks up the new version, and merge both to `main`. The release workflow sees a version with no tag, runs the checks, builds macOS (Apple Silicon and Intel) and static Linux (x86_64 and arm64) binaries, publishes a GitHub Release tagged `v<version>` with tarballs and SHA-256 checksums, and updates the formula in [julianbonomini/homebrew-tap](https://github.com/julianbonomini/homebrew-tap). A push that leaves the version unchanged releases nothing.
+`yapkeeper --help` and `yapkeeper search --help` cover the rest.
+
+Yapkeeper never writes to your session histories. It reads them from `~/.claude/projects`, `~/.codex` and `~/.pi/agent/sessions` (Claude Code and Codex honor `CLAUDE_CONFIG_DIR` and `CODEX_HOME`) and keeps a search index and your preferences in its own folder. `yapkeeper paths` prints where. The index can always be rebuilt with `yapkeeper rebuild`; hidden sessions and settings live in the preferences file and survive a rebuild.
+
+## Contributing
+
+Issues and pull requests are welcome. For anything beyond a small fix, open an issue first so we can agree on the behavior.
+
+Yapkeeper is a Rust workspace built on [Ratatui](https://ratatui.rs) and SQLite. Before sending a change, run:
+
+```sh
+sh .vago/scripts/check.sh
+```
+
+It checks formatting, runs Clippy with warnings as errors, and runs the tests. CI runs the same script on Linux and macOS for every pull request. Unsafe code is forbidden in every crate.
+
+Tests must use synthetic or redacted session data. Don't commit real transcripts, titles or project paths, and don't paste them into issues either.
+
+Some background before you change behavior:
+
+- [docs/product.md](docs/product.md): what Yapkeeper does and the speed targets
+- [docs/interface.md](docs/interface.md): the palette's layout and keys
+- [docs/session-formats.md](docs/session-formats.md): how each provider stores and resumes sessions
+- [GLOSSARY.md](GLOSSARY.md) and [docs/adr/](docs/adr/): terms and past design decisions
+
+`cargo run --release -p yapkeeper-bench` measures launch and per-keystroke search time against those targets on a generated corpus of about 1 GB; `--help` lists its options.
+
+### Releasing
+
+Bump `version` under `[workspace.package]` in the root `Cargo.toml`, run `cargo check` so `Cargo.lock` picks it up, and merge to `main`. CI notices the new version, runs the checks, builds the binaries, publishes a GitHub release tagged `v<version>`, and updates the formula in [homebrew-tap](https://github.com/julianbonomini/homebrew-tap).
+
+## License
+
+[MIT](LICENSE)

@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use yapkeeper::{Roots, list};
+use yapkeeper::{Cost, Roots, Spent, list};
 
 mod listing;
 
@@ -209,5 +209,60 @@ fn a_run_whose_session_file_is_missing_is_left_out() {
     assert_eq!(
         found_with_tools(&roots, tmp.path(), "subagent"),
         [] as [&str; 0]
+    );
+}
+
+/// A Pi `assistant` message written at `timestamp` that used `tokens` and
+/// cost `cost` dollars.
+fn pi_response(timestamp: &str, tokens: u64, cost: f64) -> String {
+    format!(
+        r#"{{"type":"message","id":"r-{timestamp}","parentId":"m1","timestamp":"{timestamp}","message":{{"role":"assistant","content":[{{"type":"text","text":"A synthetic reply"}}],"model":"synthetic","usage":{{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":{tokens},"cost":{{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":{cost}}}}}}}}}"#
+    )
+}
+
+#[test]
+fn a_session_spends_what_pi_recorded_and_a_fork_only_what_it_added() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pi = tmp.path().join("pi");
+    let session = "01e00000-0000-7000-8000-00000000000e";
+    let folder = session_folder(&pi);
+    let session_file = folder.with_extension("jsonl");
+    write_pi_session(&session_file, session, "A synthetic prompt");
+    let copied = pi_response("2026-10-22T08:00:02.000Z", 300, 0.012);
+    fs::write(
+        &session_file,
+        format!("{}{copied}\n", fs::read_to_string(&session_file).unwrap()),
+    )
+    .unwrap();
+    // Started an hour after the session, beginning with a copy of it.
+    let fork = "01e00000-0000-7000-8000-0000000000e4";
+    let fork_file = folder
+        .join("forks")
+        .join(format!("2026-10-22T09-00-00-000Z_{fork}.jsonl"));
+    write_pi_file(
+        &fork_file,
+        &format!(
+            r#"{{"type":"session","version":3,"id":"{fork}","cwd":"/synthetic/pi-eta","parentSession":"{}"}}"#,
+            session_file.display()
+        ),
+        "A synthetic subagent task",
+    );
+    let added = pi_response("2026-10-22T09:00:05.000Z", 1000, 0.5);
+    fs::write(
+        &fork_file,
+        format!(
+            "{}{copied}\n{added}\n",
+            fs::read_to_string(&fork_file).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let listing = list(&pi_roots(&pi, tmp.path()), &data_dir(tmp.path())).unwrap();
+    assert_eq!(
+        listed(&listing, session).session.spent,
+        Spent {
+            tokens: 1300,
+            cost: Some(Cost::from_micros(512_000)),
+        }
     );
 }

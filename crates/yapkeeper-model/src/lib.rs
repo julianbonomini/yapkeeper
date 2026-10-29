@@ -13,6 +13,8 @@ mod assemble;
 use std::fmt;
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::iter::Sum;
+use std::ops::Add;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -91,6 +93,8 @@ pub enum Fact {
     LinkedPr(u64),
     /// The first wins.
     Git(RecordedGit),
+    /// What one model response used.
+    Usage(Usage),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +138,8 @@ pub struct Session {
     pub linked_prs: Vec<u64>,
     /// Agents this session started, through any chain of subagents.
     pub subagent_count: usize,
+    /// What the session's model responses used, its subagents' included.
+    pub spent: Spent,
     pub resume: ResumeCommand,
 }
 
@@ -145,6 +151,91 @@ pub struct RecordedGit {
     pub branch: Option<String>,
     /// The remote, such as `git@example.com:acme/acme-api.git`.
     pub repository_url: Option<String>,
+}
+
+/// What one model response used, as its provider recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Usage {
+    /// Names the response. Usage facts in a row from one file that name the
+    /// same response record it again, and the latest stands for it; `None`
+    /// is always a response of its own.
+    pub response: Option<String>,
+    /// Every token the response read or wrote, cached or not.
+    pub tokens: u64,
+    /// `None` when the provider recorded no cost and the adapter knows no
+    /// price for the response's model.
+    pub cost: Option<Cost>,
+}
+
+/// What a session's model responses used together.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Spent {
+    pub tokens: u64,
+    /// What the responses whose cost is known cost; `None` when no
+    /// response's cost is known.
+    pub cost: Option<Cost>,
+}
+
+impl Add for Spent {
+    type Output = Spent;
+
+    fn add(self, other: Spent) -> Spent {
+        let cost = match (self.cost, other.cost) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
+        Spent {
+            tokens: self.tokens + other.tokens,
+            cost,
+        }
+    }
+}
+
+impl Sum for Spent {
+    fn sum<I: Iterator<Item = Spent>>(spents: I) -> Spent {
+        spents.fold(Spent::default(), Add::add)
+    }
+}
+
+/// An amount in US dollars, kept in millionths so that sums are exact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Cost {
+    micros: u64,
+}
+
+impl Cost {
+    /// `dollars` to the nearest millionth; a negative or non-finite amount
+    /// is nothing.
+    pub fn from_dollars(dollars: f64) -> Cost {
+        let micros = (dollars * 1e6).round();
+        Cost {
+            micros: if micros.is_finite() && micros > 0.0 {
+                micros as u64
+            } else {
+                0
+            },
+        }
+    }
+
+    /// `micros` millionths of a dollar.
+    pub fn from_micros(micros: u64) -> Cost {
+        Cost { micros }
+    }
+
+    /// This amount in millionths of a dollar.
+    pub fn micros(self) -> u64 {
+        self.micros
+    }
+}
+
+impl Add for Cost {
+    type Output = Cost;
+
+    fn add(self, other: Cost) -> Cost {
+        Cost {
+            micros: self.micros + other.micros,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

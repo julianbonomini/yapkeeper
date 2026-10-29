@@ -12,8 +12,8 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::{Text, Theme, icon};
-use crate::line::{age, directory, fit, fit_left, one_line, without_controls};
+use super::{Text, Theme, counted, icon};
+use crate::line::{age, directory, dollars, fit, fit_left, one_line, tokens, without_controls};
 use crate::palette::Palette;
 use crate::{Availability, Message, Place, Query, Role};
 
@@ -84,6 +84,16 @@ fn lines(palette: &Palette, theme: &Theme, cells: usize) -> Vec<Line<'static>> {
             .paragraph(&meta.join(" · "), "", META_LINES, theme.dim)
             .lines,
     );
+    // Most costs are priced from tokens, so it is marked as an estimate.
+    let spent = session.spent;
+    if spent.tokens > 0 {
+        let used = format!("{} tokens", tokens(spent.tokens));
+        let line = match spent.cost {
+            Some(cost) => format!("≈{} · {used}", dollars(cost)),
+            None => used,
+        };
+        lines.push(Line::styled(fit(&line, cells), theme.dim));
+    }
     let icon = icon(&listed, palette.catalog.settings().icons);
     let dir = directory(&session.working_dir, palette.home.as_deref());
     let dir = fit_left(&dir, cells.saturating_sub(icon.width()));
@@ -151,14 +161,6 @@ fn lines(palette: &Palette, theme: &Theme, cells: usize) -> Vec<Line<'static>> {
 fn section(lines: &mut Vec<Line<'static>>, theme: &Theme, heading: &'static str) {
     lines.push(Line::raw(""));
     lines.push(Line::styled(heading, theme.accent));
-}
-
-/// `1 message`, `2 messages`.
-fn counted(count: usize, noun: &str) -> String {
-    match count {
-        1 => format!("1 {noun}"),
-        n => format!("{n} {noun}s"),
-    }
 }
 
 /// What `message` says, after its speaker's label, in `MESSAGE_LINES` lines at most;

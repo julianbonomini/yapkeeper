@@ -9,10 +9,10 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Adapter, Fact, RecordedGit, Role, Session, ThreadKind, TitleKind};
+use crate::{Adapter, Cost, Fact, RecordedGit, Role, Session, Spent, ThreadKind, TitleKind};
 
 /// Bump when `absorb` or `assemble` would give different results from the same facts.
-pub const FOLD_VERSION: u32 = 1;
+pub const FOLD_VERSION: u32 = 2;
 
 /// What one file's facts fold to so far: enough to build its thread's
 /// session, without message text. Folding facts in several batches gives the
@@ -38,6 +38,41 @@ struct Fold {
     recap: Option<String>,
     linked_prs: Vec<u64>,
     git: Option<Git>,
+    /// Every response before `last_response`.
+    spent_before: Stored,
+    /// Kept apart until the next usage fact, which may record it again.
+    last_response: Option<Response>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Response {
+    id: Option<String>,
+    spent: Stored,
+}
+
+/// `Spent`, with the cost in millionths of a dollar.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+struct Stored {
+    tokens: u64,
+    cost_micros: Option<u64>,
+}
+
+impl From<Stored> for Spent {
+    fn from(stored: Stored) -> Spent {
+        Spent {
+            tokens: stored.tokens,
+            cost: stored.cost_micros.map(Cost::from_micros),
+        }
+    }
+}
+
+impl From<Spent> for Stored {
+    fn from(spent: Spent) -> Stored {
+        Stored {
+            tokens: spent.tokens,
+            cost_micros: spent.cost.map(Cost::micros),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -116,6 +151,25 @@ impl SourceDigest {
                         fold.linked_prs.push(*number);
                     }
                 }
+                Fact::Usage(usage) => {
+                    let response = Response {
+                        id: usage.response.clone(),
+                        spent: Stored::from(Spent {
+                            tokens: usage.tokens,
+                            cost: usage.cost,
+                        }),
+                    };
+                    let repeated = fold
+                        .last_response
+                        .as_ref()
+                        .is_some_and(|last| last.id.is_some() && last.id == response.id);
+                    if let Some(last) = fold.last_response.replace(response)
+                        && !repeated
+                    {
+                        fold.spent_before =
+                            (Spent::from(fold.spent_before) + Spent::from(last.spent)).into();
+                    }
+                }
                 Fact::Git(git) => {
                     if fold.git.is_none() {
                         fold.git = Some(Git {
@@ -126,6 +180,13 @@ impl SourceDigest {
                 }
             }
         }
+    }
+
+    /// What this file's responses used.
+    fn spent(&self) -> Spent {
+        let last = self.fold.last_response.as_ref();
+        Spent::from(self.fold.spent_before)
+            + last.map_or(Spent::default(), |last| last.spent.into())
     }
 
     /// The thread this file records, once an `Identity` fact has named one.
@@ -184,7 +245,7 @@ pub fn assemble(adapter: &dyn Adapter, digests: &[SourceDigest]) -> Assembled {
                 if let Some(parent) = parent {
                     parent_of.insert(id, parent);
                 }
-                subagents.push(id.as_str());
+                subagents.push((id.as_str(), digest.spent()));
             }
             Kind::Session => {
                 let (Some(working_dir), Some(first_prompt), Some(last_active)) = (
@@ -221,6 +282,7 @@ pub fn assemble(adapter: &dyn Adapter, digests: &[SourceDigest]) -> Assembled {
                     recap: fold.recap.clone(),
                     linked_prs: fold.linked_prs.clone(),
                     subagent_count: 0,
+                    spent: digest.spent(),
                     resume: adapter.resume(id, working_dir),
                 });
             }
@@ -228,7 +290,7 @@ pub fn assemble(adapter: &dyn Adapter, digests: &[SourceDigest]) -> Assembled {
     }
 
     let session_ids: HashSet<String> = assembled.session_of.keys().cloned().collect();
-    for subagent in subagents {
+    for (subagent, spent) in subagents {
         let mut thread = parent_of.get(subagent).copied();
         // Bounded so a cycle in corrupt records can't loop forever.
         for _ in 0..=parent_of.len() {
@@ -239,6 +301,7 @@ pub fn assemble(adapter: &dyn Adapter, digests: &[SourceDigest]) -> Assembled {
                     .insert(subagent.to_string(), id.to_string());
                 if let Some(session) = assembled.sessions.iter_mut().find(|s| s.id == id) {
                     session.subagent_count += 1;
+                    session.spent = session.spent + spent;
                 }
                 break;
             }

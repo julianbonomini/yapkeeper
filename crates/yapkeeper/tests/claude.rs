@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use yapkeeper::{Listing, RecordedGit, ResumeCommand, Roots, list};
+use yapkeeper::{Cost, Listing, RecordedGit, ResumeCommand, Roots, Spent, list};
 
 mod listing;
 
@@ -386,4 +386,71 @@ fn the_recorded_branch_is_the_first_git_branch_on_a_kept_record() {
             repository_url: None,
         }
     );
+}
+
+#[test]
+fn a_session_spends_each_response_once_with_its_subagents_at_list_prices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let claude = tmp.path().join("claude");
+    let id = "aaaaaaaa-0000-4000-8000-000000000061";
+    // Claude Code writes a response's usage again with each content block.
+    let priced = r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":1000,"output_tokens":2000,"cache_read_input_tokens":100000,"cache_creation_input_tokens":10000,"cache_creation":{"ephemeral_1h_input_tokens":10000,"ephemeral_5m_input_tokens":0}},"content":[{"type":"text","text":"A synthetic reply"}]},"cwd":"/synthetic/temp"}"#;
+    let unpriced = r#"{"type":"assistant","message":{"id":"msg_2","model":"synthetic-model","usage":{"input_tokens":500,"output_tokens":500},"content":[{"type":"text","text":"Another synthetic reply"}]},"cwd":"/synthetic/temp"}"#;
+    write_session(
+        &claude,
+        id,
+        &format!(
+            "{}\n{priced}\n{priced}\n{unpriced}\n",
+            r#"{"type":"user","message":{"content":"A synthetic prompt"},"cwd":"/synthetic/temp"}"#
+        ),
+    );
+    let subagents = claude.join(format!("projects/-synthetic-temp/{id}/subagents"));
+    fs::create_dir_all(&subagents).unwrap();
+    fs::write(
+        subagents.join("agent-a.jsonl"),
+        concat!(
+            r#"{"type":"assistant","message":{"id":"msg_3","model":"claude-sonnet-5-5","usage":{"input_tokens":1000000,"output_tokens":0},"content":[]},"isSidechain":true}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let listing = list(&roots(&claude, tmp.path()), &data_dir(tmp.path())).unwrap();
+    // $0.004 input, $0.04 output, $0.02 cache reads and $0.08 hour-long
+    // cache writes, then the subagent's $2 of input.
+    assert_eq!(
+        listed(&listing, id).session.spent,
+        Spent {
+            tokens: 113_000 + 1_000 + 1_000_000,
+            cost: Some(Cost::from_micros(2_144_000)),
+        }
+    );
+}
+
+#[test]
+fn a_response_written_again_after_a_refresh_is_still_spent_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let claude = tmp.path().join("claude");
+    let id = "aaaaaaaa-0000-4000-8000-000000000062";
+    let response = r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0},"content":[]},"cwd":"/synthetic/temp"}"#;
+    let path = write_session(
+        &claude,
+        id,
+        &format!(
+            "{}\n{response}\n",
+            r#"{"type":"user","message":{"content":"A synthetic prompt"},"cwd":"/synthetic/temp"}"#
+        ),
+    );
+    let roots = roots(&claude, tmp.path());
+    let once = Spent {
+        tokens: 1_000_000,
+        cost: Some(Cost::from_micros(4_000_000)),
+    };
+    let listing = list(&roots, &data_dir(tmp.path())).unwrap();
+    assert_eq!(listed(&listing, id).session.spent, once);
+
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut file, format!("{response}\n").as_bytes()).unwrap();
+    let listing = list(&roots, &data_dir(tmp.path())).unwrap();
+    assert_eq!(listed(&listing, id).session.spent, once);
 }

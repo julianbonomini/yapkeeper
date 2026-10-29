@@ -8,7 +8,7 @@ Some sessions are recorded across several files. Codex keeps renames in `session
 
 ## Decision
 
-Adapters keep no state. `Adapter::read(path, from)` turns each complete record from byte `from` onward into provider-neutral facts (an identity, a working directory, activity, a message, a title, a recap, a linked PR, recorded Git) and returns the offset it reached. A fact depends only on its own record and the file's path, so the byte offset is the only checkpoint.
+Adapters keep no state. `Adapter::read(path, from)` turns each complete record from byte `from` onward into provider-neutral facts (an identity, a working directory, activity, a message, a title, a recap, a linked PR, recorded Git, a response's usage) and returns the offset it reached. A fact depends only on its own record and the file's path, so the byte offset is the only checkpoint.
 
 The model (`yapkeeper-model`) owns every fold rule: which title wins, that a file's first identity counts, which time is a session's activity, and how a subagent chain reaches its session. `SourceDigest` carries one file's fold between runs, and `assemble` turns a provider's digests into sessions. `FOLD_VERSION` names the rules.
 

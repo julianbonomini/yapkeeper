@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use yapkeeper::{Listing, RecordedGit, ResumeCommand, Roots, list};
+use yapkeeper::{Listing, RecordedGit, ResumeCommand, Roots, Spent, list};
 
 mod listing;
 
@@ -320,5 +320,36 @@ fn a_subagent_of_a_subagent_belongs_to_the_top_session_and_one_without_a_session
     assert_eq!(
         found_with_tools(&roots, tmp.path(), "subagent"),
         [] as [&str; 0]
+    );
+}
+
+#[test]
+fn a_session_spends_its_latest_running_total_with_no_known_cost() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("codex");
+    let total = |tokens: u64| {
+        format!(
+            r#"{{"timestamp":"2026-10-22T08:00:02Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{tokens},"output_tokens":0,"total_tokens":{tokens}}}}}}}}}"#
+        )
+    };
+    let no_info = r#"{"timestamp":"2026-10-22T08:00:02Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#;
+    write_rollout(
+        &home,
+        &format!(
+            "{META}\n{}\n{}\n{}\n{no_info}\n{}\n",
+            prompt("A synthetic prompt"),
+            total(100),
+            total(100),
+            total(250),
+        ),
+    );
+
+    let listing = list(&roots(&home, tmp.path()), &data_dir(tmp.path())).unwrap();
+    assert_eq!(
+        listed(&listing, META_ID).session.spent,
+        Spent {
+            tokens: 250,
+            cost: None,
+        }
     );
 }

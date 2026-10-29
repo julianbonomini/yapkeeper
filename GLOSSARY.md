@@ -55,6 +55,9 @@ The user's own choices, hidden sessions and settings, in `prefs.sqlite`, kept ap
 **Settings**:
 The preferences set with `Ctrl+S` that change what the palette lists and how it looks: hiding temp sessions, hiding missing folders, listing orphans last, hiding orphans, the accent and the location icons. The command line ignores them.
 
+**Cost**:
+What a session's model responses would cost, its subagents' included: as the provider recorded it, or else from the model's API list price. Unknown for models without a price, such as every Codex model.
+
 **Title**:
 The name shown for a session: the one the user set, else the one the provider generated, else the first prompt the user typed. Injected context never counts as a prompt.
 

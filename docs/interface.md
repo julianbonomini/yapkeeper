@@ -7,9 +7,10 @@ Yapkeeper opens as a full-width command palette: one query line, a result list, 
 The palette fills the terminal inside a single rounded border. From top to bottom:
 
 1. The query line, with the match count on the right (`2 / 783`), after `searching ·` while a search runs long, or `indexing ·` while a background pass runs.
-2. A rule.
-3. Results on the left (48%) and the preview on the right (52%) when the palette is at least 80 columns wide. Below that width the preview is dropped; `Ctrl+O` opens the conversation at any width.
-4. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action. Under the results the hints include `^O read`, `Tab locations` and `^S settings`; while a completion list is open, `Tab insert`.
+2. What the listed sessions add up to: `42 sessions · 6 projects · ≈$318.40 · 41.2M tokens`, following the query and filters. A part with nothing to say is left out, parts are dropped from the right when they don't fit, and the line is blank when nothing is listed. Only Git projects count as projects. The `≈` marks the cost as an estimate (see [Cost](#cost)).
+3. A rule.
+4. Results on the left (48%) and the preview on the right (52%) when the palette is at least 80 columns wide. Below that width the preview is dropped; `Ctrl+O` opens the conversation at any width.
+5. One footer line of key hints for the current context, replaced for three seconds by a confirmation message after an action. Under the results the hints include `^O read`, `Tab locations` and `^S settings`; while a completion list is open, `Tab insert`.
 
 There is no permanent location sidebar. The query line handles locations (see below).
 
@@ -70,7 +71,7 @@ In the location list, a folder that no longer exists cannot be checked for Git, 
 The preview shows, in order:
 
 1. Title: the provider title (Claude Code `custom-title`, then `ai-title`; Codex `thread_name`; Pi `session_info` name), or the first prompt.
-2. Provider, age, message count, subagent count, and linked PR numbers.
+2. Provider, age, message count, subagent count, and linked PR numbers, then a line with the cost and tokens (`≈$14.20 · 2.1M tokens`, or only the tokens when the cost isn't known) when the session recorded any usage.
 3. Location icon and full directory, and the worktree name.
 4. `orphaned` or `unavailable` when the session cannot resume in its recorded directory.
 5. Recap: the latest Claude Code `away_summary`, when present.
@@ -81,6 +82,12 @@ The preview shows, in order:
 `Ctrl+O` opens the full conversation in place of the query line, results and preview, with the session's title and where it ran above it. Every message is shown whole, with the search words highlighted, and each tool call is one line. `↑` `↓` scroll by a line, `PgUp` `PgDn` by a page less one line, and `Home` `End` jump to either end. It opens at the first match. `n` and `N` move to the next and previous match, wrapping past the last and the first, and the title line shows which one (`match 2 / 3`). `Enter` there opens the resume dialog. `Esc` or `←` returns to the palette with the query and selection unchanged.
 
 Recaps cost nothing extra: Claude Code writes `away_summary` records into its session files. On the real histories, 180 of 783 sessions had one and 100 had a `pr-link` record. Codex and Pi sessions have no recap. Writing a summary for every session would need a model call during indexing; that is deferred (see open questions).
+
+## Cost
+
+A session's cost and tokens cover its own responses and its subagents'. Claude Code records only tokens, so its cost is the API list price of each response's model; a subscription costs nothing per token, and the figure says what the same work would cost on the API. Pi records each response's cost, which is taken as is. Codex records tokens only and Yapkeeper knows no OpenAI prices, so Codex sessions show tokens and no cost. Totals add the costs that are known.
+
+Result rows show each session's cost between its location and its age, right-aligned in seven cells and blank when unknown, once the results are at least 44 cells wide; narrower rows keep the room for the title.
 
 ## Defaults and settings
 

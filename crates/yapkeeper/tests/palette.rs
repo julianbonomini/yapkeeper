@@ -519,7 +519,7 @@ fn a_wide_terminal_shows_the_query_line_count_rows_and_footer() {
         "{frame:#?}"
     );
     assert!(
-        frame[2].trim_matches('│').chars().all(|c| c == '─'),
+        frame[3].trim_matches('│').chars().all(|c| c == '─'),
         "{frame:#?}"
     );
     let rows = rows_with(&frame, &TITLES);
@@ -747,9 +747,9 @@ fn sage_draws_the_selection_bar_grey_and_the_prompt_in_the_accent() {
     assert_eq!(buffer[(2, 1)].symbol(), "›");
     assert_eq!(buffer[(2, 1)].fg, Color::Indexed(108));
     for x in 1..30 {
-        assert_eq!(buffer[(x, 3)].bg, Color::Indexed(237), "column {x}");
+        assert_eq!(buffer[(x, 4)].bg, Color::Indexed(237), "column {x}");
     }
-    assert_ne!(buffer[(1, 4)].bg, Color::Indexed(237));
+    assert_ne!(buffer[(1, 5)].bg, Color::Indexed(237));
 }
 
 #[test]
@@ -764,7 +764,7 @@ fn mono_has_no_colour_and_a_reversed_selection() {
     let reversed: Vec<u16> = (0..24)
         .filter(|&y| buffer[(2, y)].modifier.contains(Modifier::REVERSED))
         .collect();
-    assert_eq!(reversed, [3]);
+    assert_eq!(reversed, [4]);
     assert_eq!(selected(&buffer), Some("Tidy"));
 }
 
@@ -831,8 +831,8 @@ fn a_query_that_matches_only_temp_sessions_says_how_to_show_them() {
 
     keys(&mut palette, "zebra");
     let frame = frame(&mut palette, 80, 24);
-    assert_eq!(results(&frame[3]).trim(), "No sessions match.");
-    assert_eq!(results(&frame[4]).trim(), "is:temp shows temp sessions");
+    assert_eq!(results(&frame[4]).trim(), "No sessions match.");
+    assert_eq!(results(&frame[5]).trim(), "is:temp shows temp sessions");
     assert!(frame[1].trim_end_matches('│').trim_end().ends_with("0 / 2"));
 }
 
@@ -1105,7 +1105,7 @@ fn an_empty_index_says_no_sessions_were_found() {
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
 
     let frame = frame(&mut palette, 80, 24);
-    assert_eq!(results(&frame[3]).trim(), "No sessions found.");
+    assert_eq!(results(&frame[4]).trim(), "No sessions found.");
     assert!(frame[1].trim_end_matches('│').trim_end().ends_with("0 / 0"));
 }
 
@@ -1118,8 +1118,8 @@ fn a_query_that_matches_only_hidden_sessions_says_how_to_show_them() {
     assert_eq!(rows_with(&frame(&mut palette, 80, 24), &TITLES).len(), 2);
     keys(&mut palette, "release");
     let frame = frame(&mut palette, 80, 24);
-    assert_eq!(results(&frame[3]).trim(), "No sessions match.");
-    assert_eq!(results(&frame[4]).trim(), "is:hidden shows hidden ones");
+    assert_eq!(results(&frame[4]).trim(), "No sessions match.");
+    assert_eq!(results(&frame[5]).trim(), "is:hidden shows hidden ones");
     keys(&mut palette, " is:hidden");
     let shown = self::frame(&mut palette, 80, 24);
     assert_eq!(rows_with(&shown, &["Release"]).len(), 1, "{shown:#?}");
@@ -1167,14 +1167,14 @@ fn full_session(histories: &Histories) {
 /// inside the border drawn as `│` on every body row, if any.
 fn preview_column(buffer: &Buffer) -> Option<u16> {
     let area = buffer.area;
-    (1..area.width - 1).find(|&x| (3..area.height - 2).all(|y| buffer[(x, y)].symbol() == "│"))
+    (1..area.width - 1).find(|&x| (4..area.height - 2).all(|y| buffer[(x, y)].symbol() == "│"))
 }
 
 /// Each body row of the preview as text, trimmed, inside the border.
 fn preview(buffer: &Buffer) -> Vec<String> {
     let column = preview_column(buffer).expect("a preview");
     let area = buffer.area;
-    (3..area.height - 2)
+    (4..area.height - 2)
         .map(|y| {
             cells(buffer, y, column + 1..area.width - 1)
                 .trim()
@@ -2065,7 +2065,7 @@ fn location_rows_keep_their_kind_words_and_counts_in_narrow_terminals() {
             );
             assert!(!row.detail.ends_with("· …"), "{width}×{height}: {row:?}");
         }
-        for y in 3..3 + rows.len() as u16 {
+        for y in 4..4 + rows.len() as u16 {
             assert_eq!(buffer[(0, y)].symbol(), "│", "{width}×{height}: {frame:#?}");
             assert_eq!(buffer[(width - 1, y)].symbol(), "│", "{frame:#?}");
             let last = buffer[(width - 2, y)].symbol();
@@ -2088,10 +2088,10 @@ fn mono_reverses_only_the_selected_location_row() {
         assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{cell:?}");
     }
     let rows = location_rows(&lines(&buffer)).len() as u16;
-    for y in 3..3 + rows {
+    for y in 4..4 + rows {
         for x in 1..79 {
             let reversed = buffer[(x, y)].modifier.contains(Modifier::REVERSED);
-            assert_eq!(reversed, y == 4, "({x}, {y})");
+            assert_eq!(reversed, y == 5, "({x}, {y})");
         }
     }
 }
@@ -2437,9 +2437,9 @@ fn ctrl_t_searches_tool_calls_too_and_says_so_on_the_query_line() {
     let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
     keys(&mut palette, "nextest");
     let messages_only = frame(&mut palette, 80, 24);
-    assert_eq!(results(&messages_only[3]).trim(), "No sessions match.");
+    assert_eq!(results(&messages_only[4]).trim(), "No sessions match.");
     assert_eq!(
-        results(&messages_only[4]).trim(),
+        results(&messages_only[5]).trim(),
         "^T searches tool calls too"
     );
     assert!(!messages_only[1].contains("+tools"), "{messages_only:#?}");
@@ -2462,7 +2462,7 @@ fn ctrl_t_searches_tool_calls_too_and_says_so_on_the_query_line() {
 
     ctrl(&mut palette, 't');
     let again = frame(&mut palette, 80, 24);
-    assert_eq!(results(&again[3]).trim(), "No sessions match.");
+    assert_eq!(results(&again[4]).trim(), "No sessions match.");
     assert!(again[22].contains("Searching messages only"), "{again:#?}");
 }
 
@@ -2791,7 +2791,7 @@ fn the_accent_cycles_through_every_theme_and_colours_the_palette() {
     change_setting(&mut palette, SETTINGS[4], KeyCode::Right);
     let cyan = draw(&mut palette, 80, 24);
     assert!(
-        cyan[(2, 3)].modifier.contains(Modifier::REVERSED),
+        cyan[(2, 4)].modifier.contains(Modifier::REVERSED),
         "{cyan:?}"
     );
     assert_eq!(selected(&cyan), Some("Tidy"));
@@ -2816,7 +2816,7 @@ fn no_color_overrides_the_chosen_accent_and_says_so() {
     for cell in buffer.content() {
         assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{cell:?}");
     }
-    assert!(buffer[(2, 3)].modifier.contains(Modifier::REVERSED));
+    assert!(buffer[(2, 4)].modifier.contains(Modifier::REVERSED));
     assert_eq!(selected(&buffer), Some("Tidy"));
 
     ctrl(&mut palette, 's');
@@ -2917,7 +2917,7 @@ fn no_icons_leave_no_gap_where_the_icon_was() {
     // The selected session ran in /usr; its preview starts there.
     let buffer = draw(&mut none, 120, 40);
     let column = preview_column(&buffer).unwrap();
-    let dir_line = (3..38)
+    let dir_line = (4..38)
         .find(|&y| cells(&buffer, y, column + 1..119).trim() == "/usr")
         .unwrap_or_else(|| panic!("{:#?}", lines(&buffer)));
     assert_eq!(cells(&buffer, dir_line, column + 1..column + 6), " /usr");
@@ -2956,7 +2956,7 @@ fn assert_changed(palette: &mut Palette) {
     let buffer = draw(palette, 80, 24);
     let rows = lines(&buffer);
     assert!(
-        buffer[(2, 3)].modifier.contains(Modifier::REVERSED),
+        buffer[(2, 4)].modifier.contains(Modifier::REVERSED),
         "{rows:#?}"
     );
     assert!(shows(&rows, "▢ /usr"), "{rows:#?}");
@@ -3686,7 +3686,7 @@ fn an_update_adds_a_session_and_keeps_the_query_and_the_selected_session() {
     finish(&mut stepper);
     let buffer = draw(&mut palette, 80, 24);
     let after = lines(&buffer);
-    assert!(after[3].starts_with("│ Billing ledger"), "{after:#?}");
+    assert!(after[4].starts_with("│ Billing ledger"), "{after:#?}");
     assert_eq!(query_text(&after), "billing", "{after:#?}");
     let selected = selected_row(&buffer).unwrap();
     assert!(selected.starts_with("│ Billing invoice"), "{after:#?}");
@@ -3708,10 +3708,10 @@ fn an_update_adds_a_session_and_keeps_the_query_and_the_selected_session() {
     finish(&mut stepper);
     let buffer = draw(&mut palette, 80, 24);
     let after = lines(&buffer);
-    assert!(after[5].starts_with("│ Billing invoice"), "{after:#?}");
+    assert!(after[6].starts_with("│ Billing invoice"), "{after:#?}");
     assert_eq!(
         selected_row(&buffer).as_ref(),
-        Some(&after[5]),
+        Some(&after[6]),
         "{after:#?}"
     );
 }
@@ -3763,7 +3763,7 @@ fn a_first_launch_shows_each_batch_as_it_is_indexed() {
 
     let first = frame(&mut palette, 80, 24);
     assert_eq!(
-        results(&first[3]).trim(),
+        results(&first[4]).trim(),
         "Indexing histories…",
         "{first:#?}"
     );
@@ -3778,13 +3778,13 @@ fn a_first_launch_shows_each_batch_as_it_is_indexed() {
     let (mut palette, mut stepper) = empty.palette_indexing();
     let first = frame(&mut palette, 80, 24);
     assert_eq!(
-        results(&first[3]).trim(),
+        results(&first[4]).trim(),
         "Indexing histories…",
         "{first:#?}"
     );
     finish(&mut stepper);
     let done = frame(&mut palette, 80, 24);
-    assert_eq!(results(&done[3]).trim(), "No sessions found.", "{done:#?}");
+    assert_eq!(results(&done[4]).trim(), "No sessions found.", "{done:#?}");
 }
 
 #[test]
@@ -4199,7 +4199,7 @@ fn new_results_keep_the_selected_session_when_it_is_still_listed() {
     assert!(searcher.step());
     let buffer = draw(&mut palette, 80, 24);
     let after = lines(&buffer);
-    assert!(after[4].starts_with("│ Draft the changelog"), "{after:#?}");
+    assert!(after[5].starts_with("│ Draft the changelog"), "{after:#?}");
     assert_eq!(rows_with(&after, &["Draft", "Retry", "Tidy"]).len(), 3);
     assert_eq!(selected(&buffer), Some("Retry"), "{after:#?}");
 }
@@ -4432,4 +4432,56 @@ fn a_filter_typed_is_accented_on_the_next_frame_before_its_results() {
         .map(|(at, _)| at >= 5)
         .collect();
     assert_eq!(accented, expected, "{drawn:#?}");
+}
+
+#[test]
+fn the_line_under_the_query_totals_the_rows_and_wide_rows_show_each_cost() {
+    let histories = Histories::new();
+    histories.claude(CLAUDE_RETRY, "/usr", "Retry the billing job");
+    histories.claude_records(
+        CLAUDE_GONE,
+        "/usr",
+        &[
+            json!({ "type": "user", "message": { "content": "Release notes draft" } }),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "model": "claude-opus-5-5",
+                    "usage": { "input_tokens": 1_000_000, "output_tokens": 0 },
+                    "content": [],
+                },
+            }),
+        ],
+    );
+    let mut palette = Palette::new(histories.catalog(), Colour::Accent, Path::new("/"));
+
+    let wide = frame(&mut palette, 120, 40);
+    assert_eq!(
+        wide[2].trim_matches('│').trim(),
+        "2 sessions · ≈$4.00 · 1.0M tokens",
+        "{wide:#?}"
+    );
+    let release = rows_with(&wide, &["Release"]);
+    assert!(results(release[0]).contains(" $4.00 "), "{wide:#?}");
+    let retry = rows_with(&wide, &["Retry"]);
+    assert!(!results(retry[0]).contains('$'), "{wide:#?}");
+
+    // Too narrow for the cost beside the title; the preview still says it.
+    keys(&mut palette, "release");
+    let buffer = draw(&mut palette, 80, 24);
+    let standard = lines(&buffer);
+    assert_eq!(
+        standard[2].trim_matches('│').trim(),
+        "1 session · ≈$4.00 · 1.0M tokens"
+    );
+    assert!(!results(rows_with(&standard, &["Release"])[0]).contains('$'));
+    assert!(
+        preview(&buffer).contains(&"≈$4.00 · 1.0M tokens".to_string()),
+        "{standard:#?}"
+    );
+
+    keys(&mut palette, " nothing-matches");
+    let none = frame(&mut palette, 80, 24);
+    assert_eq!(none[2].trim_matches('│').trim(), "", "{none:#?}");
 }

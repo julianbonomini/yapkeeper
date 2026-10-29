@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use yapkeeper_model::{
     Adapter, Fact, Message, MissingHome, Reading, RecordedGit, ResumeCommand, Role, ThreadKind,
-    TitleKind, jsonl_files, non_empty_text, read_jsonl_from, record_time,
+    TitleKind, Usage, jsonl_files, non_empty_text, read_jsonl_from, record_time,
 };
 
-const PARSER_VERSION: u32 = 2;
+const PARSER_VERSION: u32 = 3;
 
 const SESSION_INDEX: &str = "session_index.jsonl";
 
@@ -140,6 +140,18 @@ fn read_rollout_record(facts: &mut Vec<Fact>, record: &Value) {
             }));
             if let Some(cwd) = payload["cwd"].as_str() {
                 facts.push(Fact::WorkingDir(PathBuf::from(cwd)));
+            }
+        }
+        // A running total of what the session used so far, repeated now and
+        // then without change. Naming every total the same response lets the
+        // latest stand for them all. Yapkeeper knows no OpenAI prices.
+        Some("event_msg") if payload["type"] == "token_count" => {
+            if let Some(tokens) = payload["info"]["total_token_usage"]["total_tokens"].as_u64() {
+                facts.push(Fact::Usage(Usage {
+                    response: Some("total".to_string()),
+                    tokens,
+                    cost: None,
+                }));
             }
         }
         // `event_msg` records echo these messages, so only response items

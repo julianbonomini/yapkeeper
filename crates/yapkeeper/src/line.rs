@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{Availability, Listed, Place, State};
+use crate::{Availability, Cost, Listed, Place, State};
 
 /// Text on one line: control characters such as ESC are removed, then each
 /// whitespace run, newlines included, becomes one space.
@@ -136,6 +136,36 @@ pub fn age(then: SystemTime, now: SystemTime) -> String {
         m if m < 60 * 24 => format!("{}h", m / 60),
         m if m < 60 * 24 * 14 => format!("{}d", m / (60 * 24)),
         m => format!("{}w", m / (60 * 24 * 7)),
+    }
+}
+
+/// `cost` with cents below $1,000 (`$0.41`, `$318.40`), in whole dollars
+/// from there (`$1,284`, `$12,050`): seven cells at most below $100,000.
+pub fn dollars(cost: Cost) -> String {
+    let cents = (cost.micros() + 5_000) / 10_000;
+    if cents < 100_000 {
+        return format!("${}.{:02}", cents / 100, cents % 100);
+    }
+    let whole = ((cents + 50) / 100).to_string();
+    let mut grouped = String::new();
+    for (at, digit) in whole.chars().enumerate() {
+        if at > 0 && (whole.len() - at).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("${grouped}")
+}
+
+/// `count` tokens in the largest unit that keeps the number short: `812`,
+/// `950k`, `41.2M`, `3.1B`.
+pub fn tokens(count: u64) -> String {
+    match count {
+        n if n < 1_000 => n.to_string(),
+        n if n < 1_000_000 => format!("{}k", n / 1_000),
+        // Below this, one decimal never rounds up to `1000.0M`.
+        n if n < 999_950_000 => format!("{:.1}M", n as f64 / 1e6),
+        n => format!("{:.1}B", n as f64 / 1e9),
     }
 }
 

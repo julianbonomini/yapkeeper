@@ -22,7 +22,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{Colour, Confirmation, Palette};
 use crate::line::{
-    age, availability_label, directory, fit, fit_left, one_line, place, without_controls, wrap,
+    age, availability_label, directory, dollars, fit, fit_left, one_line, place, tokens,
+    without_controls, wrap,
 };
 use crate::{
     Accent, Availability, IconSet, Listed, LocationRow, LocationRowKind, Place, Query, Role,
@@ -51,6 +52,13 @@ const SEPARATOR: &str = " · ";
 
 /// Wide enough for every age up to `99w`, so ages line up.
 const AGE_CELLS: usize = 3;
+
+/// Wide enough for every cost `dollars` writes, so costs line up.
+const COST_CELLS: usize = 7;
+
+/// From this many cells, result rows show each session's cost; narrower
+/// rows keep the room for the title, and the preview still shows it.
+const COST_ROW_WIDTH: usize = 44;
 
 /// What a location icon marks: the kind of place a session ran in, or a
 /// place that is missing.
@@ -167,8 +175,10 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
     frame.render_widget(block, area);
     // Reading, a title and where the session ran take the query's place.
     let reading = palette.reading.is_some() && palette.resuming.is_none();
+    // The results' totals sit under the query.
+    let listing = !reading && palette.resuming.is_none() && palette.settings.is_none();
     let [top, rule, body, footer] = Layout::vertical([
-        Constraint::Length(if reading { 2 } else { 1 }),
+        Constraint::Length(if reading || listing { 2 } else { 1 }),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -201,7 +211,9 @@ pub(super) fn render(palette: &mut Palette, frame: &mut Frame) {
         }
         false => body,
     };
-    query_line(palette, &theme, frame, top);
+    let [query, totals] = Layout::vertical([Constraint::Length(1); 2]).areas(top);
+    query_line(palette, &theme, frame, query);
+    totals_line(palette, &theme, frame, totals);
     match palette.completions.is_empty() {
         true => rows(palette, &theme, frame, results),
         false => completions(palette, &theme, frame, results),
@@ -278,6 +290,49 @@ fn query_line(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rec
     let choosing_location = palette.completions.iter().any(|c| c.location.is_some());
     if !choosing_location {
         frame.set_cursor_position(Position::new(cursor_x, area.y));
+    }
+}
+
+/// What the listed sessions add up to: how many, the projects they ran in,
+/// what they cost and the tokens they used, each left out when there is
+/// none and dropped from the right when it doesn't fit. Nothing when no
+/// session is listed. Most costs are priced from tokens, so the total is
+/// marked as an estimate.
+fn totals_line(palette: &Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
+    let totals = &palette.totals;
+    if totals.sessions == 0 {
+        return;
+    }
+    let mut parts = vec![counted(totals.sessions, "session")];
+    if totals.projects > 0 {
+        parts.push(counted(totals.projects, "project"));
+    }
+    if let Some(cost) = totals.spent.cost {
+        parts.push(format!("≈{}", dollars(cost)));
+    }
+    if totals.spent.tokens > 0 {
+        parts.push(format!("{} tokens", tokens(totals.spent.tokens)));
+    }
+    let cells = usize::from(area.width).saturating_sub(1);
+    let mut text = String::new();
+    for part in parts {
+        let longer = match text.is_empty() {
+            true => part,
+            false => format!("{text}{SEPARATOR}{part}"),
+        };
+        if longer.width() > cells {
+            break;
+        }
+        text = longer;
+    }
+    frame.render_widget(Paragraph::new(format!(" {text}")).style(theme.dim), area);
+}
+
+/// `1 message`, `2 messages`.
+fn counted(count: usize, noun: &str) -> String {
+    match count {
+        1 => format!("1 {noun}"),
+        n => format!("{n} {noun}s"),
     }
 }
 
@@ -497,8 +552,9 @@ fn rows(palette: &mut Palette, theme: &Theme, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, area, &mut palette.selection);
 }
 
-/// ` title label  icon location  age`, exactly `width` cells wide when it
-/// fits: the location keeps its column and the title gives way.
+/// ` title label  icon location  cost  age`, exactly `width` cells wide when
+/// it fits: the location keeps its column and the title gives way. The cost
+/// shows from `COST_ROW_WIDTH` cells, blank when it isn't known.
 fn row<'a>(
     listed: &Listed,
     home: Option<&Path>,
@@ -513,8 +569,16 @@ fn row<'a>(
         true => String::new(),
         false => format!(" {label}"),
     };
+    let cost = match width >= COST_ROW_WIDTH {
+        true => {
+            let cost = listed.session.spent.cost.map(dollars).unwrap_or_default();
+            format!(" {cost:>COST_CELLS$}")
+        }
+        false => String::new(),
+    };
     // A leading space, then a space before the location and before the age.
-    let title_cells = width.saturating_sub(1 + label.width() + 1 + location_cells + 1 + AGE_CELLS);
+    let title_cells =
+        width.saturating_sub(1 + label.width() + 1 + location_cells + cost.width() + 1 + AGE_CELLS);
     let title = fit(&one_line(&listed.session.title), title_cells);
     let title_gap = title_cells.saturating_sub(title.width());
     let (icon, place_text) = location(listed, home, icons, location_cells);
@@ -526,7 +590,9 @@ fn row<'a>(
         Span::styled(label, theme.label),
         Span::raw(" ".repeat(title_gap + 1)),
         Span::styled(format!("{icon}{place_text}"), theme.dim),
-        Span::raw(" ".repeat(location_gap + 1)),
+        Span::raw(" ".repeat(location_gap)),
+        Span::styled(cost, theme.dim),
+        Span::raw(" "),
         Span::styled(format!("{age:>AGE_CELLS$}"), theme.dim),
     ])
 }

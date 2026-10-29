@@ -15,6 +15,7 @@ mod terminal;
 mod text_field;
 mod view;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -30,8 +31,9 @@ use self::text_field::{Change, TextField};
 use crate::Snapshot;
 use crate::indexer::Indexing;
 use crate::{
-    Catalog, Completion, DataError, Edited, Found, Indexer, LeftOut, Listed, Message, Query,
-    ResumeCommand, SessionKey, Settings, line, location_token, place_location, start_location,
+    Catalog, Completion, DataError, Edited, Found, Indexer, LeftOut, Listed, Message, Place, Query,
+    ResumeCommand, SessionKey, Settings, Spent, line, location_token, place_location,
+    start_location,
 };
 
 pub use terminal::{Events, Restore, event_loop, run};
@@ -55,6 +57,8 @@ pub struct Palette {
     parsed: Query,
     /// What the query found, in `search`'s order.
     found: Vec<Rc<Listed>>,
+    /// What `found` adds up to, for the line under the query.
+    totals: Totals,
     /// How the next results place the selection.
     keep: Keep,
     left_out: LeftOut,
@@ -92,6 +96,34 @@ pub struct Palette {
     /// Whether the indexer published while the conversation or the resume
     /// dialog was open, so the results behind it are yet to be searched again.
     stale: bool,
+}
+
+/// What a list of sessions adds up to.
+#[derive(Default)]
+struct Totals {
+    sessions: usize,
+    /// Projects the sessions ran in; plain folders aren't projects.
+    projects: usize,
+    spent: Spent,
+}
+
+impl Totals {
+    fn of(found: &[Rc<Listed>]) -> Totals {
+        let projects: HashSet<&str> = found
+            .iter()
+            .filter_map(|listed| match &listed.location.place {
+                Place::MainCheckout { project } | Place::Worktree { project, .. } => {
+                    Some(project.as_str())
+                }
+                Place::Folder => None,
+            })
+            .collect();
+        Totals {
+            sessions: found.len(),
+            projects: projects.len(),
+            spent: found.iter().map(|listed| listed.session.spent).sum(),
+        }
+    }
 }
 
 /// How long a confirmation stays in the footer.
@@ -177,6 +209,7 @@ impl Palette {
             tools: false,
             parsed: Query::default(),
             found: Vec::new(),
+            totals: Totals::default(),
             keep: Keep::FirstRow,
             left_out: LeftOut::default(),
             selection: ListState::default(),
@@ -463,6 +496,7 @@ impl Palette {
         let offset = self.selection.offset();
         self.parsed = found.query;
         self.found = found.sessions;
+        self.totals = Totals::of(&self.found);
         self.left_out = found.left_out;
         self.error = None;
         let last = self.found.len().checked_sub(1);

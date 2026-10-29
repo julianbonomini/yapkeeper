@@ -26,14 +26,14 @@ use rusqlite::{
     params,
 };
 use yapkeeper_model::{
-    Adapter, Assembled, FOLD_VERSION, Fact, Message, RecordedGit, ResumeCommand, Role, Session,
-    SourceDigest, assemble,
+    Adapter, Assembled, Cost, FOLD_VERSION, Fact, Message, RecordedGit, ResumeCommand, Role,
+    Session, SourceDigest, Spent, assemble,
 };
 
 use crate::query::{self, Query, Word};
 use crate::{BUSY_TIMEOUT, Cause, DataError, DataFile, SessionKey};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 // Source paths come from the filesystem, so they are stored as raw bytes.
 // Session paths and text come from JSON, so they are always UTF-8.
@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     recap_fold TEXT,
     linked_prs TEXT NOT NULL,
     subagent_count INTEGER NOT NULL,
+    tokens INTEGER NOT NULL,
+    cost_micros INTEGER,
     resume_program TEXT NOT NULL,
     resume_args TEXT NOT NULL,
     resume_cwd TEXT NOT NULL
@@ -817,8 +819,10 @@ fn store_sessions(transaction: &Transaction, adapter: &dyn Adapter) -> Result<()
     let mut insert = transaction.prepare(
         "INSERT INTO sessions (provider, id, title, title_fold, working_dir,
             other_working_dirs, last_active_ns, branch, repository_url, recap, recap_fold,
-            linked_prs, subagent_count, resume_program, resume_args, resume_cwd)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            linked_prs, subagent_count, tokens, cost_micros, resume_program, resume_args,
+            resume_cwd)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+            ?18)",
     )?;
     let mut searchable = transaction
         .prepare("INSERT INTO session_text (rowid, title, recap) VALUES (?1, ?2, ?3)")?;
@@ -844,6 +848,11 @@ fn store_sessions(transaction: &Transaction, adapter: &dyn Adapter) -> Result<()
             recap_fold,
             serde_json::to_string(&session.linked_prs)?,
             session.subagent_count as i64,
+            i64::try_from(session.spent.tokens).unwrap_or(i64::MAX),
+            session
+                .spent
+                .cost
+                .map(|cost| i64::try_from(cost.micros()).unwrap_or(i64::MAX)),
             session.resume.program,
             serde_json::to_string(&session.resume.args)?,
             session.resume.cwd.to_string_lossy(),
@@ -1021,8 +1030,8 @@ fn stored_sessions(
 ) -> Result<Vec<Session>, Cause> {
     let mut statement = transaction.prepare(
         "SELECT id, title, working_dir, other_working_dirs, last_active_ns, branch,
-            repository_url, recap, linked_prs, subagent_count, resume_program, resume_args,
-            resume_cwd
+            repository_url, recap, linked_prs, subagent_count, tokens, cost_micros,
+            resume_program, resume_args, resume_cwd
         FROM sessions WHERE provider = ?1",
     )?;
     let mut rows = statement.query([provider])?;
@@ -1043,10 +1052,16 @@ fn stored_sessions(
             recap: row.get(7)?,
             linked_prs: serde_json::from_str(&row.get::<_, String>(8)?)?,
             subagent_count: row.get::<_, i64>(9)? as usize,
+            spent: Spent {
+                tokens: row.get::<_, i64>(10)? as u64,
+                cost: row
+                    .get::<_, Option<i64>>(11)?
+                    .map(|micros| Cost::from_micros(micros as u64)),
+            },
             resume: ResumeCommand {
-                program: row.get(10)?,
-                args: serde_json::from_str(&row.get::<_, String>(11)?)?,
-                cwd: PathBuf::from(row.get::<_, String>(12)?),
+                program: row.get(12)?,
+                args: serde_json::from_str(&row.get::<_, String>(13)?)?,
+                cwd: PathBuf::from(row.get::<_, String>(14)?),
             },
         });
     }

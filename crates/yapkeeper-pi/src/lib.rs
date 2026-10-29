@@ -6,14 +6,15 @@
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::Value;
 use yapkeeper_model::{
-    Adapter, Fact, Message, MissingHome, Reading, ResumeCommand, Role, ThreadKind, TitleKind,
-    jsonl_files, non_empty_text, read_jsonl_from, record_time,
+    Adapter, Cost, Fact, Message, MissingHome, Reading, ResumeCommand, Role, ThreadKind, TitleKind,
+    Usage, jsonl_files, non_empty_text, read_jsonl_from, record_time,
 };
 
-const PARSER_VERSION: u32 = 2;
+const PARSER_VERSION: u32 = 3;
 
 /// Pi's sessions under one session directory.
 pub struct Pi {
@@ -79,10 +80,20 @@ impl Adapter for Pi {
                     .map(|(_timestamp, id)| id.to_string()),
             },
         };
+        // A fork begins with entries copied from its session, whose
+        // responses the session already counts. They were written before
+        // the fork started, which its file name records.
+        let started = is_fork(below_root).then(|| file_time(source)).flatten();
         let mut facts = Vec::new();
         let mut malformed_lines = 0;
         let offset = read_jsonl_from(source, from, &mut malformed_lines, |record| {
             read_record(&mut facts, &record, &thread);
+            let copied = started.is_some_and(|started| {
+                record_time(&record).is_none_or(|written| written < started)
+            });
+            if record["type"] == "message" && !copied {
+                facts.extend(usage(&record["message"]));
+            }
         });
         Reading {
             facts,
@@ -183,19 +194,53 @@ fn read_message(facts: &mut Vec<Fact>, message: &Value) {
     }
 }
 
+/// What the response an `assistant` message holds used, as Pi recorded it
+/// with its cost; `None` for any other message.
+fn usage(message: &Value) -> Option<Fact> {
+    if message["role"] != "assistant" {
+        return None;
+    }
+    let usage = &message["usage"];
+    let tokens = usage["totalTokens"].as_u64()?;
+    Some(Fact::Usage(Usage {
+        response: None,
+        tokens,
+        cost: usage["cost"]["total"].as_f64().map(Cost::from_dollars),
+    }))
+}
+
+/// When the file named `<timestamp>_<id>.jsonl`, with a timestamp such as
+/// `2026-10-21T10-00-00-000Z`, was started.
+fn file_time(file: &Path) -> Option<SystemTime> {
+    let (stamp, _id) = file.file_name()?.to_str()?.split_once('_')?;
+    let (date, time) = stamp.split_once('T')?;
+    let mut parts = time.trim_end_matches('Z').split('-');
+    let (hour, minute, second, millis) =
+        (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let text = format!("{date}T{hour}:{minute}:{second}.{millis}Z");
+    text.parse::<jiff::Timestamp>().ok().map(SystemTime::from)
+}
+
 /// The folder of the session whose subagent `file` records: a fork sits at
 /// `<folder>/forks/*.jsonl` and a run at `<folder>/<run-id>/run-<n>/session.jsonl`.
 /// `None` for any other file, such as a session file.
 fn session_folder_of(file: &Path) -> Option<&Path> {
     let dir = file.parent()?;
     let dir_name = dir.file_name()?.to_str()?;
-    if dir_name == "forks" {
+    if is_fork(file) {
         dir.parent()
     } else if dir_name.starts_with("run-") && file.file_name()? == "session.jsonl" {
         dir.parent()?.parent()
     } else {
         None
     }
+}
+
+/// Whether `file` sits in a session folder's `forks` folder.
+fn is_fork(file: &Path) -> bool {
+    file.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == "forks")
 }
 
 /// The text of `content`, which Pi records either as a string or as blocks,
